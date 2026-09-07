@@ -19,7 +19,7 @@ Add the gateway as the **only** Tally-related MCP server. Do not also configure
       "args": ["/absolute/path/to/tally-agent/dist/index.js"],
       "env": {
         "TALLY_MCP_COMMAND": "node",
-        "TALLY_MCP_ARGS": "/absolute/path/to/tally_prime_mcp_server/dist/index.js",
+        "TALLY_MCP_ARGS": "[\"/absolute/path/to/tally_prime_mcp_server/dist/index.js\"]",
         "TALLY_AGENT_REPORT_DIR": "/absolute/path/outside/this/project/tally-reports",
         "TALLY_DEFAULT_COMPANY": "Your Company Name"
       }
@@ -27,6 +27,12 @@ Add the gateway as the **only** Tally-related MCP server. Do not also configure
   }
 }
 ```
+
+`TALLY_MCP_ARGS` is a JSON array of strings (shown above), used verbatim — this is the
+documented default. **If any path on your machine contains a space, this form is
+required**: plain whitespace-splitting (still accepted for a single-token value with
+no spaces) would cut that path into two bogus arguments and the downstream server
+would fail to start with a confusing error.
 
 **The report directory must sit outside this project**, and the harness must be
 denied read access to it. In `.claude/settings.json`:

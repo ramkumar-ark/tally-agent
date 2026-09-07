@@ -123,7 +123,15 @@ export async function connectDownstream(cfg: GatewayConfig): Promise<Downstream>
     env,
   });
   const client = new Client({ name: "tally-agent", version: "0.1.0" }, { capabilities: {} });
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (e: unknown) {
+    const cmdLine = [cfg.downstreamCommand, ...cfg.downstreamArgs].join(" ");
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Failed to start the downstream Tally MCP server. Command tried: ${cmdLine} — ${reason}`,
+    );
+  }
 
   const call: RawCaller = async (tool, args) => {
     const res = (await client.callTool({ name: tool, arguments: args })) as {

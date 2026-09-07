@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
+import { connectDownstream } from "../src/downstream.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 
 describe("loadConfig", () => {
@@ -27,6 +28,57 @@ describe("loadConfig", () => {
     expect(cfg.reportDir).toBe("/tmp/out");
     expect(cfg.defaultCompany).toBe("Demo Traders Pvt Ltd");
     expect(cfg.dumpVault).toBe(false);
+  });
+
+  it("keeps a JSON-array TALLY_MCP_ARGS value verbatim, so a path with a space survives as ONE argument", () => {
+    const cfg = loadConfig({
+      TALLY_MCP_COMMAND: "node",
+      TALLY_MCP_ARGS: '["F:/Software Projects/tally_prime_mcp_server/dist/index.js"]',
+      TALLY_AGENT_REPORT_DIR: "/tmp/out",
+    });
+    expect(cfg.downstreamArgs).toEqual([
+      "F:/Software Projects/tally_prime_mcp_server/dist/index.js",
+    ]);
+  });
+
+  it("still splits a plain single-token TALLY_MCP_ARGS value on whitespace", () => {
+    const cfg = loadConfig({
+      TALLY_MCP_COMMAND: "node",
+      TALLY_MCP_ARGS: "dist/index.js --flag",
+      TALLY_AGENT_REPORT_DIR: "/tmp/out",
+    });
+    expect(cfg.downstreamArgs).toEqual(["dist/index.js", "--flag"]);
+  });
+
+  it("falls back to whitespace splitting on malformed JSON instead of throwing", () => {
+    expect(() =>
+      loadConfig({
+        TALLY_MCP_COMMAND: "node",
+        TALLY_MCP_ARGS: "[oops this isnt json",
+        TALLY_AGENT_REPORT_DIR: "/tmp/out",
+      }),
+    ).not.toThrow();
+    const cfg = loadConfig({
+      TALLY_MCP_COMMAND: "node",
+      TALLY_MCP_ARGS: "[oops this isnt json",
+      TALLY_AGENT_REPORT_DIR: "/tmp/out",
+    });
+    expect(cfg.downstreamArgs).toEqual(["[oops", "this", "isnt", "json"]);
+  });
+});
+
+describe("connectDownstream error surfacing", () => {
+  it("names the resolved command and argument list when the downstream child fails before the handshake", async () => {
+    await expect(
+      connectDownstream({
+        downstreamCommand: "node",
+        downstreamArgs: ["/definitely/does/not/exist/index.js", "--flag"],
+        reportDir: "/tmp/out",
+        dumpVault: false,
+      }),
+    ).rejects.toThrow(
+      /node.*\/definitely\/does\/not\/exist\/index\.js.*--flag/s,
+    );
   });
 });
 
