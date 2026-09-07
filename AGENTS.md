@@ -21,9 +21,29 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `demaskText` (the alias text in a masked finding/report never matches),
   which is exactly the de-masking path the trial balance report depends on.
 - The masking group-name allowlist (`CLEAR_ROOTS`/`PRIMARY_GROUPS` in
-  `src/classify.ts`) is asserted spelling, not yet verified against a live
-  Tally company — see the design doc's "Verification against a live Tally"
-  section. Do not trust it silently correct until that step has run.
+  `src/classify.ts`) was verified against one live company, SJ Infra
+  (FY 25-26), on 2026-09-08 — 63 groups read from `tally_get_groups`,
+  corrected in commit `e883445`. What that verification found:
+  - Tally spells it `"Branch / Divisions"`, with spaces around the slash.
+  - A top-level group's `parent` field is not empty — it is a U+0004
+    control character followed by `" Primary"` (Tally's internal root-of-
+    primaries node). The ancestry walk treats that value as a root
+    terminator exactly like an empty parent.
+  - `Bank OD A/c`, `Secured Loans` and `Unsecured Loans` sit under the
+    primary group `Loans (Liability)`, not at top level.
+  - A real company can park operational sub-groups directly under Sundry
+    Creditors (e.g. `SALARY`, `Wages`, `SITE EXPENSES`, `SUB CONTRACTORS`);
+    these mask correctly by ancestry with no special-casing — this is
+    exactly why the policy is default-mask rather than an enumerated
+    mask-list.
+  - This was verified against ONE company. A different company can still
+    carry group names neither verification has seen; default-mask plus
+    `config/overrides.json` is the safety net for that, not a guarantee
+    the allowlist itself is complete.
+- `TALLY_MCP_ARGS` must be a JSON array of strings whenever any path in it
+  contains a space (every path does on the machine this was verified on) —
+  see `src/config.ts`'s `parseDownstreamArgs`. A plain whitespace-separated
+  value still works only when no argument contains a space.
 
 ## Maintaining this file
 
