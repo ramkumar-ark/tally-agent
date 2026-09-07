@@ -18,6 +18,7 @@ export interface ReviewResult {
 export interface Session {
   review(company: string | undefined, asOnDate: string): Promise<ReviewResult>;
   ledgerActivity(findingId: string, fromDate: string, toDate: string): Promise<unknown[]>;
+  listCompanies(): Promise<string[]>;
   vault: Vault;
 }
 
@@ -79,5 +80,5 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
     return d.ledgerVouchers(lastCompany, real, fromDate, toDate);
   }
 
-  return { review, ledgerActivity, vault };
+  return { review, ledgerActivity, listCompanies: () => d.listCompanies(), vault };
 }
