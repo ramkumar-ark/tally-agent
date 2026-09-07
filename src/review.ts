@@ -1,9 +1,38 @@
-import { buildClassifier, type Overrides } from "./classify.js";
+import { buildClassifier, type Classifier, type Overrides } from "./classify.js";
 import { runChecks } from "./checks/index.js";
 import type { Downstream } from "./downstream.js";
-import { maskFinding } from "./mask.js";
+import { maskFinding, maskLedgerName, scrubDigits } from "./mask.js";
 import { createVault, type Vault } from "./vault.js";
 import { TOTALS_TOLERANCE, type Finding, type Severity } from "./types.js";
+
+/**
+ * Ledger-bearing fields in a downstream voucher row. The real
+ * tally_prime_mcp_server report envelope carries the counterparty under
+ * partyLedgerName and counterLedgerName, and the queried ledger itself under
+ * matchedLedgerName — not the "counterparty"/"ledgerName"/"partyName"/"party"
+ * fields the plan draft assumed. See src/downstream.ts.
+ */
+const NAME_FIELDS = ["partyLedgerName", "counterLedgerName", "matchedLedgerName"] as const;
+
+function maskVoucherRow(
+  row: unknown,
+  classifier: Classifier,
+  vault: Vault,
+  groupOf: Map<string, string>,
+): unknown {
+  if (typeof row !== "object" || row === null) return row;
+  const out: Record<string, unknown> = { ...(row as Record<string, unknown>) };
+  for (const field of NAME_FIELDS) {
+    const v = out[field];
+    if (typeof v !== "string" || !v) continue;
+    const group = groupOf.get(v.trim().toLowerCase()) ?? "";
+    out[field] = maskLedgerName(v, group, classifier, vault);
+  }
+  for (const [k, v] of Object.entries(out)) {
+    if (typeof v === "string") out[k] = scrubDigits(v as string);
+  }
+  return out;
+}
 
 export interface ReviewResult {
   asOnDate: string;
@@ -26,6 +55,8 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
   const vault = createVault();
   /** finding id -> real ledger name, for drill-down without the model holding it. */
   const realLedgerByFinding = new Map<string, string>();
+  const groupOfLedger = new Map<string, string>();
+  let classifier: Classifier | undefined;
   let lastCompany: string | undefined;
 
   async function review(
@@ -39,7 +70,10 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
       d.ledgers(company),
     ]);
 
-    const classifier = buildClassifier(groups, overrides);
+    const currentClassifier = buildClassifier(groups, overrides);
+    classifier = currentClassifier;
+    for (const l of ledgers) groupOfLedger.set(l.name.trim().toLowerCase(), l.parent);
+    for (const r of tb.rows) groupOfLedger.set(r.name.trim().toLowerCase(), r.parent);
 
     const raw = runChecks({
       asOnDate,
@@ -47,13 +81,13 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
       ledgers,
       totalDebit: tb.totalDebit,
       totalCredit: tb.totalCredit,
-      roleOf: (g) => classifier.role(g),
-      isPrimaryGroup: (g) => classifier.isPrimaryGroup(g),
+      roleOf: (g) => currentClassifier.role(g),
+      isPrimaryGroup: (g) => currentClassifier.isPrimaryGroup(g),
     });
 
     const findings = raw.map((f) => {
       if (f.ledger) realLedgerByFinding.set(f.id, f.ledger);
-      return maskFinding(f, classifier, vault);
+      return maskFinding(f, currentClassifier, vault);
     });
 
     const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
@@ -77,7 +111,9 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
   ): Promise<unknown[]> {
     const real = realLedgerByFinding.get(findingId);
     if (!real) throw new Error(`unknown finding id: ${findingId}`);
-    return d.ledgerVouchers(lastCompany, real, fromDate, toDate);
+    if (!classifier) throw new Error("run tb_review first: the group tree is not loaded");
+    const rows = await d.ledgerVouchers(lastCompany, real, fromDate, toDate);
+    return rows.map((row) => maskVoucherRow(row, classifier!, vault, groupOfLedger));
   }
 
   return { review, ledgerActivity, listCompanies: () => d.listCompanies(), vault };
