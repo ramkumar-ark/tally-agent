@@ -16,7 +16,7 @@ export const EMPTY_OVERRIDES: Overrides = {
 
 /** Tally's predefined primary groups. */
 export const PRIMARY_GROUPS = [
-  "Branch/Divisions",
+  "Branch / Divisions",
   "Capital Account",
   "Current Assets",
   "Current Liabilities",
@@ -34,8 +34,23 @@ export const PRIMARY_GROUPS = [
 ] as const;
 
 /**
+ * Tally's internal "root of primaries" node: the PARENT field on a real
+ * primary group (e.g. Current Liabilities) is not empty, it is this literal
+ * control character followed by " Primary" — verified against a live
+ * company. Treated as a root terminator exactly like an empty parent, so a
+ * primary group's ancestry does not grow a phantom trailing node.
+ */
+const ROOT_OF_PRIMARIES = " Primary";
+
+/**
  * Groups whose descendants are left unmasked. Everything else masks,
  * including anything not listed here at all. See design doc section 4.2.
+ *
+ * Real-data note: a live company was seen parking operational sub-groups
+ * (SALARY, Wages, SITE EXPENSES, MATERIAL PURCHASES, SUB CONTRACTORS, ...)
+ * directly under Sundry Creditors. None of those names are in this list, so
+ * they mask correctly by ancestry with no special-casing needed — exactly
+ * the case default-mask exists for.
  */
 export const CLEAR_ROOTS = [
   "Sales Accounts",
@@ -88,7 +103,9 @@ export function buildClassifier(
   overrides: Overrides = EMPTY_OVERRIDES,
 ): Classifier {
   const parentOf = new Map<string, string>();
-  for (const g of groups) parentOf.set(norm(g.name), g.parent);
+  for (const g of groups) {
+    parentOf.set(norm(g.name), g.parent === ROOT_OF_PRIMARIES ? "" : g.parent);
+  }
 
   const primary = new Set(PRIMARY_GROUPS.map(norm));
   const clearRoots = new Set(CLEAR_ROOTS.map(norm));

@@ -12,7 +12,7 @@ const groups: GroupNode[] = [
   { name: "Sundry Creditors", parent: "Current Liabilities" },
   { name: "Bank Accounts", parent: "Current Assets" },
   { name: "Cash-in-Hand", parent: "Current Assets" },
-  { name: "Unsecured Loans", parent: "Current Liabilities" },
+  { name: "Unsecured Loans", parent: "Loans (Liability)" },
   // user groups
   { name: "Freight Outward", parent: "Indirect Expenses" },
   { name: "Loans - Directors", parent: "Unsecured Loans" },
@@ -25,7 +25,7 @@ describe("ancestry", () => {
     expect(c.ancestry("Loans - Directors")).toEqual([
       "Loans - Directors",
       "Unsecured Loans",
-      "Current Liabilities",
+      "Loans (Liability)",
     ]);
   });
 
@@ -36,6 +36,20 @@ describe("ancestry", () => {
     ];
     const c = buildClassifier(cyclic);
     expect(c.ancestry("A")).toEqual(["A", "B"]);
+  });
+
+  it("terminates at Tally's root-of-primaries marker instead of walking into a phantom node", () => {
+    // Verified against a live company: a primary group's PARENT field is not
+    // empty — it is a literal control character U+0004 followed by " Primary"
+    // (Tally's internal "root of primaries" node), not a real group.
+    const withRootMarker: GroupNode[] = [
+      { name: "Current Liabilities", parent: " Primary" },
+      { name: "Sundry Creditors", parent: "Current Liabilities" },
+    ];
+    const c = buildClassifier(withRootMarker);
+    expect(c.ancestry("Sundry Creditors")).toEqual(["Sundry Creditors", "Current Liabilities"]);
+    expect(c.isPrimaryGroup("Current Liabilities")).toBe(true);
+    expect(c.maskPolicy("Sundry Creditors")).toBe("mask");
   });
 });
 
@@ -108,5 +122,9 @@ describe("isPrimaryGroup", () => {
 
   it("is false for a sub-group", () => {
     expect(buildClassifier(groups).isPrimaryGroup("Sundry Debtors")).toBe(false);
+  });
+
+  it("matches Tally's real spelling of Branch / Divisions (spaces around the slash)", () => {
+    expect(buildClassifier(groups).isPrimaryGroup("Branch / Divisions")).toBe(true);
   });
 });
