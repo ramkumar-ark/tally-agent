@@ -1,8 +1,5 @@
-__pycache__/
-.venv/
-.env
-*.pyc
+node_modules/
 dist/
-.eggs/
-*.egg-info/
+*.tsbuildinfo
+.env
 reports/out/
