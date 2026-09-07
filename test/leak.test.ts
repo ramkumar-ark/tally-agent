@@ -32,15 +32,30 @@ describe("no secret leaves the gateway", () => {
     outputs.push(await tools.get("tb_list_companies")!({}));
 
     const review = JSON.parse(outputs[0]);
+    const wrongSide = review.findings.find((f: any) => f.check === "wrong_side_balance");
     for (const f of review.findings) {
       if (!f.ledger) continue;
-      outputs.push(
-        await tools.get("tb_ledger_activity")!({
-          findingId: f.id,
-          fromDate: "20250401",
-          toDate: "20260331",
-        }),
-      );
+      const out = await tools.get("tb_ledger_activity")!({
+        findingId: f.id,
+        fromDate: "20250401",
+        toDate: "20260331",
+      });
+      outputs.push(out);
+
+      // The fixture voucher for the creditor finding hands the same real
+      // party back under three fields, one with different internal
+      // whitespace (as a live company was seen doing). All three — plus the
+      // fields the gateway does not name-mask directly — must resolve to the
+      // exact same pseudonym as the finding itself, or the party fragments
+      // across the report.
+      if (f.id === wrongSide?.id) {
+        const rows = JSON.parse(out);
+        for (const row of rows) {
+          for (const field of ["partyLedgerName", "counterLedgerName", "matchedLedgerName"]) {
+            if (field in row) expect(row[field]).toBe(f.ledger);
+          }
+        }
+      }
     }
 
     outputs.push(

@@ -35,4 +35,17 @@ describe("vault", () => {
   it("returns undefined for an alias it never issued", () => {
     expect(createVault().resolve("Creditor 99")).toBeUndefined();
   });
+
+  it("collapses embedded whitespace so CRLF and double-space variants of the same name share one pseudonym", () => {
+    // A live company returned the same ledger with different internal
+    // whitespace from different downstream tools (a canonical name with an
+    // embedded CRLF). trim()+toLowerCase() alone would fragment this party
+    // into multiple pseudonyms.
+    const v = createVault();
+    const a = v.pseudonym("Acme Traders", "creditor");
+    const b = v.pseudonym("Acme\r\nTraders", "creditor");
+    const c = v.pseudonym("Acme  Traders", "creditor");
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+  });
 });

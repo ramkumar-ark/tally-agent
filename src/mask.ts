@@ -45,3 +45,37 @@ export function demaskText(text: string, v: Vault): string {
   }
   return out;
 }
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Case-insensitive, whitespace-variant-tolerant matcher for one real name:
+ * any run of whitespace in the name matches any run of whitespace in the
+ * target text, so "Acme Traders" also matches "Acme\r\nTraders" or
+ * "Acme  Traders".
+ */
+function namePattern(real: string): RegExp {
+  const collapsed = real.trim().replace(/\s+/g, " ");
+  const escaped = escapeRegExp(collapsed).replace(/ /g, "\\s+");
+  return new RegExp(escaped, "gi");
+}
+
+/**
+ * Replaces any occurrence of an already-vaulted real name inside free text
+ * (narration, reference, and similar fields the gateway does not otherwise
+ * inspect field-by-field) with its pseudonym. Longest real name first, so a
+ * shorter party's name is not matched as a substring of a longer one. Only
+ * catches names the vault already knows — see the design doc's stated
+ * limitation on detecting a name never otherwise masked.
+ */
+export function maskKnownNames(text: string, v: Vault): string {
+  const entries = v.entries().sort((a, b) => b.real.length - a.real.length);
+  let out = text;
+  for (const { real, alias } of entries) {
+    if (!real.trim()) continue;
+    out = out.replace(namePattern(real), alias);
+  }
+  return out;
+}

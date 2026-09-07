@@ -80,6 +80,18 @@ describe("maskPolicy", () => {
 });
 
 describe("overrides", () => {
+  it("matches a ledger override even when the real name carries embedded whitespace variants", () => {
+    // Same real-world issue as the vault: Tally can hand back a ledger name
+    // with different internal whitespace than what the override file used.
+    const c = buildClassifier(groups, {
+      forceMaskLedgers: [],
+      forceClearLedgers: ["Acme Traders"],
+      forceMaskGroups: [],
+      forceClearGroups: [],
+    });
+    expect(c.ledgerPolicy("Acme\r\nTraders", "Sundry Creditors")).toBe("clear");
+  });
+
   it("force-clear beats the group rule", () => {
     const c = buildClassifier(groups, {
       forceMaskLedgers: [],

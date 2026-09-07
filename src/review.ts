@@ -1,7 +1,8 @@
 import { buildClassifier, type Classifier, type Overrides } from "./classify.js";
 import { runChecks } from "./checks/index.js";
 import type { Downstream } from "./downstream.js";
-import { maskFinding, maskLedgerName, scrubDigits } from "./mask.js";
+import { canonicalKey } from "./key.js";
+import { maskFinding, maskKnownNames, maskLedgerName, scrubDigits } from "./mask.js";
 import { createVault, type Vault } from "./vault.js";
 import { TOTALS_TOLERANCE, type Finding, type Severity } from "./types.js";
 
@@ -25,8 +26,18 @@ function maskVoucherRow(
   for (const field of NAME_FIELDS) {
     const v = out[field];
     if (typeof v !== "string" || !v) continue;
-    const group = groupOf.get(v.trim().toLowerCase()) ?? "";
+    const group = groupOf.get(canonicalKey(v)) ?? "";
     out[field] = maskLedgerName(v, group, classifier, vault);
+  }
+  // NAME_FIELDS is not an allowlist of every field that can carry a real
+  // name: narration, reference and similar free-text fields can too. Sweep
+  // every remaining string value for any name the vault already knows (from
+  // the fields above, or from this session's findings) and substitute its
+  // pseudonym, canonical-key-aware so a whitespace variant still matches.
+  // This only catches known names — see the design doc's stated limitation
+  // on free-text name detection for names never otherwise masked.
+  for (const [k, v] of Object.entries(out)) {
+    if (typeof v === "string") out[k] = maskKnownNames(v, vault);
   }
   for (const [k, v] of Object.entries(out)) {
     if (typeof v === "string") out[k] = scrubDigits(v as string);
@@ -72,8 +83,8 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
 
     const currentClassifier = buildClassifier(groups, overrides);
     classifier = currentClassifier;
-    for (const l of ledgers) groupOfLedger.set(l.name.trim().toLowerCase(), l.parent);
-    for (const r of tb.rows) groupOfLedger.set(r.name.trim().toLowerCase(), r.parent);
+    for (const l of ledgers) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    for (const r of tb.rows) groupOfLedger.set(canonicalKey(r.name), r.parent);
 
     const raw = runChecks({
       asOnDate,

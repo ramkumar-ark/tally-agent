@@ -1,3 +1,4 @@
+import { canonicalKey } from "./key.js";
 import type { GroupNode, GroupRole, MaskPolicy } from "./types.js";
 
 export interface Overrides {
@@ -86,7 +87,7 @@ const ROLE_BY_GROUP: ReadonlyArray<readonly [string, GroupRole]> = [
   ["Duties & Taxes", "duties"],
 ];
 
-const norm = (s: string) => s.trim().toLowerCase();
+const norm = canonicalKey;
 
 export interface Classifier {
   ancestry(group: string): string[];

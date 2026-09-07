@@ -1,3 +1,4 @@
+import { canonicalKey } from "./key.js";
 import type { GroupRole } from "./types.js";
 
 const ROLE_LABEL: Record<GroupRole, string> = {
@@ -31,7 +32,7 @@ export function createVault(): Vault {
   const counters = new Map<string, number>();
 
   function pseudonym(real: string, role: GroupRole): string {
-    const key = real.trim().toLowerCase();
+    const key = canonicalKey(real);
     const existing = aliasByReal.get(key);
     if (existing) return existing;
 
@@ -41,7 +42,7 @@ export function createVault(): Vault {
     const alias = `${label} ${n}`;
 
     aliasByReal.set(key, alias);
-    const aliasKey = alias.toLowerCase();
+    const aliasKey = canonicalKey(alias);
     realByAlias.set(aliasKey, real);
     aliasCaseByKey.set(aliasKey, alias);
     return alias;
@@ -49,7 +50,7 @@ export function createVault(): Vault {
 
   return {
     pseudonym,
-    resolve: (alias) => realByAlias.get(alias.trim().toLowerCase()),
+    resolve: (alias) => realByAlias.get(canonicalKey(alias)),
     entries: () =>
       [...realByAlias.entries()].map(([aliasKey, real]) => ({
         real,
