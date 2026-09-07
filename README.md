@@ -18,5 +18,13 @@ Used by an accountant to finalize company accounts.
 
 ## Status
 
-Local-only scaffold pending. Full design and implementation will be built
-as tracked ship tasks once worker dispatch is available.
+Milestone 1 — read-only trial balance review — is implemented. See
+[`docs/design/2026-09-07-trial-balance-review-design.md`](docs/design/2026-09-07-trial-balance-review-design.md)
+for the design and [`harness/`](harness/) for setup.
+
+The gateway masks party, bank, capital and loan ledger identities, runs seven
+trial balance checks in code, and writes de-masked reports to a directory outside
+the harness's reach.
+
+Later milestones, in order: GST summary and mismatch; single-ledger scrutiny;
+Excel read/write; the finalization checklist; and only then the guarded write path.
