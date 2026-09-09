@@ -45,6 +45,36 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   see `src/config.ts`'s `parseDownstreamArgs`. A plain whitespace-separated
   value still works only when no argument contains a space.
 
+## Sharp edges found wiring milestone 1 up for real (2026-09-09)
+
+- **The upstream Tally MCP server is `F:\Software Projects\tally_prime_mcp_server`**
+  (package `tally-prime-mcp-server`; ships a committed `dist/`, no build
+  needed). Confirm any candidate by grepping its `dist/` for the five tools
+  `src/downstream.ts` calls. The `tally_mcp_server_v6` directory under
+  `F:\AgenticWorkspace\Tally Prime Automation\` is a decoy — an unrelated older
+  server registering none of them — and its `1766393040_`-prefixed sibling is
+  empty.
+- **Never compare `import.meta.url` to `process.argv[1]` as strings.** A file
+  URL percent-encodes a space; argv does not. Getting this wrong made the
+  gateway exit 0 in silence on every install path containing a space, which a
+  harness reports only as "the server would not start". Same root cause bit
+  `URL.pathname`, which yields the `/C:/...` form that Windows `fs` rejects.
+  Both are now `fileURLToPath`-based in `src/index.ts` (`isEntrypoint`,
+  `overridesPath`), covered by `test/entrypoint.test.ts`. Any new path
+  derivation in this project should go the same way.
+- `loadOverrides` fails open by design — a missing overrides file is normal —
+  so it now takes a `warn` callback and `src/index.ts` prints the reason to
+  stderr. Silence there is what hid the `pathname` bug for a whole milestone;
+  keep the warning if that code is touched.
+- **The `Read(<reportdir>/**)` deny rule also blocks Bash reads of that path**,
+  verified in isolated `claude -p` runs (control without the rule leaks the
+  file; control on a non-denied path proves Bash was genuinely enabled). So a
+  single `Read(...)` rule is sufficient and no Bash restriction is needed. The
+  method for re-verifying is in `harness/claude-code.md`.
+- `harness/claude-code.md` is the verified, real-paths setup document and the
+  single owner of the machine specifics; `harness/opencode.md` deliberately
+  points at it rather than duplicating them.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

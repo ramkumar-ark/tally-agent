@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
@@ -17,6 +19,42 @@ export type ToolRegistrar = (
 
 export type ToolsConfig = Pick<GatewayConfig, "reportDir"> &
   Partial<Pick<GatewayConfig, "defaultCompany" | "dumpVault">>;
+
+/**
+ * True when this module is the file node was asked to run.
+ *
+ * Compared as resolved filesystem paths, never as raw strings: a file URL
+ * percent-encodes a space and `process.argv[1]` does not, so a string
+ * comparison is false for every install path containing a space — and then
+ * main() never runs and the gateway exits 0 in silence, which an MCP client
+ * reports only as a server that would not start.
+ */
+export function isEntrypoint(metaUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  let self: string;
+  try {
+    self = resolve(fileURLToPath(metaUrl));
+  } catch {
+    return false; // Not a file: URL — nothing was run from disk.
+  }
+  const invoked = resolve(argv1);
+  return process.platform === "win32"
+    ? self.toLowerCase() === invoked.toLowerCase()
+    : self === invoked;
+}
+
+/**
+ * The overrides file sits next to the build, not in the working directory.
+ * Resolved with fileURLToPath rather than `URL.pathname`, which yields
+ * "/C:/..." on Windows — a path fs rejects with ENOENT on every Windows
+ * install, spaces or not, which loadOverrides then swallows into "no
+ * overrides configured". Overrides are the documented escape hatch for a
+ * group name the classifier has not seen, so failing open in silence is a
+ * masking hazard.
+ */
+export function overridesPath(metaUrl: string): string {
+  return fileURLToPath(new URL("../config/overrides.json", metaUrl));
+}
 
 /** One id per gateway process, naming this session's audit and vault files. */
 export function newSessionId(now = new Date()): string {
@@ -119,7 +157,10 @@ async function sessionCompanies(session: Session): Promise<string[]> {
 
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env);
-  const overrides = loadOverrides(new URL("../config/overrides.json", import.meta.url).pathname);
+  const overridesFile = overridesPath(import.meta.url);
+  const overrides = loadOverrides(overridesFile, (why) =>
+    console.error(`tally-agent: no ledger/group overrides loaded (${why}): ${overridesFile}`),
+  );
   const downstream = await connectDownstream(cfg);
   const session = createSession(downstream, overrides);
 
@@ -157,7 +198,7 @@ async function main(): Promise<void> {
   console.error(`tally-agent gateway running; reports to ${cfg.reportDir}`);
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
+if (isEntrypoint(import.meta.url, process.argv[1])) {
   main().catch((e) => {
     console.error("Fatal:", e);
     process.exit(1);
