@@ -2,7 +2,7 @@ import { buildClassifier, type Classifier, type Overrides } from "./classify.js"
 import { runChecks } from "./checks/index.js";
 import type { Downstream } from "./downstream.js";
 import { canonicalKey } from "./key.js";
-import { maskFinding, maskKnownNames, maskLedgerName, scrubDigits } from "./mask.js";
+import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { createVault, type Vault } from "./vault.js";
 import { TOTALS_TOLERANCE, type Finding, type Severity } from "./types.js";
 
@@ -40,7 +40,7 @@ function maskVoucherRow(
     if (typeof v === "string") out[k] = maskKnownNames(v, vault);
   }
   for (const [k, v] of Object.entries(out)) {
-    if (typeof v === "string") out[k] = scrubDigits(v as string);
+    if (typeof v === "string") out[k] = scrubSecrets(v as string);
   }
   return out;
 }

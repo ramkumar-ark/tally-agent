@@ -1,0 +1,28 @@
+{
+  "returns": [
+    {
+      "gstin": "27AAAAA0000A1Z5",
+      "partyName": "Acme Traders",
+      "kind": "outward",
+      "taxableValue": 100000,
+      "cgst": 9000,
+      "sgst": 9000
+    },
+    {
+      "gstin": "27AAAAA0000A1Z5",
+      "partyName": "Acme Traders",
+      "kind": "inward",
+      "taxableValue": 50000,
+      "cgst": 4000,
+      "sgst": 4500
+    },
+    {
+      "gstin": "22PPPPP7777P1Z8",
+      "partyName": "Ghost Supplies LLP",
+      "kind": "inward",
+      "taxableValue": 40000,
+      "cgst": 2500,
+      "sgst": 2500
+    }
+  ]
+}

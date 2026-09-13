@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { buildClassifier } from "../src/classify.js";
 import { createVault } from "../src/vault.js";
-import { demaskText, maskFinding, maskLedgerName, scrubDigits } from "../src/mask.js";
+import {
+  demaskText,
+  maskFinding,
+  maskKnownNames,
+  maskLedgerName,
+  redactTaxIds,
+  scrubDigits,
+  scrubSecrets,
+} from "../src/mask.js";
 import type { Finding, GroupNode } from "../src/types.js";
 
 const groups: GroupNode[] = [
@@ -24,6 +32,47 @@ describe("scrubDigits", () => {
 
   it("scrubs every run in the string", () => {
     expect(scrubDigits("A 123456 B 7890123")).toBe("A [number] B [number]");
+  });
+});
+
+describe("redactTaxIds", () => {
+  it("redacts a 15-char GSTIN, which has no 6-digit run for scrubDigits to catch", () => {
+    expect(scrubDigits("27AAAAA0000A1Z5")).toBe("27AAAAA0000A1Z5"); // proves the gap
+    expect(redactTaxIds("27AAAAA0000A1Z5")).toBe("[tax-id]");
+  });
+
+  it("redacts a GSTIN embedded in free text and glued to a label", () => {
+    expect(redactTaxIds("against GSTIN 27AAAAA0000A1Z5 as per invoice")).toBe(
+      "against GSTIN [tax-id] as per invoice",
+    );
+    expect(redactTaxIds("GSTIN29ABCDE1234F1Z9")).toBe("GSTIN[tax-id]");
+  });
+
+  it("redacts a 10-char PAN", () => {
+    expect(redactTaxIds("PAN ABCDE1234F")).toBe("PAN [tax-id]");
+  });
+
+  it("redacts a lowercase tax id", () => {
+    expect(redactTaxIds("gstin 27aaaaa0000a1z5")).toBe("gstin [tax-id]");
+  });
+
+  it("redacts a GSTIN's embedded PAN as one token, not a half-eaten PAN", () => {
+    expect(redactTaxIds("27AAAAA0000A1Z5")).toBe("[tax-id]");
+  });
+
+  it("leaves ordinary prose and short alphanumerics alone", () => {
+    expect(redactTaxIds("Sale to Acme Traders as per invoice")).toBe(
+      "Sale to Acme Traders as per invoice",
+    );
+    expect(redactTaxIds("INV-0041")).toBe("INV-0041");
+  });
+});
+
+describe("scrubSecrets", () => {
+  it("catches both a tax id and a digit run in one string", () => {
+    expect(scrubSecrets("GSTIN 27AAAAA0000A1Z5 acct 50200012345678")).toBe(
+      "GSTIN [tax-id] acct [number]",
+    );
   });
 });
 
@@ -98,6 +147,31 @@ describe("maskFinding", () => {
     const masked = maskFinding(finding, c, v);
     expect(masked.amount).toBe(41250);
     expect(masked.id).toBe("TB-004-17");
+  });
+
+  it("redacts a GSTIN typed into the detail text", () => {
+    const c = buildClassifier(groups);
+    const v = createVault();
+    const masked = maskFinding(
+      { ...finding, detail: "Acme Traders filed under 27AAAAA0000A1Z5" },
+      c,
+      v,
+    );
+    expect(masked.detail).not.toContain("27AAAAA0000A1Z5");
+    expect(masked.detail).toContain("[tax-id]");
+  });
+
+  it("masks an already-vaulted party name that appears in the detail of a fleet-wide finding", () => {
+    const c = buildClassifier(groups);
+    const v = createVault();
+    maskLedgerName("Acme Traders", "Sundry Creditors", c, v); // vault it
+    const masked = maskFinding(
+      { ...finding, ledger: "", group: "", detail: "Acme Traders is out of balance" },
+      c,
+      v,
+    );
+    expect(masked.detail).toContain("Creditor 1");
+    expect(masked.detail).not.toContain("Acme Traders");
   });
 });
 
