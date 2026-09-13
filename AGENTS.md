@@ -108,9 +108,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   and `displayDate()` (`16-Jan-2026`). A bare `YYYYMMDD` or `100000.00`
   reaches the model mangled.
 - Ledger balances for a period come from `tally_trial_balance` (date-bounded,
-  positive = debit), never from the ledger master: `tally_get_ledgers` passes
-  Tally's raw `OPENINGBALANCE`/`CLOSINGBALANCE` through (negative = debit) and
-  `CLOSINGBALANCE` is not bounded by any date.
+  positive = debit), never from the ledger master: the raw Tally master sign
+  (negative = debit) is flipped once at the gateway boundary by `ledgers()`
+  (see the M1 bullet above), but `CLOSINGBALANCE` is not bounded by any date.
 - The downstream ledger report nests `taxBreakup.taxLedgers[]` and
   `matchCandidates[]`; `maskVoucherRow` in `src/review.ts` masks and sweeps at
   every depth. A new nested name field must be added to `NAME_FIELDS`.

@@ -132,4 +132,4 @@ The fake downstream returns the same trial balance for any date: acme traders 41
 
 - The free-text sweep catches only names the vault knows (M1 limitation, unchanged).
 - A digit-bearing voucher number in a detail reads `PUR/[number]`, by the same M1 `scrubDigits` rule.
-- The gateway's M1 `ledgers()` parse passes Tally's raw master sign (negative = debit) through unflipped, so M1's `dormant_balance` side may be inverted on live data. It is not verified live because Tally was unreachable, and it is **out of M3 scope**; see Recommendations. M3 avoids the issue by reading balances only from `tally_trial_balance`.
+- The raw Tally master sign is negative = debit and is flipped once at the gateway boundary by M1's `ledgers()`, so M1's `dormant_balance` side follows the same positive = debit convention as the rest of the gateway. M3 still reads balances only from the date-bounded `tally_trial_balance` because `CLOSINGBALANCE` is not bounded by any date.
