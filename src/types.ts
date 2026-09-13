@@ -20,9 +20,44 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   dormant_balance: 7,
 };
 
+export type GstCheckId =
+  | "gst_amount_mismatch"
+  | "gst_return_not_in_books"
+  | "gst_books_not_in_return"
+  | "gst_party_without_gstin";
+
+/** GST ids live in their own ordinal space (GST-<ordinal>-<n>); CHECK_ORDINAL is never renumbered (R-E-3). */
+export const GST_CHECK_ORDINAL: Record<GstCheckId, number> = {
+  gst_amount_mismatch: 1,
+  gst_return_not_in_books: 2,
+  gst_books_not_in_return: 3,
+  gst_party_without_gstin: 4,
+};
+
+export function gstFindingId(check: GstCheckId, ordinal: number): string {
+  return `GST-${String(GST_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+/** Portal returns round to whole rupees; books carry paise. Per head, per party. */
+export const GST_TOLERANCE = 1.0;
+
+export type GstKind = "outward" | "inward";
+
+/** Tax heads as GSTR-3B reports them: SGST and UTGST merged. */
+export type GstHead = "CGST" | "SGST/UTGST" | "IGST" | "CESS" | "GST-OTHER";
+
+export const GST_HEADS: readonly GstHead[] = [
+  "CGST",
+  "SGST/UTGST",
+  "IGST",
+  "CESS",
+  "GST-OTHER",
+];
+
 export type Side = "Dr" | "Cr";
 
-/** Semantic role of a group, used by the checks. Distinct from mask policy. */
+/** Semantic role of a group, used by the checks. Distinct from mask policy.
+ * `tax_id` is a vault-label-only role (TaxId N aliases); the classifier never returns it. */
 export type GroupRole =
   | "debtor"
   | "creditor"
@@ -35,6 +70,7 @@ export type GroupRole =
   | "suspense"
   | "capital"
   | "duties"
+  | "tax_id"
   | "other";
 
 export type MaskPolicy = "mask" | "clear";

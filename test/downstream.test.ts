@@ -127,3 +127,92 @@ describe("downstream parsing", () => {
     expect(d.calls[0].args).toEqual({});
   });
 });
+
+import { makeDownstream } from "../src/downstream.js";
+
+const boot = () =>
+  makeDownstream(
+    async (tool, _args) => {
+      const body = responses[tool];
+      if (body === undefined) throw new Error(`no fixture for ${tool}`);
+      return body;
+    },
+    async () => {},
+  );
+
+const responses: Record<string, string> = {
+  tally_get_vouchers: JSON.stringify([
+    {
+      date: "2026-01-15",
+      voucherType: "Sales",
+      voucherNumber: "S/0041",
+      partyLedgerName: "Acme Traders",
+      isCancelled: "no",
+      entries: [
+        { LEDGERNAME: "Acme Traders", AMOUNT: "-118000.00" },
+        { LEDGERNAME: "Sales - Domestic", AMOUNT: "100000.00" },
+      ],
+    },
+    { date: "20260405", voucherNumber: "S/later", voucherType: "Sales", partyLedgerName: "", entries: [] },
+    { date: "", voucherNumber: "", voucherType: "", partyLedgerName: "", entries: [] },
+  ]),
+  tally_get_ledgers: JSON.stringify([
+    { name: "Acme Traders", parent: "Sundry Creditors", gstin: " 27aaaaa0000a1z5 ", state: "Maharashtra" },
+    { name: "Local Vendor", parent: "Sundry Creditors" },
+    { parent: "Broken" },
+  ]),
+};
+
+describe("downstream voucher parsing (M2 contracts, fixture-pinned)", () => {
+  it("flips raw amounts to positive=debit once, and drops out-of-period and undated rows", async () => {
+    const rows = await boot().vouchers(undefined, "20260101", "20260331");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].date).toBe("20260115");
+    expect(rows[0].entries[0]).toEqual({ ledger: "Acme Traders", amount: 118000 });
+    expect(rows[0].entries[1]).toEqual({ ledger: "Sales - Domestic", amount: -100000 });
+    expect(rows[0].cancelled).toBe(false);
+  });
+
+  it("recognizes the live single-object entries shape too", async () => {
+    responses.tally_get_vouchers = JSON.stringify([
+      { date: "20260115", voucherType: "J", voucherNumber: "J/1", partyLedgerName: "", isCancelled: "Yes", entries: { LEDGERNAME: "X", AMOUNT: "-50" } },
+    ]);
+    const rows = await boot().vouchers(undefined, "20260101", "20260131");
+    expect(rows[0].cancelled).toBe(true);
+    expect(rows[0].entries).toEqual([{ ledger: "X", amount: 50 }]);
+  });
+
+  it("passes company and includeLines through to the downstream call", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const d = makeDownstream(
+      async (tool, args) => {
+        void tool;
+        seen.push(args);
+        return responses[tool];
+      },
+      async () => {},
+    );
+    await d.vouchers("Demo Traders Pvt Ltd", "20260101", "20260331");
+    expect(seen[0]).toMatchObject({ company: "Demo Traders Pvt Ltd", fromDate: "20260101", toDate: "20260331", includeLines: true });
+  });
+});
+
+describe("downstream verbose ledger parsing (M2 tax-id scalars)", () => {
+  it("returns name/parent/gstin/state, normalizes the GSTIN, and skips broken rows", async () => {
+    const ledgers = await boot().ledgersTax(undefined);
+    expect(ledgers).toEqual([
+      {
+        name: "Acme Traders",
+        parent: "Sundry Creditors",
+        gstin: "27AAAAA0000A1Z5",
+        state: "Maharashtra",
+      },
+      { name: "Local Vendor", parent: "Sundry Creditors", gstin: null, state: "" },
+    ]);
+  });
+
+  it("still parses the plain (non-verbose) ledger masters", async () => {
+    const ledgers = await boot().ledgers(undefined);
+    expect(ledgers[0]).toMatchObject({ name: "Acme Traders", openingBalance: 0, closingBalance: 0 });
+  });
+});

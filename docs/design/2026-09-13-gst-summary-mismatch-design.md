@@ -1,7 +1,7 @@
 # Tally Agent — GST Summary & Mismatch (Milestone 2) — Design
 
 Date: 2026-09-13
-Status: approved for implementation (firstmate task `ta-m2-gst-summary`)
+Status: implemented (see commit history on `fm/ta-m2-gst-summary`)
 Project: tally-agent (local-only)
 Depends on: Milestone 1 (masking boundary unchanged), `tally_prime_mcp_server` (unchanged)
 Requirements satisfied: R-MCP-6, R-P-9, R-R-4 (canon: `/home/ram/firstmate/data/ta-requirements-canon/report.md` §2 M2, §3.1, §3.3, §5.7)

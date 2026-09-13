@@ -1,8 +1,24 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { demaskText } from "./mask.js";
-import type { Finding } from "./types.js";
+import type { Finding, Severity } from "./types.js";
 import type { Vault } from "./vault.js";
+
+/**
+ * Structural shape both the trial-balance and the GST findings CSV need. GST
+ * findings carry no side/expected and extra fields are not written.
+ */
+export interface CsvFinding {
+  id: string;
+  check: string;
+  severity: Severity;
+  ledger: string;
+  group: string;
+  amount: number;
+  side?: string | null;
+  expected?: string | null;
+  detail: string;
+}
 
 export interface WriteReportOptions {
   reportDir: string;
@@ -29,7 +45,7 @@ const csvField = (v: unknown): string => {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-export function findingsCsv(findings: Finding[], vault: Vault): string {
+export function findingsCsv(findings: CsvFinding[], vault: Vault): string {
   const header = "id,check,severity,ledger,group,amount,side,expected,detail";
   const rows = findings.map((f) =>
     [
@@ -56,6 +72,32 @@ export async function writeReport(
   const stem = `${slug(opts.company)}-${opts.asOnDate}`;
   const markdownPath = join(opts.reportDir, `trial-balance-review-${stem}.md`);
   const csvPath = join(opts.reportDir, `findings-${stem}.csv`);
+
+  await writeFile(markdownPath, demaskText(opts.markdown, opts.vault), "utf8");
+  await writeFile(csvPath, findingsCsv(opts.findings, opts.vault), "utf8");
+
+  return { markdownPath, csvPath };
+}
+
+/**
+ * The M2 GST artifact pair: the same writer contract and report-directory
+ * boundary as `writeReport` (R-R-4), with from/to dates instead of an as-on
+ * date naming the file stem. De-masking on the way to disk restores party
+ * names and tax-ID aliases (TaxId N -> real GSTIN) alike.
+ */
+export async function writeGstReport(opts: {
+  reportDir: string;
+  company: string;
+  fromDate: string;
+  toDate: string;
+  markdown: string;
+  findings: CsvFinding[];
+  vault: Vault;
+}): Promise<{ markdownPath: string; csvPath: string }> {
+  await mkdir(opts.reportDir, { recursive: true });
+  const stem = `${slug(opts.company)}-${opts.fromDate}-${opts.toDate}`;
+  const markdownPath = join(opts.reportDir, `gst-review-${stem}.md`);
+  const csvPath = join(opts.reportDir, `gst-findings-${stem}.csv`);
 
   await writeFile(markdownPath, demaskText(opts.markdown, opts.vault), "utf8");
   await writeFile(csvPath, findingsCsv(opts.findings, opts.vault), "utf8");

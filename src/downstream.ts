@@ -8,6 +8,31 @@ export type RawCaller = (
   args: Record<string, unknown>,
 ) => Promise<string>;
 
+/** One ledger line of a voucher. Amount is positive = debit (flipped once, here). */
+export interface VoucherEntry {
+  ledger: string;
+  amount: number;
+}
+
+export interface VoucherRow {
+  /** YYYYMMDD */
+  date: string;
+  voucherType: string;
+  voucherNumber: string;
+  partyLedgerName: string;
+  cancelled: boolean;
+  entries: VoucherEntry[];
+}
+
+/** Ledger-master scalars needed for GST work. No address/bank/email/phone — the tally_get_ledger ban (R-MCP-3) stands. */
+export interface LedgerTaxInfo {
+  name: string;
+  parent: string;
+  /** Normalized (trimmed, uppercased) or null when the master carries none. */
+  gstin: string | null;
+  state: string;
+}
+
 export interface Downstream {
   callRaw(tool: string, args: Record<string, unknown>): Promise<string>;
   listCompanies(): Promise<string[]>;
@@ -17,12 +42,20 @@ export interface Downstream {
   ): Promise<{ rows: TbRow[]; totalDebit: number; totalCredit: number }>;
   groups(company?: string): Promise<GroupNode[]>;
   ledgers(company?: string): Promise<LedgerMaster[]>;
+  /** Verbose ledger masters: adds gstin/state scalars (never the banned per-ledger master tool). */
+  ledgersTax(company?: string): Promise<LedgerTaxInfo[]>;
   ledgerVouchers(
     company: string | undefined,
     ledgerName: string,
     fromDate: string,
     toDate: string,
   ): Promise<unknown[]>;
+  /** Day Book with ledger lines for a period, typed and range-filtered at the boundary (R-MCP-5). */
+  vouchers(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+  ): Promise<VoucherRow[]>;
   close(): Promise<void>;
 }
 
@@ -30,6 +63,11 @@ const num = (v: unknown): number => {
   const n = Number(String(v ?? "0").replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 };
+
+const normDate = (v: unknown): string => String(v ?? "").replace(/[-/.\s]/g, "");
+
+const truthy = (v: unknown): boolean =>
+  v === true || /^(yes|true|1)$/i.test(String(v ?? "").trim());
 
 const withCompany = (
   args: Record<string, unknown>,
@@ -93,6 +131,25 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
       }));
     },
 
+    async ledgersTax(company) {
+      const raw = JSON.parse(
+        await call("tally_get_ledgers", withCompany({ verbose: true }, company)),
+      ) as Array<Record<string, unknown>>;
+      const out: LedgerTaxInfo[] = [];
+      for (const l of Array.isArray(raw) ? raw : []) {
+        const name = String(l?.name ?? "");
+        if (!name) continue;
+        const gstin = String(l.gstin ?? "").trim().toUpperCase();
+        out.push({
+          name,
+          parent: String(l.parent ?? ""),
+          gstin: gstin || null,
+          state: String(l.state ?? ""),
+        });
+      }
+      return out;
+    },
+
     async ledgerVouchers(company, ledgerName, fromDate, toDate) {
       const text = await call(
         "tally_get_ledger_vouchers",
@@ -103,6 +160,56 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
       // array as originally assumed — see the downstream's src/tools/reads.ts.
       const parsed = JSON.parse(text) as { vouchers?: unknown[] };
       return Array.isArray(parsed.vouchers) ? parsed.vouchers : [];
+    },
+
+    async vouchers(company, fromDate, toDate) {
+      const raw = JSON.parse(
+        await call(
+          "tally_get_vouchers",
+          withCompany({ fromDate, toDate, includeLines: true }, company),
+        ),
+      ) as unknown;
+      if (!Array.isArray(raw)) {
+        throw new Error("tally_get_vouchers: expected an array of vouchers");
+      }
+      const from = normDate(fromDate);
+      const to = normDate(toDate);
+      const out: VoucherRow[] = [];
+      for (const v of raw) {
+        if (typeof v !== "object" || v === null) continue;
+        const row = v as Record<string, unknown>;
+        const date = normDate(row.date);
+        // Defensive re-filter at the boundary: the downstream already filters
+        // client-side, but a tax period that silently absorbs an out-of-period
+        // voucher is worse than one that drops a row with a malformed date.
+        if (!/^\d{8}$/.test(date) || date < from || date > to) continue;
+        const rawEntries = row.entries;
+        const list = Array.isArray(rawEntries)
+          ? rawEntries
+          : rawEntries && typeof rawEntries === "object"
+            ? [rawEntries]
+            : [];
+        const entries: VoucherEntry[] = [];
+        for (const e of list) {
+          if (typeof e !== "object" || e === null) continue;
+          const er = e as Record<string, unknown>;
+          // Raw Tally ledger lines carry UPPERCASE keys; the flip to
+          // positive = debit happens here, once (R-MCP-5), matching the
+          // trial-balance convention.
+          const ledger = String(er.LEDGERNAME ?? er.ledgerName ?? "").trim();
+          if (!ledger) continue;
+          entries.push({ ledger, amount: -num(er.AMOUNT ?? er.amount) });
+        }
+        out.push({
+          date,
+          voucherType: String(row.voucherType ?? ""),
+          voucherNumber: String(row.voucherNumber ?? ""),
+          partyLedgerName: String(row.partyLedgerName ?? "").trim(),
+          cancelled: truthy(row.isCancelled),
+          entries,
+        });
+      }
+      return out;
     },
 
     close,

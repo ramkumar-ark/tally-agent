@@ -75,6 +75,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   single owner of the machine specifics; `harness/opencode.md` deliberately
   points at it rather than duplicating them.
 
+## Sharp edges found during Milestone 2 (GST summary & mismatch, 2026-09-13)
+
+- The masked tax-ID channel (design: `docs/design/2026-09-13-gst-summary-mismatch-design.md`)
+  is the pattern every later tax-ID feature must follow: fetch IDs internally
+  via the narrowest downstream field set (`tally_get_ledgers` verbose:true —
+  *not* `tally_get_ledger`, whose ban stands), ingest ID-bearing operator data
+  by file path only (`tb_gst_mismatch`'s `returnsPath`), correlate through
+  vault aliases (`TaxId N`), and keep `redactTaxIds` on every outbound string.
+- **Money figures in finding details must never be bare 6+-digit numbers**:
+  `scrubDigits` eats digit runs of ≥6, and bare `"100000.00"` reaches the
+  model as `"[number].00"`. GST details use Indian grouping
+  (`1,00,000.00`) for this. The M1 check details still use `toFixed(2)` —
+  the same latent collision is un-fixed there (milestone boundary).
+- Party buckets in `gstBooks` must be creatable from either a tax line or a
+  taxable line — whichever the voucher lists first — or taxable value reads
+  zero for the normal Tally layout (party line before tax lines).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

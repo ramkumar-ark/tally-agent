@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolve } from "node:path";
@@ -7,8 +8,8 @@ import { z } from "zod";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides } from "./overrides.js";
-import { appendAudit, writeReport, writeVaultDump } from "./report.js";
-import { createSession, type ReviewResult, type Session } from "./review.js";
+import { appendAudit, writeGstReport, writeReport, writeVaultDump } from "./report.js";
+import { createSession, type GstMismatchResult, type ReviewResult, type Session } from "./review.js";
 
 export type ToolRegistrar = (
   name: string,
@@ -68,6 +69,7 @@ export function registerTools(
   sessionId: string = newSessionId(),
 ): void {
   let last: ReviewResult | undefined;
+  let lastGst: GstMismatchResult | undefined;
 
   const audit = (tool: string, args: Record<string, unknown>, rows: number, masked: number) =>
     appendAudit(cfg.reportDir, sessionId, {
@@ -148,6 +150,90 @@ export function registerTools(
       return JSON.stringify(paths, null, 2);
     },
   );
+
+  register(
+    "tb_gst_summary",
+    "Period GST liability per tax head (CGST, SGST/UTGST, IGST, CESS, GST-other): output tax, " +
+      "input tax credit, net. Aggregate only - no party data. The first call may be slow; " +
+      "the day book fetch is cached for five minutes.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      const summary = await session.gstSummary(args.company ?? cfg.defaultCompany, args.fromDate, args.toDate);
+      const rows = summary.heads.filter((h) => h.output || h.input).length + summary.taxLedgers.length;
+      await audit("tb_gst_summary", { company: args.company, fromDate: args.fromDate, toDate: args.toDate }, rows, 0);
+      return JSON.stringify(summary, null, 2);
+    },
+  );
+
+  register(
+    "tb_gst_mismatch",
+    "Compare filed GST returns against the books, matched by tax identity in code. " +
+      "Pass the PAGE PATH of an operator-prepared JSON returns file - never paste return rows " +
+      "into chat, they carry tax IDs. Parties appear as pseudonyms ('Creditor 3', 'TaxId 2'); " +
+      "drill into book-party findings with tb_ledger_activity using the finding id.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      returnsPath: z.string().describe("Path to the JSON returns file; its contents are read inside the gateway"),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      const text = await readFile(args.returnsPath, "utf8");
+      const result = await session.gstMismatch(
+        args.company ?? cfg.defaultCompany,
+        args.fromDate,
+        args.toDate,
+        text,
+      );
+      lastGst = result;
+      // The file's path is audited, never its contents: it is the one
+      // tax-ID-dense artifact of this milestone.
+      await audit("tb_gst_mismatch", { company: args.company, fromDate: args.fromDate, toDate: args.toDate, returnsPath: args.returnsPath }, result.findings.length, maskedCount(result.findings));
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_gst_report",
+    "Write the GST review report and findings sheet to disk. Real names and tax IDs are " +
+      "restored on write; compose the narrative with the pseudonyms you were given.",
+    {
+      company: z.string(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      markdown: z.string().describe("The narrative report, in masked terms"),
+    },
+    async (args) => {
+      if (!lastGst) throw new Error("run tb_gst_mismatch first: there are no GST findings to write");
+      const paths = await writeGstReport({
+        reportDir: cfg.reportDir,
+        company: args.company,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        markdown: args.markdown,
+        findings: lastGst.findings,
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_gst_report",
+        { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
+        lastGst.findings.length,
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
+}
+
+function maskedCount(findings: Array<{ ledger: string }>): number {
+  return findings.filter((f) => /^(\w+ \d+)$/.test(f.ledger)).length;
 }
 
 /** Kept separate so the tool handler stays synchronous to read. */
@@ -167,13 +253,16 @@ async function main(): Promise<void> {
   const server = new McpServer(
     { name: "tally-agent", version: "0.1.0" },
     {
-      instructions:
-        "Read-only trial balance review for Tally Prime, with accounting PII masked. " +
+        instructions:
+        "Read-only Tally Prime review (trial balance + GST), with accounting PII masked. " +
         "Party ledgers, bank accounts, capital accounts and loan accounts appear as stable " +
-        "pseudonyms such as 'Creditor 3'; nominal accounts appear by their real names. " +
+        "pseudonyms such as 'Creditor 3'; tax IDs appear as aliases such as 'TaxId 2'; " +
+        "nominal accounts appear by their real names. " +
         "You cannot see the trial balance itself, only the exceptions the checks found. " +
         "Drill into a finding by its id with tb_ledger_activity, never by ledger name. " +
-        "Write the report with tb_write_report using the pseudonyms; real names are restored on write.",
+        "Write the report with tb_write_report (or tb_write_gst_report) using the pseudonyms; " +
+        "real names are restored on write. GST returns data is passed by file path only - " +
+        "never paste return rows into chat.",
     },
   );
 

@@ -13,6 +13,7 @@ const ROLE_LABEL: Record<GroupRole, string> = {
   suspense: "Suspense",
   capital: "Capital",
   duties: "Ledger",
+  tax_id: "TaxId",
   other: "Ledger",
 };
 
