@@ -18,11 +18,21 @@ describe("isEntrypoint", () => {
   const win = "C:\\Software Projects\\tally-agent\\dist\\index.js";
   const winUrl = "file:///C:/Software%20Projects/tally-agent/dist/index.js";
 
-  it("matches a Windows path containing a space against its percent-encoded URL", () => {
-    expect(isEntrypoint(winUrl, win)).toBe(true);
-  });
+  // Windows-path cases are guarded to Windows: `C:\...` only resolves to the
+  // same filesystem path as `file:///C:/...` under win32 semantics — on POSIX
+  // the backslash form is a relative filename and "/C:/..." is a legitimate
+  // absolute path. The bug these cover lives on Windows, and the cases still
+  // run there; the unguarded round trip below covers every platform.
+  const onWin = process.platform === "win32";
 
-  it("matches a Windows path with no space", () => {
+  it.skipIf(!onWin)(
+    "matches a Windows path containing a space against its percent-encoded URL",
+    () => {
+      expect(isEntrypoint(winUrl, win)).toBe(true);
+    },
+  );
+
+  it.skipIf(!onWin)("matches a Windows path with no space", () => {
     expect(
       isEntrypoint("file:///C:/tally-agent/dist/index.js", "C:\\tally-agent\\dist\\index.js"),
     ).toBe(true);
@@ -66,12 +76,25 @@ describe("isEntrypoint", () => {
  * overrides configured".
  */
 describe("overridesPath", () => {
-  it("resolves to a path fs can open, not a URL pathname", () => {
+  // The percent-encoding half of the bug is platform-independent: the old
+  // `URL.pathname` form kept "%20" on every platform, so this runs
+  // everywhere. The "/C:/..." path-shape half only bites on Windows, where
+  // fs rejects that form with ENOENT.
+  it("never yields a percent-encoded URL pathname", () => {
     const p = overridesPath("file:///C:/Software%20Projects/tally-agent/dist/index.js");
-    expect(p).not.toMatch(/^\/[A-Za-z]:/);
     expect(p).not.toContain("%20");
-    expect(p.replace(/\\/g, "/")).toBe("C:/Software Projects/tally-agent/config/overrides.json");
   });
+
+  it.skipIf(process.platform !== "win32")(
+    "resolves a Windows URL to the drive-letter path fs can open",
+    () => {
+      const p = overridesPath("file:///C:/Software%20Projects/tally-agent/dist/index.js");
+      expect(p).not.toMatch(/^\/[A-Za-z]:/);
+      expect(p.replace(/\\/g, "/")).toBe(
+        "C:/Software Projects/tally-agent/config/overrides.json",
+      );
+    },
+  );
 
   it("resolves the real config file shipped in this repo", () => {
     const p = overridesPath(new URL("../dist/index.js", import.meta.url).href);
