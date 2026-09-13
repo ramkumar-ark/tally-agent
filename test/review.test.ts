@@ -83,3 +83,99 @@ describe("review", () => {
     expect(json).not.toContain("Zenith Logistics");
   });
 });
+
+describe("ledger scrutiny (M3)", () => {
+  const SECRETS = ["Acme Traders", "acme traders", "Zenith Logistics", "918020045566771", "27AAAAA0000A1Z5"];
+
+  async function scrutinyOfCreditor() {
+    const d = fakeDownstream();
+    const s = createSession(d, EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    const wrongSide = r.findings.find((f) => f.check === "wrong_side_balance")!;
+    const result = await s.ledgerScrutiny(wrongSide.id, "20250401", "20260331");
+    return { d, s, result, wrongSide };
+  }
+
+  it("scrutinises the creditor behind a TB finding, fully masked", async () => {
+    const { result } = await scrutinyOfCreditor();
+    expect(result).toMatchObject({
+      scrutinyId: "L1",
+      findingId: "TB-004-1",
+      ledger: "Creditor 1",
+      group: "Sundry Creditors",
+      role: "creditor",
+      registeredForGst: true,
+      opening: 41250,
+      closing: 41250,
+      totalDebit: 66250,
+      totalCredit: 25000,
+      netMovement: 41250,
+      rowsScanned: 4,
+      rowsDropped: 0,
+    });
+    expect(result.months).toHaveLength(12);
+    expect(result.counts).toEqual({ critical: 0, warning: 3, review: 3 });
+    expect(result.findings.map((f) => f.id)).toEqual([
+      "LS-1-001-1",
+      "LS-1-002-1",
+      "LS-1-004-1",
+      "LS-1-006-1",
+      "LS-1-009-1",
+      "LS-1-010-1",
+    ]);
+    expect(result.findings.find((f) => f.check === "ls_duplicate_reference")!.detail).toBe(
+      "2 Purchase vouchers carry the same reference: PUR/0031 (16-Jan-2026, 12,500.00 Cr, Ledger 1); " +
+        "PUR/[number] (20-Jan-2026, 12,500.00 Cr, Ledger 1) — the same bill may be booked twice",
+    );
+    expect(result.findings.find((f) => f.check === "ls_gst_rate_nonstandard")!.detail).toContain(
+      "the party is registered as TaxId 1",
+    );
+    for (const f of result.findings) expect(f.detail).not.toMatch(/\d{6,}/);
+    const json = JSON.stringify(result);
+    for (const secret of SECRETS) expect(json).not.toContain(secret);
+  });
+
+  it("reads opening and closing from date-bounded trial balances and fetches the ledger by its real name", async () => {
+    const { d } = await scrutinyOfCreditor();
+    const tbDates = d.calls.filter((c) => c.tool === "tally_trial_balance").map((c) => c.args.asOnDate);
+    expect(tbDates).toEqual(["20260331", "20250331", "20260331"]);
+    expect(d.calls.find((c) => c.tool === "tally_get_ledger_vouchers")?.args).toEqual({
+      ledgerName: "acme traders",
+      fromDate: "20250401",
+      toDate: "20260331",
+    });
+    expect(d.calls.some((c) => c.tool === "tally_get_ledgers" && c.args.verbose === true)).toBe(true);
+  });
+
+  it("rejects malformed or inverted dates and unknown finding ids", async () => {
+    const { s, wrongSide } = await scrutinyOfCreditor();
+    for (const [from, to] of [
+      ["2025-04-01", "20260331"],
+      ["20260331", "20250401"],
+    ]) {
+      await expect(s.ledgerScrutiny(wrongSide.id, from, to)).rejects.toThrow(
+        "fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate",
+      );
+    }
+    await expect(s.ledgerScrutiny("TB-999-1", "20250401", "20260331")).rejects.toThrow(
+      "unknown finding id: TB-999-1",
+    );
+  });
+
+  it("keeps one scrutiny sequence per ledger and registers LS ids for drill-down", async () => {
+    const { d, s, result } = await scrutinyOfCreditor();
+    // Re-scrutiny by an LS id, over another period, reuses the ledger's sequence.
+    const again = await s.ledgerScrutiny("LS-1-004-1", "20260101", "20260131");
+    expect(again.scrutinyId).toBe("L1");
+    expect(again.months.map((m) => m.month)).toEqual(["2026-01"]);
+    // tb_ledger_activity accepts LS ids too.
+    await s.ledgerActivity(result.findings[0].id, "20250401", "20260331");
+    const ledgerCalls = d.calls.filter((c) => c.tool === "tally_get_ledger_vouchers");
+    expect(ledgerCalls).toHaveLength(3);
+    expect(ledgerCalls.every((c) => c.args.ledgerName === "acme traders")).toBe(true);
+    // A different ledger gets the next sequence.
+    const r = await s.review(undefined, "20260331");
+    const rent = r.findings.find((f) => f.ledger === "rent")!;
+    expect((await s.ledgerScrutiny(rent.id, "20250401", "20260331")).scrutinyId).toBe("L2");
+  });
+});

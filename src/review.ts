@@ -4,14 +4,19 @@ import type { Downstream, VoucherRow } from "./downstream.js";
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
+import { dayBefore } from "./format.js";
 import { canonicalKey } from "./key.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
+import { scrutinize, type MonthMovement } from "./scrutiny.js";
 import { createVault, type Vault } from "./vault.js";
 import {
   TOTALS_TOLERANCE,
   type Finding,
+  type GroupRole,
   type GstKind,
   type Severity,
+  type Side,
+  type TbRow,
 } from "./types.js";
 
 /**
@@ -104,9 +109,49 @@ export interface GstMismatchResult {
   aggregate: unknown;
 }
 
+/** One masked ledger scrutiny finding, CsvFinding-compatible (report.ts). */
+export interface LedgerMaskedFinding {
+  id: string;
+  check: string;
+  severity: Severity;
+  ledger: string;
+  group: string;
+  amount: number;
+  side: Side | null;
+  expected: Side | null;
+  detail: string;
+}
+
+/** tb_ledger_scrutiny's result. Amounts positive = debit; the ledger's GSTIN never appears. */
+export interface LedgerScrutinyResult {
+  /** Opaque per-ledger handle ("L1") naming the scrutiny for tb_write_ledger_report. */
+  scrutinyId: string;
+  findingId: string;
+  company?: string;
+  /** Masked ledger name (a pseudonym for a party ledger). */
+  ledger: string;
+  group: string;
+  role: GroupRole;
+  fromDate: string;
+  toDate: string;
+  registeredForGst: boolean;
+  opening: number;
+  closing: number;
+  totalDebit: number;
+  totalCredit: number;
+  netMovement: number;
+  rowsScanned: number;
+  rowsDropped: number;
+  months: MonthMovement[];
+  counts: Record<Severity, number>;
+  findings: LedgerMaskedFinding[];
+}
+
 export interface Session {
   review(company: string | undefined, asOnDate: string): Promise<ReviewResult>;
   ledgerActivity(findingId: string, fromDate: string, toDate: string): Promise<unknown[]>;
+  /** Single-ledger scrutiny (M3), by finding id only — never by ledger name. */
+  ledgerScrutiny(findingId: string, fromDate: string, toDate: string): Promise<LedgerScrutinyResult>;
   listCompanies(): Promise<string[]>;
   /** Aggregate GST liability per tax head. No party data crosses back. */
   gstSummary(company: string | undefined, fromDate: string, toDate: string): Promise<GstSummaryView>;
@@ -128,6 +173,8 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
   let classifier: Classifier | undefined;
   let lastCompany: string | undefined;
   let lastGst: GstMismatchResult | undefined;
+  /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
+  const ledgerSeqByKey = new Map<string, number>();
 
   async function review(
     company: string | undefined,
@@ -184,6 +231,106 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
     if (!classifier) throw new Error("run tb_review first: the group tree is not loaded");
     const rows = await d.ledgerVouchers(lastCompany, real, fromDate, toDate);
     return rows.map((row) => maskVoucherRow(row, classifier!, vault, groupOfLedger));
+  }
+
+  async function ledgerScrutiny(
+    findingId: string,
+    fromDate: string,
+    toDate: string,
+  ): Promise<LedgerScrutinyResult> {
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    const real = realLedgerByFinding.get(findingId);
+    if (!real) throw new Error(`unknown finding id: ${findingId}`);
+    if (!classifier) throw new Error("run tb_review first: the group tree is not loaded");
+    const c = classifier;
+    const company = lastCompany;
+    const key = canonicalKey(real);
+
+    // Opening = the trial balance as on the day before the period, closing =
+    // as on its last day: tally_trial_balance is date-bounded and positive =
+    // debit, unlike the ledger master's CLOSINGBALANCE (see AGENTS.md).
+    const [masters, openingTb, closingTb, fetched] = await Promise.all([
+      d.ledgersTax(company),
+      d.trialBalance(company, dayBefore(fromDate)),
+      d.trialBalance(company, toDate),
+      d.ledgerVoucherRows(company, real, fromDate, toDate),
+    ]);
+    for (const l of masters) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    const balanceOn = (rows: TbRow[]): number =>
+      rows.find((r) => canonicalKey(r.name) === key)?.balance ?? 0;
+    const group = groupOfLedger.get(key) ?? "";
+    const gstin = masters.find((l) => canonicalKey(l.name) === key)?.gstin ?? null;
+
+    let seq = ledgerSeqByKey.get(key);
+    if (seq === undefined) {
+      seq = ledgerSeqByKey.size + 1;
+      ledgerSeqByKey.set(key, seq);
+    }
+
+    const { view, findings: raw } = scrutinize({
+      ledger: real,
+      group,
+      role: c.role(group),
+      gstin,
+      ledgerSeq: seq,
+      fromDate,
+      toDate,
+      opening: balanceOn(openingTb.rows),
+      closing: balanceOn(closingTb.rows),
+      rows: fetched.rows,
+    });
+
+    // Vault first (the ledger, its GSTIN as TaxId N, every counterparty a
+    // detail names), then sweep: maskKnownNames substitutes every vaulted
+    // real string, and scrubSecrets still stands behind it. This is the M2
+    // tax-ID channel pattern, unchanged.
+    const ledger = maskLedgerName(real, group, c, vault);
+    if (gstin) vault.pseudonym(gstin, "tax_id");
+    const findings: LedgerMaskedFinding[] = raw.map((f) => {
+      // LS ids drill down like TB and GST ids: tb_ledger_activity and a
+      // re-scrutiny over another period both accept them.
+      realLedgerByFinding.set(f.id, real);
+      for (const cp of f.counterparties) {
+        maskLedgerName(cp, groupOfLedger.get(canonicalKey(cp)) ?? "", c, vault);
+      }
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        ledger,
+        group: scrubSecrets(f.group),
+        amount: f.amount,
+        side: f.side,
+        expected: f.expected,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+      };
+    });
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of findings) counts[f.severity] += 1;
+
+    return {
+      scrutinyId: `L${seq}`,
+      findingId,
+      company,
+      ledger,
+      group: scrubSecrets(group),
+      role: c.role(group),
+      fromDate,
+      toDate,
+      registeredForGst: gstin !== null,
+      opening: view.opening,
+      closing: view.closing,
+      totalDebit: view.totalDebit,
+      totalCredit: view.totalCredit,
+      netMovement: view.netMovement,
+      rowsScanned: view.rowsScanned,
+      rowsDropped: fetched.dropped,
+      months: view.months,
+      counts,
+      findings,
+    };
   }
 
   /**
@@ -283,6 +430,7 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
   return {
     review,
     ledgerActivity,
+    ledgerScrutiny,
     listCompanies: () => d.listCompanies(),
     vault,
 
