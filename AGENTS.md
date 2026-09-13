@@ -101,6 +101,22 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   taxable line — whichever the voucher lists first — or taxable value reads
   zero for the normal Tally layout (party line before tax lines).
 
+## Sharp edges found during Milestone 3 (single-ledger scrutiny)
+
+- Every outbound string passes `scrubDigits` (6+ digit runs → `[number]`),
+  so finding details must use `src/format.ts`: `money()` (Indian grouping)
+  and `displayDate()` (`16-Jan-2026`). A bare `YYYYMMDD` or `100000.00`
+  reaches the model mangled.
+- Ledger balances for a period come from `tally_trial_balance` (date-bounded,
+  positive = debit), never from the ledger master: `tally_get_ledgers` passes
+  Tally's raw `OPENINGBALANCE`/`CLOSINGBALANCE` through (negative = debit) and
+  `CLOSINGBALANCE` is not bounded by any date.
+- The downstream ledger report nests `taxBreakup.taxLedgers[]` and
+  `matchCandidates[]`; `maskVoucherRow` in `src/review.ts` masks and sweeps at
+  every depth. A new nested name field must be added to `NAME_FIELDS`.
+- `matchedSide` is `"debit"`/`"credit"` from the live server but `"Dr"` in the
+  older M1 fixture row; `ledgerVoucherRows()` accepts both.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

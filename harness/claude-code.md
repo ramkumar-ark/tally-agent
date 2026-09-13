@@ -51,8 +51,8 @@ cd "F:/Software Projects/firstmate/firstmate/projects/tally-agent"
 npm install && npm run build && npm test
 ```
 
-`npm test` should end with `13 passed` / `112 passed`. It is worth running once:
-it includes the leak test, which drives all four gateway tools and fails the
+`npm test` should end with `17 passed` / `194 passed` (3 skipped off Windows). It is worth running once:
+it includes the leak test, which drives all nine gateway tools and fails the
 build if any real ledger name, bank account number, GSTIN or PAN reaches a tool
 result.
 
@@ -141,10 +141,12 @@ the working-directory confinement blocks access as well — belt and braces.
 ## 4. Confirm it is working
 
 Start Claude Code and run `/mcp`. `tally-agent` must be **connected**, listing
-exactly four tools:
+exactly nine tools:
 
 ```
-tb_ledger_activity, tb_list_companies, tb_review, tb_write_report
+tb_gst_mismatch, tb_gst_summary, tb_ledger_activity, tb_ledger_scrutiny,
+tb_list_companies, tb_review, tb_write_gst_report, tb_write_ledger_report,
+tb_write_report
 ```
 
 If you start the gateway by hand instead, a healthy start prints two lines to
@@ -158,6 +160,10 @@ tally-agent gateway running; reports to C:/Users/Admin/tally-reports
 Then ask for a review:
 
 > Review the trial balance as of 31 March 2026 and write it up.
+
+To scrutinise one ledger behind a finding, ask for it by finding id:
+
+> Scrutinise the ledger behind TB-004-1 for FY 2025-26 and write up the ledger scrutiny.
 
 The model calls `tb_review`, drills into anything unclear with
 `tb_ledger_activity`, then calls `tb_write_report`. Read the Markdown and CSV in
