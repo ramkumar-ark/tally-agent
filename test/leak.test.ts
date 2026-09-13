@@ -90,6 +90,33 @@ describe("no secret leaves the gateway", () => {
       }
     }
 
+    // M3: scrutinise every ledger-bearing finding, then write one report.
+    const scrutinyChecks = new Set<string>();
+    let scrutinyId = "";
+    for (const f of review.findings) {
+      if (!f.ledger) continue;
+      const out = await tools.get("tb_ledger_scrutiny")!({
+        findingId: f.id,
+        fromDate: "20250401",
+        toDate: "20260331",
+      });
+      outputs.push(out);
+      const result = JSON.parse(out);
+      for (const lf of result.findings) scrutinyChecks.add(lf.check);
+      if (f.id === wrongSide?.id) scrutinyId = result.scrutinyId;
+    }
+    // Non-vacuity: the duplicate-reference detail names Zenith Logistics and
+    // the digit-bearing voucher number, so the secrets are really exercised.
+    expect(scrutinyChecks).toContain("ls_duplicate_reference");
+    expect(scrutinyId).toBe("L3");
+    outputs.push(
+      await tools.get("tb_write_ledger_report")!({
+        company: "Demo Traders Pvt Ltd",
+        scrutinyId,
+        markdown: "# Ledger scrutiny\n\nSee the findings.",
+      }),
+    );
+
     outputs.push(
       await tools.get("tb_write_report")!({
         company: "Demo Traders Pvt Ltd",
