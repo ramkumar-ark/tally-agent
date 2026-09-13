@@ -8,8 +8,14 @@ import { z } from "zod";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides } from "./overrides.js";
-import { appendAudit, writeGstReport, writeReport, writeVaultDump } from "./report.js";
-import { createSession, type GstMismatchResult, type ReviewResult, type Session } from "./review.js";
+import { appendAudit, writeGstReport, writeLedgerReport, writeReport, writeVaultDump } from "./report.js";
+import {
+  createSession,
+  type GstMismatchResult,
+  type LedgerScrutinyResult,
+  type ReviewResult,
+  type Session,
+} from "./review.js";
 
 export type ToolRegistrar = (
   name: string,
@@ -70,6 +76,8 @@ export function registerTools(
 ): void {
   let last: ReviewResult | undefined;
   let lastGst: GstMismatchResult | undefined;
+  /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
+  const scrutinies = new Map<string, LedgerScrutinyResult>();
 
   const audit = (tool: string, args: Record<string, unknown>, rows: number, masked: number) =>
     appendAudit(cfg.reportDir, sessionId, {
@@ -121,6 +129,63 @@ export function registerTools(
       const rows = await session.ledgerActivity(args.findingId, args.fromDate, args.toDate);
       await audit("tb_ledger_activity", args, rows.length, rows.length);
       return JSON.stringify(rows, null, 2);
+    },
+  );
+
+  register(
+    "tb_ledger_scrutiny",
+    "Scrutinise one ledger over a period, by finding id (from tb_review, tb_gst_mismatch or an " +
+      "earlier scrutiny) - never by ledger name. Reconciles opening to closing, tracks the running " +
+      "balance side, flags duplicate entries and bill references, unusually large entries, " +
+      "round-sum journals, monthly movement spikes and gaps, join gaps, and GST rate anomalies. " +
+      "Returns the monthly movement and masked findings with a scrutinyId for tb_write_ledger_report.",
+    {
+      findingId: z.string(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+    },
+    async (args) => {
+      const result = await session.ledgerScrutiny(args.findingId, args.fromDate, args.toDate);
+      scrutinies.set(result.scrutinyId, result);
+      await audit("tb_ledger_scrutiny", args, result.rowsScanned, maskedCount(result.findings));
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_ledger_report",
+    "Write a ledger scrutiny report and findings sheet to disk for one scrutinyId. Real names and " +
+      "tax IDs are restored on write; compose the narrative with the pseudonyms you were given.",
+    {
+      company: z.string(),
+      scrutinyId: z.string().describe("The scrutinyId a tb_ledger_scrutiny result returned, e.g. L1"),
+      markdown: z.string().describe("The narrative report, in masked terms"),
+    },
+    async (args) => {
+      const s = scrutinies.get(args.scrutinyId);
+      if (!s) {
+        throw new Error(`run tb_ledger_scrutiny first: there is no scrutiny result for ${args.scrutinyId}`);
+      }
+      const paths = await writeLedgerReport({
+        reportDir: cfg.reportDir,
+        company: args.company,
+        scrutinyId: s.scrutinyId,
+        fromDate: s.fromDate,
+        toDate: s.toDate,
+        markdown: args.markdown,
+        findings: s.findings,
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_ledger_report",
+        { company: args.company, scrutinyId: s.scrutinyId },
+        s.findings.length,
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
     },
   );
 
@@ -254,13 +319,13 @@ async function main(): Promise<void> {
     { name: "tally-agent", version: "0.1.0" },
     {
         instructions:
-        "Read-only Tally Prime review (trial balance + GST), with accounting PII masked. " +
+        "Read-only Tally Prime review (trial balance, GST, single-ledger scrutiny), with accounting PII masked. " +
         "Party ledgers, bank accounts, capital accounts and loan accounts appear as stable " +
         "pseudonyms such as 'Creditor 3'; tax IDs appear as aliases such as 'TaxId 2'; " +
         "nominal accounts appear by their real names. " +
         "You cannot see the trial balance itself, only the exceptions the checks found. " +
-        "Drill into a finding by its id with tb_ledger_activity, never by ledger name. " +
-        "Write the report with tb_write_report (or tb_write_gst_report) using the pseudonyms; " +
+        "Drill into a finding by its id with tb_ledger_activity or tb_ledger_scrutiny, never by ledger name. " +
+        "Write the report with tb_write_report (or tb_write_gst_report, tb_write_ledger_report) using the pseudonyms; " +
         "real names are restored on write. GST returns data is passed by file path only - " +
         "never paste return rows into chat.",
     },

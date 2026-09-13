@@ -134,9 +134,11 @@ describe("no secret leaves the gateway", () => {
       "tb_gst_mismatch",
       "tb_gst_summary",
       "tb_ledger_activity",
+      "tb_ledger_scrutiny",
       "tb_list_companies",
       "tb_review",
       "tb_write_gst_report",
+      "tb_write_ledger_report",
       "tb_write_report",
     ]);
   });

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendAudit, findingsCsv, writeReport, writeVaultDump } from "../src/report.js";
+import { appendAudit, findingsCsv, writeLedgerReport, writeReport, writeVaultDump } from "../src/report.js";
 import { createVault } from "../src/vault.js";
 import type { Finding } from "../src/types.js";
 
@@ -98,5 +98,41 @@ describe("writeVaultDump", () => {
     const path = await writeVaultDump(dir, "20260331T100000Z", vault);
     const dump = JSON.parse(readFileSync(path, "utf8")) as Array<{ real: string; alias: string }>;
     expect(dump).toEqual([{ real: "Acme Traders", alias: "Creditor 1" }]);
+  });
+});
+
+describe("writeLedgerReport", () => {
+  it("names both artifacts by the opaque scrutiny id and de-masks on disk", async () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Acme Traders", "creditor");
+    const reportDir = mkdtempSync(join(tmpdir(), "tally-agent-ledger-"));
+    const paths = await writeLedgerReport({
+      reportDir,
+      company: "Demo Traders Pvt Ltd",
+      scrutinyId: "L1",
+      fromDate: "20250401",
+      toDate: "20260331",
+      markdown: `# ${alias}`,
+      findings: [
+        {
+          id: "LS-1-002-1",
+          check: "ls_wrong_side_during_period",
+          severity: "warning",
+          ledger: alias,
+          group: "Sundry Creditors",
+          amount: 82500,
+          side: "Dr",
+          expected: "Cr",
+          detail: `${alias} stood on the debit side`,
+        },
+      ],
+      vault,
+    });
+    expect(paths.markdownPath).toBe(join(reportDir, "ledger-scrutiny-demo-traders-pvt-ltd-l1-20250401-20260331.md"));
+    expect(paths.csvPath).toBe(join(reportDir, "ledger-findings-demo-traders-pvt-ltd-l1-20250401-20260331.csv"));
+    expect(readFileSync(paths.markdownPath, "utf8")).toBe("# Acme Traders");
+    expect(readFileSync(paths.csvPath, "utf8")).toContain(
+      "LS-1-002-1,ls_wrong_side_during_period,warning,Acme Traders,Sundry Creditors,82500.00,Dr,Cr,Acme Traders stood on the debit side",
+    );
   });
 });

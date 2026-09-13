@@ -19,15 +19,17 @@ function harness() {
 }
 
 describe("tool surface", () => {
-  it("exposes exactly the seven approved tools", () => {
+  it("exposes exactly the nine approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_gst_mismatch",
       "tb_gst_summary",
       "tb_ledger_activity",
+      "tb_ledger_scrutiny",
       "tb_list_companies",
       "tb_review",
       "tb_write_gst_report",
+      "tb_write_ledger_report",
       "tb_write_report",
     ]);
   });
@@ -265,5 +267,65 @@ describe("tb_ledger_activity on GST findings", () => {
     await expect(
       tools.get("tb_ledger_activity")!({ findingId: ro.id, fromDate: "20250401", toDate: "20260331" }),
     ).rejects.toThrow(/unknown finding id/i);
+  });
+});
+
+describe("tb_ledger_scrutiny", () => {
+  it("scrutinises a finding's ledger by id and returns masked findings with a scrutiny id", async () => {
+    const { tools } = harness();
+    const review = JSON.parse(await tools.get("tb_review")!({ asOnDate: "20260331" }));
+    const wrongSide = review.findings.find((f: any) => f.check === "wrong_side_balance");
+    const out = await tools.get("tb_ledger_scrutiny")!({
+      findingId: wrongSide.id,
+      fromDate: "20250401",
+      toDate: "20260331",
+    });
+    const parsed = JSON.parse(out);
+    expect(parsed.scrutinyId).toBe("L1");
+    expect(parsed.ledger).toBe("Creditor 1");
+    expect(parsed.counts).toEqual({ critical: 0, warning: 3, review: 3 });
+    expect(out).not.toMatch(/acme/i);
+    expect(out).not.toContain("27AAAAA0000A1Z5");
+    expect(out).not.toContain("Zenith Logistics");
+  });
+
+  it("surfaces the date validation error", async () => {
+    const { tools } = harness();
+    await tools.get("tb_review")!({ asOnDate: "20260331" });
+    await expect(
+      tools.get("tb_ledger_scrutiny")!({ findingId: "TB-004-1", fromDate: "20260331", toDate: "20250401" }),
+    ).rejects.toThrow(/must be YYYYMMDD/);
+  });
+});
+
+describe("tb_write_ledger_report", () => {
+  it("refuses a scrutiny id that has not been run", async () => {
+    const { tools } = harness();
+    await expect(
+      tools.get("tb_write_ledger_report")!({ company: "Demo", scrutinyId: "L1", markdown: "# Ledger" }),
+    ).rejects.toThrow("run tb_ledger_scrutiny first: there is no scrutiny result for L1");
+  });
+
+  it("writes both artifacts named by scrutiny id, with real names and tax IDs restored on disk only", async () => {
+    const { tools } = harness();
+    const review = JSON.parse(await tools.get("tb_review")!({ asOnDate: "20260331" }));
+    const wrongSide = review.findings.find((f: any) => f.check === "wrong_side_balance");
+    await tools.get("tb_ledger_scrutiny")!({ findingId: wrongSide.id, fromDate: "20250401", toDate: "20260331" });
+    const out = await tools.get("tb_write_ledger_report")!({
+      company: "Demo Traders Pvt Ltd",
+      scrutinyId: "L1",
+      markdown: "# Ledger scrutiny\n\nCreditor 1 may have booked a bill from Ledger 1 twice.",
+    });
+    expect(out).not.toMatch(/acme|zenith/i);
+    const parsed = JSON.parse(out);
+    expect(parsed.markdownPath).toMatch(/ledger-scrutiny-demo-traders-pvt-ltd-l1-20250401-20260331\.md$/);
+    expect(parsed.csvPath).toMatch(/ledger-findings-demo-traders-pvt-ltd-l1-20250401-20260331\.csv$/);
+    const md = await readFile(parsed.markdownPath, "utf8");
+    const csv = await readFile(parsed.csvPath, "utf8");
+    expect(md).toMatch(/acme traders/i);
+    expect(md).toContain("Zenith Logistics");
+    expect(csv).toContain("27AAAAA0000A1Z5");
+    expect(csv).not.toContain("TaxId 1");
+    expect(csv).not.toContain("Creditor 1");
   });
 });

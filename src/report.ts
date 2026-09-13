@@ -105,6 +105,33 @@ export async function writeGstReport(opts: {
   return { markdownPath, csvPath };
 }
 
+/**
+ * The M3 ledger scrutiny artifact pair: the same writer contract and
+ * report-directory boundary (R-R-4). The file stem names the ledger by its
+ * opaque scrutiny id ("L1"), never by name: the returned paths go back to
+ * the model.
+ */
+export async function writeLedgerReport(opts: {
+  reportDir: string;
+  company: string;
+  scrutinyId: string;
+  fromDate: string;
+  toDate: string;
+  markdown: string;
+  findings: CsvFinding[];
+  vault: Vault;
+}): Promise<{ markdownPath: string; csvPath: string }> {
+  await mkdir(opts.reportDir, { recursive: true });
+  const stem = `${slug(opts.company)}-${slug(opts.scrutinyId)}-${opts.fromDate}-${opts.toDate}`;
+  const markdownPath = join(opts.reportDir, `ledger-scrutiny-${stem}.md`);
+  const csvPath = join(opts.reportDir, `ledger-findings-${stem}.csv`);
+
+  await writeFile(markdownPath, demaskText(opts.markdown, opts.vault), "utf8");
+  await writeFile(csvPath, findingsCsv(opts.findings, opts.vault), "utf8");
+
+  return { markdownPath, csvPath };
+}
+
 export async function appendAudit(
   reportDir: string,
   sessionId: string,
