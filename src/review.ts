@@ -21,7 +21,13 @@ import {
  * matchedLedgerName — not the "counterparty"/"ledgerName"/"partyName"/"party"
  * fields the plan draft assumed. See src/downstream.ts.
  */
-const NAME_FIELDS = ["partyLedgerName", "counterLedgerName", "matchedLedgerName"] as const;
+const NAME_FIELDS: ReadonlySet<string> = new Set([
+  "partyLedgerName",
+  "counterLedgerName",
+  "matchedLedgerName",
+  // taxBreakup.taxLedgers[].ledgerName, nested one level down.
+  "ledgerName",
+]);
 
 function maskVoucherRow(
   row: unknown,
@@ -30,26 +36,39 @@ function maskVoucherRow(
   groupOf: Map<string, string>,
 ): unknown {
   if (typeof row !== "object" || row === null) return row;
-  const out: Record<string, unknown> = { ...(row as Record<string, unknown>) };
-  for (const field of NAME_FIELDS) {
-    const v = out[field];
-    if (typeof v !== "string" || !v) continue;
-    const group = groupOf.get(canonicalKey(v)) ?? "";
-    out[field] = maskLedgerName(v, group, classifier, vault);
+  // Two passes, both at every depth (the live row nests taxBreakup and
+  // matchCandidates). Pass 1 masks each ledger-name field by policy, which
+  // vaults every masked name. Pass 2 sweeps every string — narration,
+  // reference, matchCandidates entries — for any name the vault knows, then
+  // scrubs tax-ID shapes and digit runs. The sweep only catches known names —
+  // see the design doc's stated limitation on free-text name detection.
+  return sweepStrings(maskNameFields(row, classifier, vault, groupOf), vault);
+}
+
+function maskNameFields(
+  value: unknown,
+  classifier: Classifier,
+  vault: Vault,
+  groupOf: Map<string, string>,
+): unknown {
+  if (Array.isArray(value)) return value.map((v) => maskNameFields(v, classifier, vault, groupOf));
+  if (typeof value !== "object" || value === null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] =
+      NAME_FIELDS.has(k) && typeof v === "string" && v
+        ? maskLedgerName(v, groupOf.get(canonicalKey(v)) ?? "", classifier, vault)
+        : maskNameFields(v, classifier, vault, groupOf);
   }
-  // NAME_FIELDS is not an allowlist of every field that can carry a real
-  // name: narration, reference and similar free-text fields can too. Sweep
-  // every remaining string value for any name the vault already knows (from
-  // the fields above, or from this session's findings) and substitute its
-  // pseudonym, canonical-key-aware so a whitespace variant still matches.
-  // This only catches known names — see the design doc's stated limitation
-  // on free-text name detection for names never otherwise masked.
-  for (const [k, v] of Object.entries(out)) {
-    if (typeof v === "string") out[k] = maskKnownNames(v, vault);
-  }
-  for (const [k, v] of Object.entries(out)) {
-    if (typeof v === "string") out[k] = scrubSecrets(v as string);
-  }
+  return out;
+}
+
+function sweepStrings(value: unknown, vault: Vault): unknown {
+  if (typeof value === "string") return scrubSecrets(maskKnownNames(value, vault));
+  if (Array.isArray(value)) return value.map((v) => sweepStrings(v, vault));
+  if (typeof value !== "object" || value === null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) out[k] = sweepStrings(v, vault);
   return out;
 }
 

@@ -68,4 +68,18 @@ describe("review", () => {
       /unknown finding/i,
     );
   });
+
+  it("masks nested voucher-row fields: tax ledger names and match candidates", async () => {
+    const s = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    const wrongSide = r.findings.find((f) => f.check === "wrong_side_balance")!;
+    const rows = (await s.ledgerActivity(wrongSide.id, "20250401", "20260331")) as any[];
+    const tie = rows.find((row) => row.voucherNumber === "PUR/0031");
+    expect(tie.partyLedgerName).toBe("Ledger 1");
+    expect(tie.matchCandidates).toEqual(["PUR/0031", "PUR/[number]"]);
+    expect(tie.taxBreakup.taxLedgers.map((t: any) => t.ledgerName)).toEqual(["Input CGST", "Input SGST"]);
+    const json = JSON.stringify(rows);
+    expect(json).not.toContain("918020045566771");
+    expect(json).not.toContain("Zenith Logistics");
+  });
 });

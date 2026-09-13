@@ -76,11 +76,15 @@ describe("no secret leaves the gateway", () => {
       // fields the gateway does not name-mask directly — must resolve to the
       // exact same pseudonym as the finding itself, or the party fragments
       // across the report.
+      // Only PUR/0012 names the creditor on all three fields; the other rows
+      // name a counterparty (Zenith Logistics, Rent) on the party fields.
       if (f.id === wrongSide?.id) {
         const rows = JSON.parse(out);
         for (const row of rows) {
-          for (const field of ["partyLedgerName", "counterLedgerName", "matchedLedgerName"]) {
-            if (field in row) expect(row[field]).toBe(f.ledger);
+          expect(row.matchedLedgerName).toBe(f.ledger);
+          if (row.voucherNumber !== "PUR/0012") continue;
+          for (const field of ["partyLedgerName", "counterLedgerName"]) {
+            expect(row[field]).toBe(f.ledger);
           }
         }
       }
