@@ -20,6 +20,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   for case-insensitive `resolve()`. Getting this backwards silently breaks
   `demaskText` (the alias text in a masked finding/report never matches),
   which is exactly the de-masking path the trial balance report depends on.
+- **Tally's ledger master balances are raw Tally sign: negative = debit** —
+  while everything downstream of the gateway is positive = debit (R-MCP-5).
+  The sibling server's own `tally_trial_balance` flips with `-toAmount(...)`
+  (its `src/tools/reads.ts`), and `src/downstream.ts`'s `ledgers()` flips it
+  at the gateway boundary too (fixed 2026-09-13, source-verified only — live
+  Tally was unreachable; reachable via the Windows host IP, e.g.
+  `172.21.80.1:9000`, never `127.0.0.1`). Its fixtures encode the raw master
+  sign (`test/fixtures/tally-responses.json`). Any new consumer of master
+  balances should rely on this convention, never re-flip.
 - The masking group-name allowlist (`CLEAR_ROOTS`/`PRIMARY_GROUPS` in
   `src/classify.ts`) was verified against one live company, SJ Infra
   (FY 25-26), on 2026-09-08 — 63 groups read from `tally_get_groups`,
