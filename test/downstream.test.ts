@@ -223,3 +223,73 @@ describe("downstream verbose ledger parsing (M2 tax-id scalars)", () => {
     expect(ledgers[0]).toMatchObject({ name: "Acme Traders", openingBalance: 0, closingBalance: 0 });
   });
 });
+
+describe("downstream ledger report typing (M3 scrutiny rows)", () => {
+  it("signs amounts for the queried ledger, re-filters the range and counts dropped rows", async () => {
+    responses.tally_get_ledger_vouchers = JSON.stringify({
+      source: "ledger-vouchers-report",
+      vouchers: [
+        {
+          date: "2026-01-15",
+          voucherType: "Purchase",
+          voucherNumber: "PUR/0012",
+          reference: { "#text": "rich text object" },
+          partyLedgerName: "Acme Traders",
+          counterLedgerName: "",
+          amount: "41250.00",
+          matchedSide: "debit",
+          matchStatus: "MATCHED",
+          taxBreakup: {
+            taxableAmount: "100.00",
+            taxLedgers: [{ ledgerName: "Input CGST", amount: "9.00" }],
+            totalTax: "18.00",
+            effectiveRatePct: "18.00",
+            taxStatus: "matched",
+          },
+        },
+        {
+          date: "20260120",
+          voucherType: "Purchase",
+          voucherNumber: "PUR/0031",
+          reference: "ZL/77",
+          counterLedgerName: "Zenith Logistics",
+          matchedAmount: "12500.00",
+          credit: "12500.00",
+          taxBreakup: { effectiveRatePct: "", taxStatus: "no-tax-rows" },
+        },
+        { date: "20260405", voucherType: "Payment", matchedSide: "credit", amount: "1.00" },
+        { date: "", voucherType: "Payment", matchedSide: "credit", amount: "1.00" },
+        { date: "20260210", voucherType: "Memo", amount: "5.00", debit: "0", credit: "" },
+      ],
+    });
+    const { rows, dropped } = await boot().ledgerVoucherRows(
+      undefined,
+      "Acme Traders",
+      "20260101",
+      "20260331",
+    );
+    expect(dropped).toBe(3);
+    expect(rows).toEqual([
+      {
+        date: "20260115",
+        voucherType: "Purchase",
+        voucherNumber: "PUR/0012",
+        reference: "",
+        counterparty: "Acme Traders",
+        amount: 41250,
+        matchStatus: "matched",
+        tax: { effectiveRatePct: 18, taxStatus: "matched" },
+      },
+      {
+        date: "20260120",
+        voucherType: "Purchase",
+        voucherNumber: "PUR/0031",
+        reference: "ZL/77",
+        counterparty: "Zenith Logistics",
+        amount: -12500,
+        matchStatus: "unknown",
+        tax: { effectiveRatePct: null, taxStatus: "no-tax-rows" },
+      },
+    ]);
+  });
+});

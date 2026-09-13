@@ -33,6 +33,38 @@ export interface LedgerTaxInfo {
   state: string;
 }
 
+/** How the downstream joined a ledger-report row to its voucher; "unknown" when the field is absent. */
+export type MatchStatus = "matched" | "ambiguous" | "unmatched" | "unknown";
+
+/** The scalar part of a row's GST taxBreakup; tax ledger names are deliberately not carried. */
+export interface LedgerVoucherTax {
+  /** totalTax / taxableAmount * 100, or null when the downstream could not compute it. */
+  effectiveRatePct: number | null;
+  /** "matched" | "no-tax-rows" | "ambiguous-shared" | "inconsistent" as the downstream reports it. */
+  taxStatus: string;
+}
+
+/** One typed row of tally_get_ledger_vouchers for the queried ledger. */
+export interface LedgerVoucherRow {
+  /** YYYYMMDD */
+  date: string;
+  voucherType: string;
+  voucherNumber: string;
+  reference: string;
+  /** The other side of the entry (counterLedgerName). Real name: masked by the session. */
+  counterparty: string;
+  /** Signed for the queried ledger: positive = debit (R-MCP-5). */
+  amount: number;
+  matchStatus: MatchStatus;
+  tax: LedgerVoucherTax | null;
+}
+
+export interface LedgerVoucherFetch {
+  rows: LedgerVoucherRow[];
+  /** Rows dropped at the boundary: undated, out of range, or with no readable side. */
+  dropped: number;
+}
+
 export interface Downstream {
   callRaw(tool: string, args: Record<string, unknown>): Promise<string>;
   listCompanies(): Promise<string[]>;
@@ -50,6 +82,13 @@ export interface Downstream {
     fromDate: string,
     toDate: string,
   ): Promise<unknown[]>;
+  /** The same ledger report, typed for scrutiny: signed amounts, range re-filtered. */
+  ledgerVoucherRows(
+    company: string | undefined,
+    ledgerName: string,
+    fromDate: string,
+    toDate: string,
+  ): Promise<LedgerVoucherFetch>;
   /** Day Book with ledger lines for a period, typed and range-filtered at the boundary (R-MCP-5). */
   vouchers(
     company: string | undefined,
@@ -69,12 +108,63 @@ const normDate = (v: unknown): string => String(v ?? "").replace(/[-/.\s]/g, "")
 const truthy = (v: unknown): boolean =>
   v === true || /^(yes|true|1)$/i.test(String(v ?? "").trim());
 
+/** A scalar text field; an object (Tally's rich-text narration/reference) reads as empty, never "[object Object]". */
+const text = (v: unknown): string =>
+  typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "";
+
+/**
+ * +1 debit, -1 credit, 0 unreadable. The live server sends matchedSide
+ * "debit"/"credit" (older recordings: "Dr"/"Cr") plus raw debit/credit
+ * column strings, which are the fallback when the side is absent.
+ */
+const sideSign = (r: Record<string, unknown>): 1 | -1 | 0 => {
+  const side = String(r.matchedSide ?? "").trim().toLowerCase();
+  if (side.startsWith("d")) return 1;
+  if (side.startsWith("c")) return -1;
+  if (Math.abs(num(r.debit)) > 0) return 1;
+  if (Math.abs(num(r.credit)) > 0) return -1;
+  return 0;
+};
+
+const matchStatusOf = (v: unknown): MatchStatus => {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "matched" || s === "ambiguous" || s === "unmatched" ? s : "unknown";
+};
+
+const taxOf = (v: unknown): LedgerVoucherTax | null => {
+  if (typeof v !== "object" || v === null) return null;
+  const t = v as Record<string, unknown>;
+  const pct = String(t.effectiveRatePct ?? "").trim();
+  const n = Number(pct);
+  return {
+    effectiveRatePct: pct !== "" && Number.isFinite(n) ? n : null,
+    taxStatus: text(t.taxStatus),
+  };
+};
+
 const withCompany = (
   args: Record<string, unknown>,
   company: string | undefined,
 ): Record<string, unknown> => (company ? { ...args, company } : args);
 
 export function makeDownstream(call: RawCaller, close: () => Promise<void>): Downstream {
+  const ledgerVoucherEnvelope = async (
+    company: string | undefined,
+    ledgerName: string,
+    fromDate: string,
+    toDate: string,
+  ): Promise<unknown[]> => {
+    const body = await call(
+      "tally_get_ledger_vouchers",
+      withCompany({ ledgerName, fromDate, toDate }, company),
+    );
+    // The downstream server wraps rows in a report envelope
+    // ({ source, company, ledgerName, ..., vouchers: [...] }), not a bare
+    // array as originally assumed — see the downstream's src/tools/reads.ts.
+    const parsed = JSON.parse(body) as { vouchers?: unknown[] };
+    return Array.isArray(parsed.vouchers) ? parsed.vouchers : [];
+  };
+
   return {
     callRaw: call,
 
@@ -154,16 +244,40 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
       return out;
     },
 
-    async ledgerVouchers(company, ledgerName, fromDate, toDate) {
-      const text = await call(
-        "tally_get_ledger_vouchers",
-        withCompany({ ledgerName, fromDate, toDate }, company),
-      );
-      // The downstream server wraps rows in a report envelope
-      // ({ source, company, ledgerName, ..., vouchers: [...] }), not a bare
-      // array as originally assumed — see the downstream's src/tools/reads.ts.
-      const parsed = JSON.parse(text) as { vouchers?: unknown[] };
-      return Array.isArray(parsed.vouchers) ? parsed.vouchers : [];
+    ledgerVouchers: ledgerVoucherEnvelope,
+
+    async ledgerVoucherRows(company, ledgerName, fromDate, toDate) {
+      const raw = await ledgerVoucherEnvelope(company, ledgerName, fromDate, toDate);
+      const from = normDate(fromDate);
+      const to = normDate(toDate);
+      const rows: LedgerVoucherRow[] = [];
+      let dropped = 0;
+      for (const v of raw) {
+        if (typeof v !== "object" || v === null) {
+          dropped += 1;
+          continue;
+        }
+        const r = v as Record<string, unknown>;
+        const date = normDate(r.date);
+        // Same defensive re-filter as vouchers(): an out-of-period row would
+        // corrupt the opening-to-closing reconciliation.
+        const sign = sideSign(r);
+        if (!/^\d{8}$/.test(date) || date < from || date > to || sign === 0) {
+          dropped += 1;
+          continue;
+        }
+        rows.push({
+          date,
+          voucherType: text(r.voucherType),
+          voucherNumber: text(r.voucherNumber),
+          reference: text(r.reference),
+          counterparty: text(r.counterLedgerName) || text(r.partyLedgerName),
+          amount: sign * Math.abs(num(r.amount ?? r.matchedAmount)),
+          matchStatus: matchStatusOf(r.matchStatus),
+          tax: taxOf(r.taxBreakup),
+        });
+      }
+      return { rows, dropped };
     },
 
     async vouchers(company, fromDate, toDate) {
