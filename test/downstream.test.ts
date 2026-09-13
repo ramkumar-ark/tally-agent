@@ -105,11 +105,18 @@ describe("downstream parsing", () => {
     expect(groups).toContainEqual({ name: "Bank Accounts", parent: "Current Assets" });
   });
 
-  it("parses ledger masters with opening and closing balances", async () => {
-    const ledgers = await fakeDownstream().ledgers();
+  it("parses ledger masters, flipping raw Tally master sign to positive = debit", async () => {
+    const d = fakeDownstream();
+    const ledgers = await d.ledgers();
+    // Fixture raw master values: Acme "-41250.00" (debit in raw Tally sign),
+    // HDFC "75000.00" (credit), Rent "-53500.00" (debit).
     const acme = ledgers.find((l) => l.name === "Acme Traders");
+    const bank = ledgers.find((l) => l.name === "HDFC 50200012345678");
+    const rent = ledgers.find((l) => l.name === "Rent");
     expect(acme?.openingBalance).toBe(41250);
     expect(acme?.closingBalance).toBe(41250);
+    expect(bank?.closingBalance).toBe(-75000);
+    expect(rent?.closingBalance).toBe(53500);
   });
 
   it("passes the company through to the downstream call", async () => {

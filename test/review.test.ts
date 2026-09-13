@@ -33,6 +33,17 @@ describe("review", () => {
     expect(suspense?.ledger).toBe("suspense");
   });
 
+  it("reports a debtor's dormant balance on the Dr side (raw Tally master sign flipped)", async () => {
+    const s = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    // Fixture: Acme Traders (creditor group) carries a raw master debit balance
+    // of "-41250.00" at both ends; the gateway must read it as +41250 = Dr.
+    const dormant = r.findings.find((f) => f.check === "dormant_balance");
+    expect(dormant).toBeDefined();
+    expect(dormant?.side).toBe("Dr");
+    expect(dormant?.amount).toBe(41250);
+  });
+
   it("fetches the trial balance once per review", async () => {
     const d = fakeDownstream();
     const s = createSession(d, EMPTY_OVERRIDES);

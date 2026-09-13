@@ -123,11 +123,15 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
         openingBalance?: string;
         closingBalance?: string;
       }>;
+      // Tally's ledger master balances are raw Tally sign (negative = debit).
+      // Flip once here so everything downstream sees the gateway convention,
+      // positive = debit (R-MCP-5), exactly like tally_trial_balance.
+      // The trailing "|| 0" normalizes a flipped zero back to plain 0, not -0.
       return raw.map((l) => ({
         name: String(l.name ?? ""),
         parent: String(l.parent ?? ""),
-        openingBalance: num(l.openingBalance),
-        closingBalance: num(l.closingBalance),
+        openingBalance: -num(l.openingBalance) || 0,
+        closingBalance: -num(l.closingBalance) || 0,
       }));
     },
 
