@@ -1,4 +1,5 @@
 import type { VoucherRow } from "./downstream.js";
+import { money } from "./format.js";
 import type { ReturnRow } from "./returns.js";
 import {
   GST_HEADS,
@@ -368,11 +369,7 @@ export interface GstAggregate {
  * audience. (The same latent collision exists in the M1 check details; it
  * is left alone — milestone boundary.)
  */
-const money = (n: number): string =>
-  new Intl.NumberFormat("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(n);
+// money() now lives in src/format.ts, shared with the M3 ledger scrutiny details.
 
 const nonZeroHeads = (heads: Record<GstHead, number>): string => {
   const parts = GST_HEADS.filter((h) => Math.abs(heads[h]) > 0.005).map(
