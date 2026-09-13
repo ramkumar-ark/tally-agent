@@ -130,3 +130,39 @@ export function sideOf(balance: number): Side | null {
 export function findingId(check: CheckId, ordinal: number): string {
   return `TB-${String(CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
 }
+
+export type LedgerCheckId =
+  | "ls_opening_closing_mismatch"
+  | "ls_wrong_side_during_period"
+  | "ls_duplicate_entry"
+  | "ls_duplicate_reference"
+  | "ls_large_entry"
+  | "ls_round_sum_journal"
+  | "ls_movement_spike"
+  | "ls_activity_gap"
+  | "ls_unjoined_rows"
+  | "ls_gst_rate_nonstandard"
+  | "ls_gst_untaxed_supply";
+
+/** Ledger scrutiny ids live in their own ordinal space (LS-<ledgerSeq>-<ordinal>-<n>). Never renumber. */
+export const LEDGER_CHECK_ORDINAL: Record<LedgerCheckId, number> = {
+  ls_opening_closing_mismatch: 1,
+  ls_wrong_side_during_period: 2,
+  ls_duplicate_entry: 3,
+  ls_duplicate_reference: 4,
+  ls_large_entry: 5,
+  ls_round_sum_journal: 6,
+  ls_movement_spike: 7,
+  ls_activity_gap: 8,
+  ls_unjoined_rows: 9,
+  ls_gst_rate_nonstandard: 10,
+  ls_gst_untaxed_supply: 11,
+};
+
+/**
+ * One scrutiny run per ledger per session shares a ledgerSeq, so two ledgers'
+ * findings never collide in the session's finding-id -> ledger map.
+ */
+export function ledgerFindingId(check: LedgerCheckId, ledgerSeq: number, ordinal: number): string {
+  return `LS-${ledgerSeq}-${String(LEDGER_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
