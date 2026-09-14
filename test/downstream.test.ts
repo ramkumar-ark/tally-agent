@@ -67,6 +67,35 @@ describe("loadConfig", () => {
   });
 });
 
+describe("loadConfig downstream timeout", () => {
+  const base = { TALLY_MCP_COMMAND: "node", TALLY_AGENT_REPORT_DIR: "/tmp/out" };
+
+  it("leaves the downstream timeout unset when the variable is absent", () => {
+    expect(loadConfig(base).downstreamTimeoutMs).toBeUndefined();
+  });
+
+  it("treats an empty value as unset, like the other optional env values", () => {
+    expect(
+      loadConfig({ ...base, TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS: "" }).downstreamTimeoutMs,
+    ).toBeUndefined();
+  });
+
+  it("reads a positive integer number of milliseconds", () => {
+    expect(
+      loadConfig({ ...base, TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS: "900000" })
+        .downstreamTimeoutMs,
+    ).toBe(900000);
+  });
+
+  it("refuses to start on a value that is not a positive integer", () => {
+    for (const bad of ["0", "-1", "1.5", "abc", "60s", "12 34"]) {
+      expect(() =>
+        loadConfig({ ...base, TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS: bad }),
+      ).toThrow(/TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS/);
+    }
+  });
+});
+
 describe("connectDownstream error surfacing", () => {
   it("names the resolved command and argument list when the downstream child fails before the handshake", async () => {
     await expect(
@@ -135,7 +164,44 @@ describe("downstream parsing", () => {
   });
 });
 
-import { makeDownstream } from "../src/downstream.js";
+import { makeDownstream, makeRawCaller, type ToolCallClient } from "../src/downstream.js";
+
+describe("downstream request timeout", () => {
+  function spyClient() {
+    const seen: Array<{ params: unknown; options: unknown }> = [];
+    const client: ToolCallClient = {
+      async callTool(params, _resultSchema, options) {
+        seen.push({ params, options });
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+    };
+    return { client, seen };
+  }
+
+  it("passes no request options when the timeout is unset, keeping the SDK default", async () => {
+    const { client, seen } = spyClient();
+    await makeRawCaller(client)("tally_list_companies", {});
+    expect(seen[0].params).toEqual({ name: "tally_list_companies", arguments: {} });
+    expect(seen[0].options).toBeUndefined();
+  });
+
+  it("passes the configured timeout as the request option on every call", async () => {
+    const { client, seen } = spyClient();
+    const call = makeRawCaller(client, 900000);
+    await call("tally_list_companies", {});
+    await call("tally_trial_balance", { asOnDate: "20260331" });
+    expect(seen).toEqual([
+      {
+        params: { name: "tally_list_companies", arguments: {} },
+        options: { timeout: 900000 },
+      },
+      {
+        params: { name: "tally_trial_balance", arguments: { asOnDate: "20260331" } },
+        options: { timeout: 900000 },
+      },
+    ]);
+  });
+});
 
 const boot = () =>
   makeDownstream(

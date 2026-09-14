@@ -3,6 +3,12 @@ export interface GatewayConfig {
   downstreamArgs: string[];
   reportDir: string;
   defaultCompany?: string;
+  /**
+   * Per-request timeout for calls to the downstream MCP server, in
+   * milliseconds. Undefined means the MCP SDK's own default (60 s); a real
+   * Tally company needs far longer, so this is settable per install.
+   */
+  downstreamTimeoutMs?: number;
   dumpVault: boolean;
 }
 
@@ -29,6 +35,25 @@ function parseDownstreamArgs(raw: string): string[] {
   return trimmed.split(" ").filter(Boolean);
 }
 
+/**
+ * The downstream request timeout, in milliseconds. Absent or empty means the
+ * MCP SDK default (60 s) — an empty value is treated as unset, like
+ * TALLY_DEFAULT_COMPANY. Anything present must be a positive integer: a
+ * fractional or non-numeric value would otherwise reach the SDK as NaN and
+ * silently behave in a surprising way, so it is refused at startup with a
+ * message naming the variable.
+ */
+function parseDownstreamTimeoutMs(raw: string | undefined): number | undefined {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) <= 0 || !Number.isSafeInteger(Number(trimmed))) {
+    throw new Error(
+      `TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS must be a positive integer number of milliseconds, got "${raw}"`,
+    );
+  }
+  return Number(trimmed);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   const downstreamCommand = env.TALLY_MCP_COMMAND;
   if (!downstreamCommand) {
@@ -47,6 +72,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     downstreamArgs: parseDownstreamArgs(env.TALLY_MCP_ARGS ?? ""),
     reportDir,
     defaultCompany: env.TALLY_DEFAULT_COMPANY || undefined,
+    downstreamTimeoutMs: parseDownstreamTimeoutMs(env.TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS),
     dumpVault: env.TALLY_AGENT_DUMP_VAULT === "1",
   };
 }

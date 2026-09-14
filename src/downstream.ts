@@ -8,6 +8,19 @@ export type RawCaller = (
   args: Record<string, unknown>,
 ) => Promise<string>;
 
+/**
+ * The narrow slice of the MCP SDK client `makeRawCaller` needs. Narrowing it
+ * lets a test assert what request options reach `callTool` without spawning
+ * the downstream child or speaking to Tally.
+ */
+export interface ToolCallClient {
+  callTool(
+    params: { name: string; arguments: Record<string, unknown> },
+    resultSchema: unknown,
+    options: { timeout?: number } | undefined,
+  ): Promise<unknown>;
+}
+
 /** One ledger line of a voucher. Amount is positive = debit (flipped once, here). */
 export interface VoucherEntry {
   ledger: string;
@@ -334,6 +347,27 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
   };
 }
 
+/**
+ * Build the raw downstream tool caller. When `timeoutMs` is set it is passed
+ * as the request option on every call; when it is undefined the call is made
+ * without options, so the SDK's own default timeout applies unchanged.
+ */
+export function makeRawCaller(client: ToolCallClient, timeoutMs?: number): RawCaller {
+  const options = timeoutMs === undefined ? undefined : { timeout: timeoutMs };
+  return async (tool, args) => {
+    const res = (await client.callTool({ name: tool, arguments: args }, undefined, options)) as {
+      content?: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    const text = (res.content ?? [])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("");
+    if (res.isError) throw new Error(`downstream ${tool} failed: ${text}`);
+    return text;
+  };
+}
+
 export async function connectDownstream(cfg: GatewayConfig): Promise<Downstream> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -358,18 +392,8 @@ export async function connectDownstream(cfg: GatewayConfig): Promise<Downstream>
     );
   }
 
-  const call: RawCaller = async (tool, args) => {
-    const res = (await client.callTool({ name: tool, arguments: args })) as {
-      content?: Array<{ type: string; text?: string }>;
-      isError?: boolean;
-    };
-    const text = (res.content ?? [])
-      .filter((c) => c.type === "text")
-      .map((c) => c.text ?? "")
-      .join("");
-    if (res.isError) throw new Error(`downstream ${tool} failed: ${text}`);
-    return text;
-  };
-
-  return makeDownstream(call, () => client.close());
+  return makeDownstream(
+    makeRawCaller(client, cfg.downstreamTimeoutMs),
+    () => client.close(),
+  );
 }
