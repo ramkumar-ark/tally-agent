@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { negativeCash, outOfBalance, suspenseBalance } from "../src/checks/index.js";
-import type { GroupRole, ReviewInput, TbRow } from "../src/types.js";
+import { EMPTY_WRONG_GROUP, type GroupRole, type ReviewInput, type TbRow } from "../src/types.js";
 
 function input(over: Partial<ReviewInput> & { rows?: TbRow[] }): ReviewInput {
   const roles: Record<string, GroupRole> = {
@@ -16,6 +16,8 @@ function input(over: Partial<ReviewInput> & { rows?: TbRow[] }): ReviewInput {
     totalCredit: 0,
     roleOf: (g) => roles[g] ?? "other",
     isPrimaryGroup: () => false,
+    ancestryOf: (g) => [g],
+    wrongGroup: EMPTY_WRONG_GROUP,
     ...over,
   };
 }

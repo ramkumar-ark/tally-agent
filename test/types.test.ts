@@ -31,3 +31,9 @@ describe("ledgerFindingId", () => {
     ]);
   });
 });
+
+describe("ledger_in_wrong_group ids", () => {
+  it("takes ordinal 8, after the seven milestone 1 checks", () => {
+    expect(findingId("ledger_in_wrong_group", 2)).toBe("TB-008-2");
+  });
+});

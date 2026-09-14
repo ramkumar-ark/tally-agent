@@ -7,7 +7,8 @@ export type CheckId =
   | "wrong_side_balance"
   | "overdrawn_bank"
   | "ledger_under_primary_group"
-  | "dormant_balance";
+  | "dormant_balance"
+  | "ledger_in_wrong_group";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const CHECK_ORDINAL: Record<CheckId, number> = {
@@ -18,6 +19,7 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   overdrawn_bank: 5,
   ledger_under_primary_group: 6,
   dormant_balance: 7,
+  ledger_in_wrong_group: 8,
 };
 
 export type GstCheckId =
@@ -75,6 +77,22 @@ export type GroupRole =
 
 export type MaskPolicy = "mask" | "clear";
 
+/** What a Tally primary group makes its ledgers: which statement, and which side of it. */
+export type GroupNature = "capital" | "liability" | "asset" | "income" | "expense";
+
+/** What a ledger's name suggests it is. Read in code by src/checks/nameSignal.ts, never by the model. */
+export type NameSignal = "expense" | "income" | "party" | "bank" | "capital" | "loan";
+
+/** Operator tuning for ledger_in_wrong_group, from the "wrongGroup" key of config/overrides.json. */
+export interface WrongGroupConfig {
+  /** Ledgers confirmed as correctly placed. Matched by canonicalKey (case and whitespace insensitive). */
+  ignoreLedgers: string[];
+  /** Company-specific single words added to the built-in vocabulary; "neutral" words veto a name. */
+  keywords: Partial<Record<NameSignal | "neutral", string[]>>;
+}
+
+export const EMPTY_WRONG_GROUP: WrongGroupConfig = { ignoreLedgers: [], keywords: {} };
+
 /** One trial balance row, amounts parsed. Positive = debit. */
 export interface TbRow {
   name: string;
@@ -102,7 +120,8 @@ export interface Finding {
   group: string;
   amount: number;
   side: Side | null;
-  expected: Side | null;
+  /** The expected side, or for ledger_in_wrong_group the likely nature of the ledger's proper group. */
+  expected: Side | GroupNature | null;
   detail: string;
 }
 
@@ -115,6 +134,9 @@ export interface ReviewInput {
   totalCredit: number;
   roleOf(group: string): GroupRole;
   isPrimaryGroup(group: string): boolean;
+  /** The group, its parent, and so on up to the top — nearest first (Classifier.ancestry). */
+  ancestryOf(group: string): string[];
+  wrongGroup: WrongGroupConfig;
 }
 
 export type Check = (input: ReviewInput) => Finding[];

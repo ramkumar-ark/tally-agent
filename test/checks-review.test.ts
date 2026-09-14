@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dormantBalance, ledgerUnderPrimaryGroup } from "../src/checks/index.js";
-import type { LedgerMaster, ReviewInput, TbRow } from "../src/types.js";
+import { EMPTY_WRONG_GROUP, type LedgerMaster, type ReviewInput, type TbRow } from "../src/types.js";
 
 const PRIMARY = new Set(["Current Assets", "Current Liabilities", "Indirect Expenses"]);
 
@@ -13,6 +13,8 @@ function input(rows: TbRow[], ledgers: LedgerMaster[] = []): ReviewInput {
     totalCredit: 0,
     roleOf: () => "other",
     isPrimaryGroup: (g) => PRIMARY.has(g),
+    ancestryOf: (g) => [g],
+    wrongGroup: EMPTY_WRONG_GROUP,
   };
 }
 

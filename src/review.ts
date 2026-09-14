@@ -10,6 +10,7 @@ import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mas
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
 import { createVault, type Vault } from "./vault.js";
 import {
+  EMPTY_WRONG_GROUP,
   TOTALS_TOLERANCE,
   type Finding,
   type GroupRole,
@@ -17,6 +18,7 @@ import {
   type Severity,
   type Side,
   type TbRow,
+  type WrongGroupConfig,
 } from "./types.js";
 
 /**
@@ -165,7 +167,11 @@ export interface Session {
   vault: Vault;
 }
 
-export function createSession(d: Downstream, overrides: Overrides): Session {
+export function createSession(
+  d: Downstream,
+  overrides: Overrides,
+  wrongGroup: WrongGroupConfig = EMPTY_WRONG_GROUP,
+): Session {
   const vault = createVault();
   /** finding id -> real ledger name, for drill-down without the model holding it. */
   const realLedgerByFinding = new Map<string, string>();
@@ -200,6 +206,8 @@ export function createSession(d: Downstream, overrides: Overrides): Session {
       totalCredit: tb.totalCredit,
       roleOf: (g) => currentClassifier.role(g),
       isPrimaryGroup: (g) => currentClassifier.isPrimaryGroup(g),
+      ancestryOf: (g) => currentClassifier.ancestry(g),
+      wrongGroup,
     });
 
     const findings = raw.map((f) => {

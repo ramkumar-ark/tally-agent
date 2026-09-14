@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { overdrawnBank, wrongSideBalance } from "../src/checks/index.js";
-import type { GroupRole, ReviewInput, TbRow } from "../src/types.js";
+import { EMPTY_WRONG_GROUP, type GroupRole, type ReviewInput, type TbRow } from "../src/types.js";
 
 const roles: Record<string, GroupRole> = {
   "Sundry Debtors": "debtor",
@@ -21,6 +21,8 @@ function input(rows: TbRow[]): ReviewInput {
     totalCredit: 0,
     roleOf: (g) => roles[g] ?? "other",
     isPrimaryGroup: () => false,
+    ancestryOf: (g) => [g],
+    wrongGroup: EMPTY_WRONG_GROUP,
   };
 }
 
