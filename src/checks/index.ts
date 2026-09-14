@@ -1,5 +1,6 @@
 import type { Check, Finding, ReviewInput } from "../types.js";
 import { dormantBalance } from "./dormantBalance.js";
+import { ledgerInWrongGroup } from "./ledgerInWrongGroup.js";
 import { ledgerUnderPrimaryGroup } from "./ledgerUnderPrimaryGroup.js";
 import { negativeCash } from "./negativeCash.js";
 import { outOfBalance } from "./outOfBalance.js";
@@ -9,6 +10,7 @@ import { wrongSideBalance } from "./wrongSideBalance.js";
 
 export {
   dormantBalance,
+  ledgerInWrongGroup,
   ledgerUnderPrimaryGroup,
   negativeCash,
   outOfBalance,
