@@ -60,6 +60,12 @@ describe("no secret leaves the gateway", () => {
     outputs.push(await tools.get("tb_list_companies")!({}));
 
     const review = JSON.parse(outputs[0]);
+    // Non-vacuity for the wrong-group secrets: the expense ledger parked under
+    // Capital Account must really be reported, and only by its pseudonym.
+    const misgrouped = review.findings.find(
+      (f: any) => f.check === "ledger_in_wrong_group" && f.group === "Capital Account",
+    );
+    expect(misgrouped?.ledger).toMatch(/^Capital \d+$/);
     const wrongSide = review.findings.find((f: any) => f.check === "wrong_side_balance");
     for (const f of review.findings) {
       if (!f.ledger) continue;
