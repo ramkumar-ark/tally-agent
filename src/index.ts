@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
-import { loadOverrides } from "./overrides.js";
+import { loadOverrides, loadWrongGroup } from "./overrides.js";
 import { appendAudit, writeGstReport, writeLedgerReport, writeReport, writeVaultDump } from "./report.js";
 import {
   createSession,
@@ -312,8 +312,9 @@ async function main(): Promise<void> {
   const overrides = loadOverrides(overridesFile, (why) =>
     console.error(`tally-agent: no ledger/group overrides loaded (${why}): ${overridesFile}`),
   );
+  const wrongGroup = loadWrongGroup(overridesFile);
   const downstream = await connectDownstream(cfg);
-  const session = createSession(downstream, overrides);
+  const session = createSession(downstream, overrides, wrongGroup);
 
   const server = new McpServer(
     { name: "tally-agent", version: "0.1.0" },

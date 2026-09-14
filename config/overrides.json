@@ -2,5 +2,17 @@
   "forceMaskLedgers": [],
   "forceClearLedgers": [],
   "forceMaskGroups": [],
-  "forceClearGroups": []
+  "forceClearGroups": [],
+  "wrongGroup": {
+    "ignoreLedgers": [],
+    "keywords": {
+      "expense": [],
+      "income": [],
+      "party": [],
+      "bank": [],
+      "capital": [],
+      "loan": [],
+      "neutral": []
+    }
+  }
 }
