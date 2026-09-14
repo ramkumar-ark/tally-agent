@@ -48,6 +48,27 @@ describe("tb_review", () => {
     expect(parsed.findings.length).toBeGreaterThan(0);
     expect(out).not.toContain("50200012345678");
   });
+
+  it("describes eight checks and returns the wrong-group findings", async () => {
+    const descriptions = new Map<string, string>();
+    const tools = new Map<string, (args: any) => Promise<string>>();
+    registerTools(
+      (name, description, _schema, handler) => {
+        descriptions.set(name, description);
+        tools.set(name, handler);
+      },
+      createSession(fakeDownstream(), EMPTY_OVERRIDES),
+      { reportDir: mkdtempSync(join(tmpdir(), "tally-agent-")) },
+      "20260331T100000Z",
+    );
+    expect(descriptions.get("tb_review")).toMatch(/^Run the eight trial balance sanity checks/);
+    const parsed = JSON.parse(await tools.get("tb_review")!({ asOnDate: "20260331" }));
+    const wrong = parsed.findings.filter((f: any) => f.check === "ledger_in_wrong_group");
+    expect(wrong.map((f: any) => [f.id, f.ledger, f.expected])).toEqual([
+      ["TB-008-1", "Capital 1", "expense"],
+      ["TB-008-2", "nimbus enterprises", "asset"],
+    ]);
+  });
 });
 
 describe("tb_write_report", () => {
@@ -62,6 +83,25 @@ describe("tb_write_report", () => {
     const parsed = JSON.parse(out);
     expect(parsed.markdownPath).toMatch(/\.md$/);
     expect(parsed.csvPath).toMatch(/\.csv$/);
+  });
+
+  it("writes a wrong-group finding to disk under its real name, with the group nature", async () => {
+    const { tools } = harness();
+    await tools.get("tb_review")!({ asOnDate: "20260331" });
+    const parsed = JSON.parse(
+      await tools.get("tb_write_report")!({
+        company: "Demo Traders Pvt Ltd",
+        asOnDate: "20260331",
+        markdown: "# Review\n\nCapital 1 is grouped wrongly.",
+      }),
+    );
+    const csv = readFileSync(parsed.csvPath, "utf8");
+    expect(csv).toContain(
+      'TB-008-1,ledger_in_wrong_group,warning,orchid medical expenses,Capital Account,18000.00,Dr,expense,' +
+        '"orchid medical expenses reads as an expense ledger but is grouped under Capital Account,',
+    );
+    expect(csv).not.toContain("Capital 1");
+    expect(readFileSync(parsed.markdownPath, "utf8")).toContain("orchid medical expenses is grouped wrongly.");
   });
 
   it("refuses when no review has been run", async () => {

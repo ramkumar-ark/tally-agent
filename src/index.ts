@@ -101,7 +101,7 @@ export function registerTools(
 
   register(
     "tb_review",
-    "Run the seven trial balance sanity checks as of a date and return masked findings. " +
+    "Run the eight trial balance sanity checks as of a date and return masked findings. " +
       "Party ledgers appear as pseudonyms such as 'Creditor 3'; nominal accounts appear by name. " +
       "Drill into a finding with tb_ledger_activity using its id.",
     {

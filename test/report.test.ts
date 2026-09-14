@@ -45,6 +45,31 @@ describe("findingsCsv", () => {
       "id,check,severity,ledger,group,amount,side,expected,detail",
     );
   });
+
+  it("carries a group nature in the expected column for a wrong-group finding", () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Orchid Medical Expenses", "capital");
+    const csv = findingsCsv(
+      [
+        {
+          id: "TB-008-1",
+          check: "ledger_in_wrong_group",
+          severity: "warning",
+          ledger: alias,
+          group: "Capital Account",
+          amount: 18000,
+          side: "Dr",
+          expected: "expense",
+          detail: `${alias} reads as an expense ledger`,
+        },
+      ],
+      vault,
+    );
+    expect(csv.split("\n")[1]).toBe(
+      "TB-008-1,ledger_in_wrong_group,warning,Orchid Medical Expenses,Capital Account,18000.00,Dr,expense," +
+        "Orchid Medical Expenses reads as an expense ledger",
+    );
+  });
 });
 
 describe("writeReport", () => {
