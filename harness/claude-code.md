@@ -1,5 +1,11 @@
 # Claude Code setup
 
+This document covers two verified setups. Sections 1–5 are **native Windows**
+(verified 2026-09-09, real paths). The **WSL2 Ubuntu** variant is in
+[WSL2 (Ubuntu) setup](#wsl2-ubuntu-setup) — read that
+section instead of sections 1–3 when Claude Code runs inside WSL; sections 4–5
+apply to both except where noted.
+
 Every step below was executed on this machine on 2026-09-09 against the live
 Tally Prime install, and the paths are that machine's real paths, not
 placeholders. Where something could **not** be executed, it says so and why —
@@ -197,6 +203,105 @@ starts a new one.
 `/mcp` showing `tally-agent` as failed, with no other clue, is almost always one
 of the first three rows. Run the gateway by hand with the same env to see the
 real error.
+
+## WSL2 (Ubuntu) setup
+
+Verified 2026-09-14 on: WSL2 Ubuntu (kernel
+`6.18.33.2-microsoft-standard-WSL2`), Node v24.21.0, npm 11.19.0, Claude Code
+2.1.270, TallyPrime XML/HTTP gateway on port 9000. Use this section instead of
+sections 1–3 when Claude Code runs inside WSL.
+
+### Three differences from the native-Windows setup
+
+1. **`TALLY_HOST=127.0.0.1`.** WSL here is in **mirrored networking mode**
+   (`[wsl2] networkingMode=mirrored` in `.wslconfig`), so Windows' Tally gateway
+   on its own `localhost` is reachable from WSL at `127.0.0.1`. The Windows-host
+   address used in NAT mode (for example `172.21.80.1`) is stale here and times
+   out. Probe before blaming anything else — with mirrored networking,
+   `127.0.0.1:9000` is open and `172.21.80.1:9000` is not.
+2. **The deny-rule path needs two leading slashes on Linux.**
+   `Read(/home/ram/tally-reports/**)` silently matches nothing;
+   `Read(//home/ram/tally-reports/**)` blocks as intended. Same three-run
+   evidence as step 3: the single-slash form returned the sentinel file, the
+   double-slash form was blocked, and the Bash control confirmed Bash was
+   genuinely enabled.
+3. **Set `TALLY_DEFAULT_COMPANY`.** It is optional on Windows, but the upstream
+   does not auto-select the single loaded company: with no default and no
+   `company` argument it throws
+   `No company specified and no default configured`. Recommended.
+
+### Build first
+
+The primary clone ships no `dist/`, so build before pointing Claude Code at it:
+
+```bash
+cd /home/ram/firstmate/projects/tally-agent
+npm install && npm run build
+```
+
+Gateway startup is also slow when the upstream lives on `/mnt/f`: Windows-drive
+reads make the upstream child's boot take several seconds. A hand start showed
+no stderr at 4 s and both `running` lines at 12 s. That is not a silent exit.
+
+### Working `.mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "tally-agent": {
+      "command": "node",
+      "args": ["/home/ram/firstmate/projects/tally-agent/dist/index.js"],
+      "env": {
+        "TALLY_MCP_COMMAND": "node",
+        "TALLY_MCP_ARGS": "[\"/mnt/f/Software Projects/tally_prime_mcp_server/dist/index.js\"]",
+        "TALLY_HOST": "127.0.0.1",
+        "TALLY_PORT": "9000",
+        "TALLY_AGENT_REPORT_DIR": "/home/ram/tally-reports",
+        "TALLY_DEFAULT_COMPANY": "RVS Constructions ( Firm) - FY 25-26"
+      }
+    }
+  }
+}
+```
+
+### Working `.claude/settings.json`
+
+```json
+{
+  "permissions": {
+    "deny": ["Read(//home/ram/tally-reports/**)"]
+  }
+}
+```
+
+### Timeouts on a real company
+
+The gateway→upstream request timeout is the MCP SDK default of **60 s**, which
+alone aborts `tb_review` on any real company. Raise the whole chain together:
+
+| Variable | Set where | Value used |
+| --- | --- | --- |
+| `TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS` | gateway `env` | `900000` |
+| `TALLY_TIMEOUT_MS` | gateway `env` (forwarded to the upstream child) | `900000` |
+| `MCP_TOOL_TIMEOUT` / `MCP_TIMEOUT` | Claude Code's own environment | `900000` |
+
+`TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS` is the gateway's downstream timeout; leave
+it unset to keep the SDK default. `TALLY_TIMEOUT_MS` is read by the **upstream**
+server — the gateway forwards its environment to the child, so it is set in the
+gateway's `env` block above. `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` bound Claude
+Code's own call to the gateway, so they belong to Claude Code's environment, not
+to the gateway's `env` block. The verified `tb_review` run took 10.7 minutes.
+
+### Large-company note
+
+On a large company the upstream connector exports **every voucher with no date
+filter** — 40 MB for the trial balance, 53 MB for the GST day book — and can
+drive Tally into its `Error` state. Slow or failing `tb_review` /
+`tb_gst_summary` / `tb_ledger_scrutiny` on such a company is the upstream
+voucher export, **not a setup failure**; restart Tally, which recovers. On the
+company used for this verification `tb_review` completed in 10.7 min peaking at
+2.37 GB RSS, while `tb_gst_summary` consumed the full 15-minute cap and wedged
+Tally. Fixing that export is a separate upstream task.
 
 ## What is not verified
 

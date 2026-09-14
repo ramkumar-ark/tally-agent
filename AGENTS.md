@@ -24,9 +24,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   while everything downstream of the gateway is positive = debit (R-MCP-5).
   The sibling server's own `tally_trial_balance` flips with `-toAmount(...)`
   (its `src/tools/reads.ts`), and `src/downstream.ts`'s `ledgers()` flips it
-  at the gateway boundary too (fixed 2026-09-13, source-verified only — live
-  Tally was unreachable; reachable via the Windows host IP, e.g.
-  `172.21.80.1:9000`, never `127.0.0.1`). Its fixtures encode the raw master
+  at the gateway boundary too (fixed 2026-09-13, source-verified only). From
+  WSL, live Tally is reachable at `127.0.0.1:9000` under mirrored networking;
+  the NAT-mode host address `172.21.80.1` is stale and times out — do not use
+  it. Its fixtures encode the raw master
   sign (`test/fixtures/tally-responses.json`). Any new consumer of master
   balances should rely on this convention, never re-flip.
 - The masking group-name allowlist (`CLEAR_ROOTS`/`PRIMARY_GROUPS` in
@@ -116,6 +117,24 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   every depth. A new nested name field must be added to `NAME_FIELDS`.
 - `matchedSide` is `"debit"`/`"credit"` from the live server but `"Dr"` in the
   older M1 fixture row; `ledgerVoucherRows()` accepts both.
+
+## Sharp edges found during the WSL setup (2026-09-14)
+
+- The gateway→upstream request timeout defaults to the MCP SDK's 60 s, which
+  aborts `tb_review` on any real company. `TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS`
+  (parsed in `src/config.ts`, passed to `client.callTool` in
+  `src/downstream.ts`) raises it; the upstream's `TALLY_TIMEOUT_MS` and Claude
+  Code's `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` must rise with it. The real ceiling on
+  a large company is the upstream connector's whole-company voucher export (40 MB
+  trial balance, 53 MB GST day book, no date filter), which can drive Tally into
+  its `Error` state; a timeout there is upstream, not the gateway, and Tally
+  recovers only on restart. Per-setup details: `harness/claude-code.md`'s WSL2
+  section.
+- WSL2 mirrored networking puts Tally at `127.0.0.1`, not a NAT-mode host IP;
+  POSIX permission rules need the `//` prefix
+  (`Read(//home/ram/tally-reports/**)`); and `TALLY_DEFAULT_COMPANY` is
+  recommended because the upstream will not auto-select the loaded company. See
+  `harness/claude-code.md`.
 
 ## Maintaining this file
 

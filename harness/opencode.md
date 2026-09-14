@@ -19,7 +19,8 @@ npm install && npm run build
         "TALLY_MCP_COMMAND": "node",
         "TALLY_MCP_ARGS": "[\"/absolute/path/to/tally_prime_mcp_server/dist/index.js\"]",
         "TALLY_AGENT_REPORT_DIR": "/absolute/path/outside/this/project/tally-reports",
-        "TALLY_DEFAULT_COMPANY": "Your Company Name"
+        "TALLY_DEFAULT_COMPANY": "Your Company Name",
+        "TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS": "900000"
       }
     }
   },
@@ -40,6 +41,14 @@ documented default. **Every path on the machine this was verified on contains a
 space, so this form is required**: plain whitespace-splitting (still accepted for a
 single-token value with no spaces) cuts that path into two bogus arguments and the
 downstream server dies with `Cannot find module 'F:\Software'`.
+
+`TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS` raises the gateway→upstream request timeout
+from the MCP SDK's 60 s default, which cannot complete `tb_review` on any real
+company. Omit it to keep the default; the gateway refuses to start on a value
+that is not a positive integer. Raise the upstream's `TALLY_TIMEOUT_MS` and
+opencode's own tool/MCP timeout alongside it — see the
+[WSL2 section of `claude-code.md`](claude-code.md#wsl2-ubuntu-setup) for the
+timeout chain and the large-company caveat.
 
 Same rule as Claude Code: the report directory sits outside the project and the
 harness is denied read access to it. Reports are written de-masked.
