@@ -179,3 +179,69 @@ describe("ledger scrutiny (M3)", () => {
     expect((await s.ledgerScrutiny(rent.id, "20250401", "20260331")).scrutinyId).toBe("L2");
   });
 });
+
+describe("ledger in wrong group", () => {
+  it("reports the expense ledger under Capital Account by pseudonym, with no fragment of its name", async () => {
+    const s = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    const f = r.findings.find((x) => x.check === "ledger_in_wrong_group" && x.group === "Capital Account")!;
+    expect(f).toMatchObject({
+      id: "TB-008-1",
+      severity: "warning",
+      ledger: "Capital 1",
+      amount: 18000,
+      side: "Dr",
+      expected: "expense",
+    });
+    expect(f.detail).toBe(
+      "Capital 1 reads as an expense ledger but is grouped under Capital Account, " +
+        "with a Dr balance of 18,000.00 as of 31-Mar-2026; as placed, it is kept out of the profit and loss account. " +
+        "Move it under Direct Expenses, Indirect Expenses or Purchase Accounts, " +
+        "or under a Drawings sub-group of Capital Account if it is an owner's personal spending. " +
+        "If the placement is deliberate, list it in wrongGroup.ignoreLedgers in config/overrides.json",
+    );
+    expect(JSON.stringify(r)).not.toMatch(/orchid|medical/i);
+  });
+
+  it("reports a party ledger under a purchase group in the clear, as every ledger there already is", async () => {
+    const s = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    const f = r.findings.find((x) => x.check === "ledger_in_wrong_group" && x.group === "Domestic Purchases");
+    expect(f).toMatchObject({ id: "TB-008-2", ledger: "nimbus enterprises", side: "Dr", expected: "asset" });
+  });
+
+  it("stays silent for personal spending under the Drawings sub-group", async () => {
+    const s = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    const groups = r.findings.filter((x) => x.check === "ledger_in_wrong_group").map((x) => x.group);
+    expect(groups).toEqual(["Capital Account", "Domestic Purchases"]);
+  });
+
+  it("drills into a wrong-group finding by id, reaching the real ledger", async () => {
+    const d = fakeDownstream();
+    const s = createSession(d, EMPTY_OVERRIDES);
+    const r = await s.review(undefined, "20260331");
+    const f = r.findings.find((x) => x.check === "ledger_in_wrong_group" && x.group === "Capital Account")!;
+    await s.ledgerActivity(f.id, "20250401", "20260331");
+    expect(d.calls.find((c) => c.tool === "tally_get_ledger_vouchers")?.args.ledgerName).toBe(
+      "orchid medical expenses",
+    );
+  });
+
+  it("passes the operator's wrongGroup tuning through to the check", async () => {
+    const s = createSession(fakeDownstream(), EMPTY_OVERRIDES, {
+      ignoreLedgers: ["Orchid Medical Expenses"],
+      keywords: { neutral: ["enterprises"] },
+    });
+    const r = await s.review(undefined, "20260331");
+    expect(r.findings.filter((x) => x.check === "ledger_in_wrong_group")).toEqual([]);
+  });
+
+  it("masks a party-named ledger in a clear group once the operator lists it in forceMaskLedgers", async () => {
+    const s = createSession(fakeDownstream(), { ...EMPTY_OVERRIDES, forceMaskLedgers: ["Nimbus Enterprises"] });
+    const r = await s.review(undefined, "20260331");
+    const f = r.findings.find((x) => x.id === "TB-008-2")!;
+    expect(f.ledger).toMatch(/^Ledger \d+$/);
+    expect(JSON.stringify(r)).not.toMatch(/nimbus/i);
+  });
+});

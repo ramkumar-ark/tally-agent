@@ -117,7 +117,7 @@ describe("downstream parsing", () => {
     const tb = await d.trialBalance("Demo Traders Pvt Ltd", "20260331");
     expect(tb.totalDebit).toBe(175000);
     expect(tb.totalCredit).toBe(174000);
-    expect(tb.rows).toHaveLength(5);
+    expect(tb.rows).toHaveLength(8);
     const acme = tb.rows.find((r) => r.name === "acme traders");
     expect(acme?.balance).toBe(41250);
     expect(acme?.parent).toBe("Sundry Creditors");

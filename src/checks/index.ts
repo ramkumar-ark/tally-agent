@@ -27,6 +27,7 @@ export const ALL_CHECKS: Check[] = [
   overdrawnBank,
   ledgerUnderPrimaryGroup,
   dormantBalance,
+  ledgerInWrongGroup,
 ];
 
 export function runChecks(input: ReviewInput): Finding[] {
