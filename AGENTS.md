@@ -136,6 +136,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   recommended because the upstream will not auto-select the loaded company. See
   `harness/claude-code.md`.
 
+## Sharp edges found adding check 8 (ledger in wrong group)
+
+- A finding `detail` may quote a ledger's whole name, never a word of it.
+  `maskFinding` swaps only the whole string for its pseudonym, so a quoted
+  fragment of a masked name reaches the model. `test/leak.test.ts` holds
+  `orchid` and `medical` as secrets to catch exactly this.
+- The `wrongGroup` key of `config/overrides.json` is read by
+  `loadWrongGroup` (`src/overrides.ts`), separately from `loadOverrides`.
+  Unlike `loadOverrides`, it throws on a bad keyword. `Finding.expected` may
+  hold a group nature (`expense`, `asset`, …) as well as a side.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

@@ -13,7 +13,7 @@ from a chat harness, where no raw accounting PII reaches the language model.
 **In scope for this milestone**
 
 - A masking MCP gateway that is the only MCP server the harness connects to.
-- Seven deterministic trial balance checks, computed in code.
+- Eight deterministic trial balance checks, computed in code. The eighth was added after this milestone (§5).
 - Masked findings, a de-masked Markdown report, a de-masked findings CSV, and a session audit log.
 - Harness configuration for Claude Code and opencode.
 
@@ -25,7 +25,8 @@ from a chat harness, where no raw accounting PII reaches the language model.
 - GST summary/mismatch analysis, single-ledger scrutiny, and the finalization checklist.
   Each is a later milestone that builds on this one.
 - Name detection inside ledger names. Deferred in favour of a deterministic group rule plus
-  an operator override file (§4.3).
+  an operator override file (§4.3). Check 8 (§5) reads whole words of a ledger name only to
+  judge its group; it never changes what is masked.
 
 ## 2. Decisions taken
 
@@ -155,6 +156,10 @@ the clear until it is added to the override file. Name detection is deferred del
 deterministic rule plus a correction list is honest, where an unreliable detector would imply
 a guarantee it cannot keep.
 
+Check 8, `ledger_in_wrong_group`, makes such a ledger likelier to surface: a party-looking name
+under a clear group is reported in the clear, as that ledger already is everywhere else. The
+remedy is the same: list the ledger in `forceMaskLedgers`.
+
 ### 4.5 Field-level policy
 
 The downstream `tally_get_ledger` returns address, bank account number, IFSC code, email,
@@ -163,7 +168,7 @@ tool returns bank details, address, email or phone. GSTIN, where it appears at a
 
 ## 5. The checks
 
-Seven checks. Severity is assigned by the rule that fires; the model may prioritise and
+Eight checks. Severity is assigned by the rule that fires; the model may prioritise and
 explain within a severity but may not promote or demote one.
 
 ### Critical — the books are wrong
@@ -192,6 +197,13 @@ explain within a severity but may not promote or demote one.
 7. **`dormant_balance`** — non-zero opening, no movement in the period, closing identical to
    opening. The stale advance or old creditor carried for years.
 
+### Warning — added after milestone 1
+
+8. **`ledger_in_wrong_group`** — a ledger whose name reads as one statement while its group
+   places it in the other, such as an expense ledger under Capital Account. It matches whole
+   words of the name against fixed word lists and never changes masking. Design:
+   [`2026-09-14-ledger-in-wrong-group-design.md`](2026-09-14-ledger-in-wrong-group-design.md).
+
 ### Deferred to a follow-up
 
 - **`round_sum_balance`** — exact round figures hinting at estimates or plugs. Noisy without
@@ -209,7 +221,7 @@ ledger    Creditor 23               masked where policy requires; nominal accoun
 group     Sundry Creditors          never masked
 amount    41250.00
 side      Dr
-expected  Cr
+expected  Cr                        a side; for check 8, a group nature such as expense
 detail    Creditor with a debit balance as of 31-Mar-2026
 followUp  tb_ledger_activity(TB-004-17)
 ```
@@ -226,7 +238,7 @@ Three properties are deliberate:
 
 | Tool | Purpose |
 |---|---|
-| `tb_review(company?, asOnDate)` | Runs all seven checks. Returns totals, counts by severity, and the masked findings. |
+| `tb_review(company?, asOnDate)` | Runs all eight checks. Returns totals, counts by severity, and the masked findings. |
 | `tb_ledger_activity(findingId, fromDate?, toDate?)` | Voucher-level context for one finding. Resolves the id to a real ledger internally, calls the downstream ledger-vouchers tool, returns masked rows. |
 | `tb_list_companies()` | Company names as returned by Tally. Not masked — the operator's own company is not PII to the operator. |
 | `tb_write_report(markdown, findings?)` | Writes the de-masked Markdown report and the findings CSV to the configured output directory. Returns the paths written. |
@@ -294,8 +306,9 @@ with invented ones, real shapes kept. Committed to the repo.
 | Downstream tool contract changes | Gateway breaks | Recorded fixtures fail at test time, not in front of an accountant. Coupling is documented. |
 | Predefined group spellings differ from those assumed | Ledgers misclassified — possibly a mask that should be clear, or worse | Verify group names against a live company before the classifier is considered done. Unrecognised defaults to masked, so the failure direction is safe. |
 | Person name inside a clear-group ledger | Real name reaches the model | Override file; documented limitation; name detection deferred |
+| Party-looking name under a clear group, reported by check 8 | A clear ledger becomes more visible in findings; nothing masked is exposed | `forceMaskLedgers`, as above. Check 8 details quote only the whole name, which the masker swaps (check 8 design §7) |
 | Model reads back a de-masked report | Real names reach the model | Both §7.1 mitigations |
-| Trial balance fetch is slow on large companies | Poor first-call experience | Downstream caches for 5 minutes; `tb_review` fetches once and runs all seven checks over that one result |
+| Trial balance fetch is slow on large companies | Poor first-call experience | Downstream caches for 5 minutes; `tb_review` fetches once and runs all eight checks over that one result |
 
 ## 10. Milestone boundary
 

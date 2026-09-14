@@ -22,7 +22,7 @@ Milestone 1 — read-only trial balance review — is implemented. See
 [`docs/design/2026-09-07-trial-balance-review-design.md`](docs/design/2026-09-07-trial-balance-review-design.md)
 for the design and [`harness/`](harness/) for setup.
 
-The gateway masks party, bank, capital and loan ledger identities, runs seven
+The gateway masks party, bank, capital and loan ledger identities, runs eight
 trial balance checks in code, and writes de-masked reports to a directory outside
 the harness's reach.
 

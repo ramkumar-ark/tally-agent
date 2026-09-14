@@ -180,7 +180,8 @@ returned a balanced trial balance (debits and credits both 7,734,887.39) with 34
 findings — 0 critical, 1 warning, 33 review. Party ledgers came back to the model
 as `Debtor 1` and the like; the written Markdown and CSV contained the real
 names, with no pseudonym left in either. Your numbers will differ; the shape is
-what to check.
+what to check. That run predates the eighth check, `ledger_in_wrong_group`, so a
+run today may show more warnings.
 
 Three files land per run: `trial-balance-review-<company>-<date>.md`,
 `findings-<company>-<date>.csv`, and `session-<timestamp>.jsonl` (one audit line
