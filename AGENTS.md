@@ -58,8 +58,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Sharp edges found wiring milestone 1 up for real (2026-09-09)
 
 - **The upstream Tally MCP server is `F:\Software Projects\tally_prime_mcp_server`**
-  (package `tally-prime-mcp-server`; ships a committed `dist/`, no build
-  needed). Confirm any candidate by grepping its `dist/` for the five tools
+  (package `tally-prime-mcp-server`; its `dist/` is gitignored build output,
+  not committed — run `npm run build` in that folder after pulling its changes,
+  then restart the gateway/session to pick them up). Confirm any candidate by
+  grepping its `dist/` for the five tools
   `src/downstream.ts` calls. The `tally_mcp_server_v6` directory under
   `F:\AgenticWorkspace\Tally Prime Automation\` is a decoy — an unrelated older
   server registering none of them — and its `1766393040_`-prefixed sibling is
