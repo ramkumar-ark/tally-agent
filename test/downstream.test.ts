@@ -213,10 +213,10 @@ describe("downstream request timeout", () => {
   });
 });
 
-const boot = () =>
+const boot = (overrides: Record<string, string> = {}) =>
   makeDownstream(
     async (tool, _args) => {
-      const body = responses[tool];
+      const body = { ...responses, ...overrides }[tool];
       if (body === undefined) throw new Error(`no fixture for ${tool}`);
       return body;
     },
@@ -289,14 +289,64 @@ describe("downstream verbose ledger parsing (M2 tax-id scalars)", () => {
         parent: "Sundry Creditors",
         gstin: "27AAAAA0000A1Z5",
         state: "Maharashtra",
+        pan: null,
+        isTdsApplicable: false,
+        tdsDeducteeType: "",
+        natureOfPayment: null,
       },
-      { name: "Local Vendor", parent: "Sundry Creditors", gstin: null, state: "" },
+      {
+        name: "Local Vendor",
+        parent: "Sundry Creditors",
+        gstin: null,
+        state: "",
+        pan: null,
+        isTdsApplicable: false,
+        tdsDeducteeType: "",
+        natureOfPayment: null,
+      },
     ]);
   });
 
   it("still parses the plain (non-verbose) ledger masters", async () => {
     const ledgers = await boot().ledgers(undefined);
     expect(ledgers[0]).toMatchObject({ name: "Acme Traders", openingBalance: 0, closingBalance: 0 });
+  });
+});
+
+describe("downstream verbose-ledger TDS fields (P1-absent safe)", () => {
+  it("keeps the graceful-absence contract on the unextended verbose shape", async () => {
+    const ledgers = await boot().ledgersTax(undefined);
+    const one = ledgers.find((l) => l.name === "Acme Traders")!;
+    expect(one.pan).toBe(null);
+    expect(one.isTdsApplicable).toBe(false);
+    expect(one.tdsDeducteeType).toBe("");
+    expect(one.natureOfPayment).toBe(null);
+  });
+
+  it("maps named TDS fields when the upstream verbose entry carries them", async () => {
+    responses.tally_get_ledgers_tds = JSON.stringify([
+      {
+        name: "Acme Traders",
+        parent: "Sundry Creditors",
+        gstin: "",
+        state: "Maharashtra",
+        IncomeTaxNumber: " abfaa1234a ",
+        IsTDSApplicable: "Yes",
+        TDSDeducteeType: "firm",
+        TDSRateName: "Contractors 2.0%",
+      },
+    ]);
+    const ledgers = await boot({ "tally_get_ledgers": responses.tally_get_ledgers_tds }).ledgersTax(undefined);
+    expect(ledgers[0]).toEqual({
+      name: "Acme Traders",
+      parent: "Sundry Creditors",
+      gstin: null,
+      state: "Maharashtra",
+      pan: "ABFAA1234A",
+      isTdsApplicable: true,
+      tdsDeducteeType: "firm",
+      natureOfPayment: "Contractors 2.0%",
+    });
   });
 });
 

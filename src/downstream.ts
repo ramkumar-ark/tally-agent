@@ -37,13 +37,19 @@ export interface VoucherRow {
   entries: VoucherEntry[];
 }
 
-/** Ledger-master scalars needed for GST work. No address/bank/email/phone — the tally_get_ledger ban (R-MCP-3) stands. */
+/** Ledger-master scalars needed for tax work. No address/bank/email/phone — the tally_get_ledger ban (R-MCP-3) stands. */
 export interface LedgerTaxInfo {
   name: string;
   parent: string;
   /** Normalized (trimmed, uppercased) or null when the master carries none. */
   gstin: string | null;
   state: string;
+  /** Verbose IncomeTaxNumber (PAN), trimmed/uppercased; null when absent (pre-P1 upstream). */
+  pan: string | null;
+  isTdsApplicable: boolean;
+  tdsDeducteeType: string;
+  /** TDSRateName or TaxType, whichever the verbose shape carries. */
+  natureOfPayment: string | null;
 }
 
 /** How the downstream joined a ledger-report row to its voucher; "unknown" when the field is absent. */
@@ -247,11 +253,17 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
         const name = String(l?.name ?? "");
         if (!name) continue;
         const gstin = String(l.gstin ?? "").trim().toUpperCase();
+        const pan = String(l.IncomeTaxNumber ?? "").trim().toUpperCase();
+        const nature = text(l.TDSRateName) || text(l.TaxType) || null;
         out.push({
           name,
           parent: String(l.parent ?? ""),
           gstin: gstin || null,
           state: String(l.state ?? ""),
+          pan: pan || null,
+          isTdsApplicable: truthy(l.IsTDSApplicable ?? l.TDSApplicable),
+          tdsDeducteeType: text(l.TDSDeducteeType),
+          natureOfPayment: nature || null,
         });
       }
       return out;
