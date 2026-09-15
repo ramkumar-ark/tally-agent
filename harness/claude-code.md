@@ -293,6 +293,15 @@ gateway's `env` block above. `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` bound Claude
 Code's own call to the gateway, so they belong to Claude Code's environment, not
 to the gateway's `env` block. The verified `tb_review` run took 10.7 minutes.
 
+### TDS review timeout note
+
+`tb_tds_review` rides the per-ledger monthly Ledger-Vouchers path (~640 small
+calls for a full FY at ~58 ledgers), never the Day Book, so it stays inside one
+per-call timeout by shape — the same `900000` chain above covers it. On a slow
+company, if individual ledger-month calls time out first, the gateway's
+`TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS` is the knob; the per-call ceiling matters,
+not a whole-snapshot budget.
+
 ### Large-company note
 
 On a large company the upstream connector exports **every voucher with no date
