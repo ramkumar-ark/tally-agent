@@ -50,6 +50,7 @@ describe("TDS finding space", () => {
       "tds_not_deposited", "tds_late_deposit", "tds_statement_late",
       "tds_statement_missing", "tds_deposit_mismatch", "tds_exposure_40a_ia",
       "tds_exposure_271c", "tds_section_unknown", "tds_master_gap",
+      "tds_threshold_crossed",
     ]);
   });
   it("a TdsFinding carries deductee, section, amount, detail and schedule rows", () => {

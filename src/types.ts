@@ -193,7 +193,8 @@ export type TdsCheckId =
   | "tds_not_deducted" | "tds_short_deducted" | "tds_late_deducted"
   | "tds_not_deposited" | "tds_late_deposit" | "tds_statement_late"
   | "tds_statement_missing" | "tds_deposit_mismatch" | "tds_exposure_40a_ia"
-  | "tds_exposure_271c" | "tds_section_unknown" | "tds_master_gap";
+  | "tds_exposure_271c" | "tds_section_unknown" | "tds_master_gap"
+  | "tds_threshold_crossed";
 
 /** TDS ids live in their own ordinal space (TDS-<ordinal>-<n>); other tables are never renumbered. */
 export const TDS_CHECK_ORDINAL: Record<TdsCheckId, number> = {
@@ -201,6 +202,7 @@ export const TDS_CHECK_ORDINAL: Record<TdsCheckId, number> = {
   tds_not_deposited: 4, tds_late_deposit: 5, tds_statement_late: 6,
   tds_statement_missing: 7, tds_deposit_mismatch: 8, tds_exposure_40a_ia: 9,
   tds_exposure_271c: 10, tds_section_unknown: 11, tds_master_gap: 12,
+  tds_threshold_crossed: 13,
 };
 
 export function tdsFindingId(check: TdsCheckId, ordinal: number): string {

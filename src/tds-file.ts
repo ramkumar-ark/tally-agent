@@ -198,3 +198,11 @@ export function parseDayBook(text: string): VoucherRow[] {
   }
   return parseVoucherRows(raw, null, null);
 }
+
+export const EMPTY_TDS_OPERATOR: OperatorFile = {
+  sections: [],
+  parties: [],
+  certificates: [],
+  challans: [],
+  statements: [],
+};
