@@ -166,6 +166,52 @@ const withCompany = (
   company: string | undefined,
 ): Record<string, unknown> => (company ? { ...args, company } : args);
 
+/**
+ * Parse a Day Book envelope into typed rows. A date range, when given,
+ * re-filters at the boundary: the downstream already filters client-side,
+ * but a tax period that silently absorbs an out-of-period voucher is worse
+ * than one that drops a row with a malformed date. Raw Tally ledger lines
+ * carry UPPERCASE keys; the flip to positive = debit happens here, once
+ * (R-MCP-5), matching the trial-balance convention.
+ */
+export function parseVoucherRows(
+  raw: unknown,
+  from: string | null,
+  to: string | null,
+): VoucherRow[] {
+  const out: VoucherRow[] = [];
+  if (!Array.isArray(raw)) return out;
+  for (const v of raw) {
+    if (typeof v !== "object" || v === null) continue;
+    const row = v as Record<string, unknown>;
+    const date = normDate(row.date);
+    if (!/^\d{8}$/.test(date) || (from && date < from) || (to && date > to)) continue;
+    const rawEntries = row.entries;
+    const list = Array.isArray(rawEntries)
+      ? rawEntries
+      : rawEntries && typeof rawEntries === "object"
+        ? [rawEntries]
+        : [];
+    const entries: VoucherEntry[] = [];
+    for (const e of list) {
+      if (typeof e !== "object" || e === null) continue;
+      const er = e as Record<string, unknown>;
+      const ledger = String(er.LEDGERNAME ?? er.ledgerName ?? "").trim();
+      if (!ledger) continue;
+      entries.push({ ledger, amount: -num(er.AMOUNT ?? er.amount) });
+    }
+    out.push({
+      date,
+      voucherType: String(row.voucherType ?? ""),
+      voucherNumber: String(row.voucherNumber ?? ""),
+      partyLedgerName: String(row.partyLedgerName ?? "").trim(),
+      cancelled: truthy(row.isCancelled),
+      entries,
+    });
+  }
+  return out;
+}
+
 export function makeDownstream(call: RawCaller, close: () => Promise<void>): Downstream {
   const ledgerVoucherEnvelope = async (
     company: string | undefined,
@@ -312,47 +358,9 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
           withCompany({ fromDate, toDate, includeLines: true }, company),
         ),
       ) as unknown;
-      if (!Array.isArray(raw)) {
-        throw new Error("tally_get_vouchers: expected an array of vouchers");
-      }
       const from = normDate(fromDate);
       const to = normDate(toDate);
-      const out: VoucherRow[] = [];
-      for (const v of raw) {
-        if (typeof v !== "object" || v === null) continue;
-        const row = v as Record<string, unknown>;
-        const date = normDate(row.date);
-        // Defensive re-filter at the boundary: the downstream already filters
-        // client-side, but a tax period that silently absorbs an out-of-period
-        // voucher is worse than one that drops a row with a malformed date.
-        if (!/^\d{8}$/.test(date) || date < from || date > to) continue;
-        const rawEntries = row.entries;
-        const list = Array.isArray(rawEntries)
-          ? rawEntries
-          : rawEntries && typeof rawEntries === "object"
-            ? [rawEntries]
-            : [];
-        const entries: VoucherEntry[] = [];
-        for (const e of list) {
-          if (typeof e !== "object" || e === null) continue;
-          const er = e as Record<string, unknown>;
-          // Raw Tally ledger lines carry UPPERCASE keys; the flip to
-          // positive = debit happens here, once (R-MCP-5), matching the
-          // trial-balance convention.
-          const ledger = String(er.LEDGERNAME ?? er.ledgerName ?? "").trim();
-          if (!ledger) continue;
-          entries.push({ ledger, amount: -num(er.AMOUNT ?? er.amount) });
-        }
-        out.push({
-          date,
-          voucherType: String(row.voucherType ?? ""),
-          voucherNumber: String(row.voucherNumber ?? ""),
-          partyLedgerName: String(row.partyLedgerName ?? "").trim(),
-          cancelled: truthy(row.isCancelled),
-          entries,
-        });
-      }
-      return out;
+      return parseVoucherRows(raw, from, to);
     },
 
     close,
