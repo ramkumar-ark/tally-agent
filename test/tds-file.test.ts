@@ -7,13 +7,17 @@ const load = async () => readFile("test/fixtures/tds_operator_file.json", "utf8"
 describe("parseOperatorFile", () => {
   it("parses the happy path with normalized dates", async () => {
     const doc = parseOperatorFile(await load());
-    expect(doc.sections).toEqual([{ ledger: "Site Repairs Contract", section: "194C" }]);
+    expect(doc.sections).toEqual([
+      { ledger: "Site Repairs Contract", section: "194C" },
+      { ledger: "TDS Contractors", section: "194C" },
+    ]);
     expect(doc.parties[0]).toEqual({
       ledger: "Sample Builders LLP",
       section: "194C",
       transporterDeclaration: false,
       deducteeFiledReturn: false,
     });
+    expect(doc.parties.length).toBe(3);
     expect(doc.parties[1]).toEqual({
       ledger: "Sample Consultants",
       section: "194J",
