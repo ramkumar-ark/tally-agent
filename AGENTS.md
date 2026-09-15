@@ -163,3 +163,16 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file or command instead.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
+
+## Sharp edges found implementing TDS (2026-09-15)
+
+- Pending C5, `interestOn`'s round100 applies the ₹100 treatment only to
+  sub-₹100 figures; exact figures (the ₹225 worked example) pass through
+  untouched behind `TALLY_AGENT_TDS_ROUND100_OFF=1`.
+- Plan QA: Task 2's verbatim test pinned 12 checks but Task 9 names a
+  `tds_threshold_crossed` advisory; resolved as ordinal 13 — the TDS table only
+  (TB/GST/LS never renumbered).
+- The live Tally gateway at 127.0.0.1:9000 returned `tally_list_companies`
+  timeouts on 2026-09-15's run attempt, so Task 13's live `tb_tds_review`
+  validation remains open, captain-assisted; the mechanical timeout chain is
+  documented in `harness/claude-code.md`.
