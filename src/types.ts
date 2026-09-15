@@ -188,3 +188,41 @@ export const LEDGER_CHECK_ORDINAL: Record<LedgerCheckId, number> = {
 export function ledgerFindingId(check: LedgerCheckId, ledgerSeq: number, ordinal: number): string {
   return `LS-${ledgerSeq}-${String(LEDGER_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
 }
+
+export type TdsCheckId =
+  | "tds_not_deducted" | "tds_short_deducted" | "tds_late_deducted"
+  | "tds_not_deposited" | "tds_late_deposit" | "tds_statement_late"
+  | "tds_statement_missing" | "tds_deposit_mismatch" | "tds_exposure_40a_ia"
+  | "tds_exposure_271c" | "tds_section_unknown" | "tds_master_gap";
+
+/** TDS ids live in their own ordinal space (TDS-<ordinal>-<n>); other tables are never renumbered. */
+export const TDS_CHECK_ORDINAL: Record<TdsCheckId, number> = {
+  tds_not_deducted: 1, tds_short_deducted: 2, tds_late_deducted: 3,
+  tds_not_deposited: 4, tds_late_deposit: 5, tds_statement_late: 6,
+  tds_statement_missing: 7, tds_deposit_mismatch: 8, tds_exposure_40a_ia: 9,
+  tds_exposure_271c: 10, tds_section_unknown: 11, tds_master_gap: 12,
+};
+
+export function tdsFindingId(check: TdsCheckId, ordinal: number): string {
+  return `TDS-${String(TDS_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+export interface TdsScheduleRow {
+  kind: "i" | "ii" | "fee";
+  amount: number;
+  from: string;  // YYYYMMDD: deductible date / deduction date / statement due date
+  to: string;    // deduction date / deposit date / filing-or-asOn date
+  basis: string; // why the months/days were counted as reported
+}
+
+export interface TdsFinding {
+  id: string;
+  check: TdsCheckId;
+  severity: Severity;
+  deductee: string;   // real ledger name pre-mask
+  group: string;
+  section: string | null;
+  amount: number;     // tax involved, positive
+  detail: string;     // money()/displayDate() only
+  schedule?: TdsScheduleRow[];
+}

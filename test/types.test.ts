@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TDS_CHECK_ORDINAL, tdsFindingId, type TdsFinding } from "../src/types.js";
 import { findingId, LEDGER_CHECK_ORDINAL, ledgerFindingId, sideOf } from "../src/types.js";
 
 describe("sideOf", () => {
@@ -35,5 +36,30 @@ describe("ledgerFindingId", () => {
 describe("ledger_in_wrong_group ids", () => {
   it("takes ordinal 8, after the seven milestone 1 checks", () => {
     expect(findingId("ledger_in_wrong_group", 2)).toBe("TB-008-2");
+  });
+});
+
+describe("TDS finding space", () => {
+  it("builds stable TDS-space ids from its own ordinal table", () => {
+    expect(tdsFindingId("tds_not_deducted", 1)).toBe("TDS-001-1");
+    expect(tdsFindingId("tds_master_gap", 3)).toBe("TDS-012-3");
+  });
+  it("keeps 12 checks without touching the TB/GST/LS tables", () => {
+    expect(Object.keys(TDS_CHECK_ORDINAL)).toEqual([
+      "tds_not_deducted", "tds_short_deducted", "tds_late_deducted",
+      "tds_not_deposited", "tds_late_deposit", "tds_statement_late",
+      "tds_statement_missing", "tds_deposit_mismatch", "tds_exposure_40a_ia",
+      "tds_exposure_271c", "tds_section_unknown", "tds_master_gap",
+    ]);
+  });
+  it("a TdsFinding carries deductee, section, amount, detail and schedule rows", () => {
+    const f: TdsFinding = {
+      id: "TDS-001-1", check: "tds_not_deducted", severity: "critical",
+      deductee: "Sample Builders LLP", group: "Sundry Creditors",
+      section: "194C", amount: 5000,
+      detail: "booking 16-May-2025: no duty credit found",
+      schedule: [{ kind: "i", amount: 100, from: "20250516", to: "20250628", basis: "1% of 2 months" }],
+    };
+    expect(f.schedule?.[0].amount).toBe(100);
   });
 });
