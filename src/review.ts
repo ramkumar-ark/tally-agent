@@ -105,6 +105,8 @@ export interface TdsMaskedFinding {
 /** tb_tds_review's result: masked findings, the engine totals, and the count of the month-chunked ledger calls made (design doc §5). */
 export interface TdsReviewResult {
   company?: string;
+  /** False when the verbose master export failed and the run is operator-file-only. */
+  mastersAvailable: boolean;
   fromDate: string;
   toDate: string;
   asOnDate: string;
@@ -510,7 +512,22 @@ export function createSession(
     }
     lastCompany = company;
     const operator: OperatorFile = parseOperatorFile(operatorText);
-    const [groups, masters] = await Promise.all([d.groups(company), d.ledgersTax(company)]);
+    // The verbose whole-company master export is the heaviest downstream call
+    // and the only one a large company can wedge — the captain asked for the
+    // narrowest request on a shared Tally. When it fails (P1 fields absent or
+    // the live server unreachable), the session degrades to operator-file-only
+    // facts: flags/PANs read as absent, never guessed, and the run records it.
+    const mastersUnavailable = { value: false } as { value: boolean };
+    const [groups, masters] = await Promise.all([
+      d.groups(company),
+      d.ledgersTax(company).catch((e: unknown) => {
+        mastersUnavailable.value = true;
+        console.error(
+          `tally-agent: verbose ledger masters unavailable (${e instanceof Error ? e.message : e}); running without them`,
+        );
+        return [] as Awaited<ReturnType<Downstream["ledgersTax"]>>;
+      }),
+    ]);
     const c = buildClassifier(groups, overrides);
     classifier = c;
     for (const l of masters) groupOfLedger.set(canonicalKey(l.name), l.parent);
@@ -643,6 +660,7 @@ export function createSession(
 
     const result: TdsReviewResult = {
       company,
+      mastersAvailable: !mastersUnavailable.value,
       fromDate,
       toDate,
       asOnDate,
