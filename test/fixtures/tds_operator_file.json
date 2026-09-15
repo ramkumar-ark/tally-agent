@@ -1,18 +1,56 @@
 {
   "sections": [
-    { "ledger": "Site Repairs Contract", "section": "194C" }
+    {
+      "ledger": "Site Repairs Contract",
+      "section": "194C"
+    },
+    {
+      "ledger": "TDS Contractors",
+      "section": "194C"
+    }
   ],
   "parties": [
-    { "ledger": "Sample Builders LLP", "section": "194C", "transporterDeclaration": false, "deducteeFiledReturn": false },
-    { "ledger": "Sample Consultants", "section": "194J", "deducteeFiledReturn": true }
+    {
+      "ledger": "Sample Builders LLP",
+      "section": "194C",
+      "transporterDeclaration": false,
+      "deducteeFiledReturn": false,
+      "incomeTaxNumber": "ABCC1234A",
+      "internalTan": "MUMA04826B"
+    },
+    {
+      "ledger": "Sample Consultants",
+      "section": "194J",
+      "deducteeFiledReturn": true
+    },
+    {
+      "ledger": "Sample Developers",
+      "section": "194-I"
+    }
   ],
   "certificates": [
-    { "ledger": "Sample Developers", "section": "194-I", "rate": 2, "from": "2025-04-01", "to": "2026-03-31", "limit": 400000 }
+    {
+      "ledger": "Sample Developers",
+      "section": "194-I",
+      "rate": 2,
+      "from": "2025-04-01",
+      "to": "2026-03-31",
+      "limit": 400000
+    }
   ],
   "challans": [
-    { "section": "194C", "forMonth": "2025-05", "depositDate": "2025-06-16" }
+    {
+      "section": "194C",
+      "forMonth": "2025-05",
+      "depositDate": "2025-06-16"
+    }
   ],
   "statements": [
-    { "form": "26Q", "quarter": "Q1", "filedDate": "2025-08-20", "tdsAmount": 5000 }
+    {
+      "form": "26Q",
+      "quarter": "Q1",
+      "filedDate": "2025-08-20",
+      "tdsAmount": 5000
+    }
   ]
 }
