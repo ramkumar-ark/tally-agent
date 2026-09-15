@@ -28,6 +28,16 @@ describe("loadConfig", () => {
     expect(cfg.reportDir).toBe("/tmp/out");
     expect(cfg.defaultCompany).toBe("Demo Traders Pvt Ltd");
     expect(cfg.dumpVault).toBe(false);
+    expect(cfg.tdsRound100).toBe(true);
+  });
+
+  it("TALLY_AGENT_TDS_ROUND100_OFF=1 disables the Rule 119A(c) rounding", () => {
+    const cfg = loadConfig({
+      TALLY_MCP_COMMAND: "node",
+      TALLY_AGENT_REPORT_DIR: "/tmp/out",
+      TALLY_AGENT_TDS_ROUND100_OFF: "1",
+    });
+    expect(cfg.tdsRound100).toBe(false);
   });
 
   it("keeps a JSON-array TALLY_MCP_ARGS value verbatim, so a path with a space survives as ONE argument", () => {
