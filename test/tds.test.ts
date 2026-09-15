@@ -404,3 +404,48 @@ describe("TDS exposure findings and the s.201(1) proviso", () => {
     expect(late[0].detail).toContain("proviso");
   });
 });
+
+describe("TDS master-gap findings", () => {
+  it("flags a deductee without a PAN as a review-only master gap, once per party", () => {
+    const ctx = tdsCtx(stdOperator, { panKeyOf: () => null, entityOf: () => null });
+    const out = run(ctx, [], [{
+      ledger: expenseLedger,
+      rows: [row("20250510", "P/12", -250000, partyA), row("20250610", "P/13", -100000, partyA)],
+    }]);
+    const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.deductee === partyA);
+    expect(gaps).toEqual([expect.objectContaining({ severity: "review", section: "194C" })]);
+    expect(out.findings.filter((f) => f.check === "tds_master_gap").length).toBe(1);
+  });
+
+  it("flags a missing or Unknown deductee type", () => {
+    const ctx = tdsCtx(stdOperator, {
+      deducteeTypeOf: (p) => (p === partyA ? "Unknown" : ""),
+    });
+    const out = run(ctx, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.deductee === partyA && f.detail.includes("deductee type"));
+    expect(gaps).toEqual([expect.objectContaining({ severity: "review" })]);
+  });
+
+  it("flags a duty ledger whose section is not mapped", () => {
+    const ctx = tdsCtx({
+      ...stdOperator,
+      sections: [{ ledger: expenseLedger, section: "194C" }],
+    }, {
+      dutySectionOf: (l) => (l === "TDS Salary Unknown" ? null : "194C"),
+    });
+    const out = run(ctx, [{ ledger: "TDS Salary Unknown", rows: [] }], []);
+    const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.detail.includes("TDS Salary Unknown"));
+    expect(gaps).toEqual([expect.objectContaining({ severity: "review" })]);
+  });
+
+  it("names the cross month and the whole-year or 194Q-only rule as tds_threshold_crossed", () => {
+    const out = run(tdsCtx(), [], [{
+      ledger: expenseLedger,
+      rows: [1, 2, 3, 4, 5, 6].map((i) => row(`2025051${i}`, `P/${i}`, -20000, partyA)),
+    }]);
+    const found = ofCheck(out, "tds_threshold_crossed");
+    expect(found).toHaveLength(1);
+    expect(found[0].detail).toContain("whole year");
+    expect(found[0].severity).toBe("review");
+  });
+});

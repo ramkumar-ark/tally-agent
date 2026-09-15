@@ -331,6 +331,46 @@ export function analyzeTds(
   let interestI = 0;
   let interestIi = 0;
   let notDepositedTax = 0;
+  // Master gaps: parties without PAN, missing/Unknown deductee types, duty
+  // ledgers whose section is not mapped. Review-only, never guessed.
+  const noPanBookings = events.bookings.filter((b) => !ctx.panKeyOf(b.party));
+  const noPanParties = [...new Set(noPanBookings.map((b) => b.party))];
+  for (const party of noPanParties) {
+    const gross = noPanBookings.filter((b) => b.party === party).reduce((a, b) => a + b.gross, 0);
+    push(
+      "tds_master_gap",
+      "review",
+      party,
+      events.bookings.find((b) => b.party === party)?.section ?? null,
+      gross,
+      `no PAN recorded for the deductee (${money(gross)} gross this period): aggregation runs per ledger and the s.206AA rate is assumed.`,
+    );
+  }
+  if (ctx.deducteeTypeOf) {
+    for (const party of new Set(events.bookings.filter((b) => ctx.deducteeTypeOf!(b.party).trim() === "" || /unknown/i.test(ctx.deducteeTypeOf!(b.party))).map((b) => b.party))) {
+      push(
+        "tds_master_gap",
+        "review",
+        party,
+        null,
+        0,
+        `the deductee type is missing or Unknown in the master: the statutory rate cannot be confirmed from the master.`,
+      );
+    }
+  }
+  for (const duty of dutyLedgers) {
+    if (ctx.dutySectionOf(duty.ledger) === null) {
+      push(
+        "tds_master_gap",
+        "review",
+        duty.ledger,
+        null,
+        0,
+        `the TDS duty ledger ${duty.ledger}'s nature of payment has no section mapping; its deductions are not analyzed, never guessed.`
+      );
+    }
+  }
+
   // Deposit-level detail rows (date, deductee, section) for sorting later.
 
   for (const agg of aggs.values()) {
