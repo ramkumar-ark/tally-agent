@@ -209,3 +209,27 @@ tdsFilePath, company?, fullCheckPath? }` → JSON; the file path is audited
 like M2's `returnsPath`, its contents never transit the model) and
 `tb_write_tds_report`. Findings drill down through the existing
 `tb_ledger_activity` / `tb_ledger_scrutiny`.
+
+## 10. Live validation (2026-09-15, Task 13)
+
+Run, without the operator file, against the large live company (kept
+nameless here per the privacy brief — real customer data never lands in
+docs or code):
+
+- Both the narrow single-month run (April 2025) and the full FY 25-26 run
+  completed; wall time ~2 s each once the ~2-minute downstream timeout was
+  honored — the earlier 15-minute hangs were the pre-Task-12 dist without
+  the verbose-export degradation.
+- Master export: 2,695 ledgers load (`mastersAvailable: true`), but **0 ledgers
+  carry a PAN and 0 are flagged TDS-applicable** in this company's masters.
+- Result: `ledgerCalls: 0`, all checks 0 findings, all totals zero.
+
+What this means: the review's C1-C8 checks identify duty/party/expense
+ledgers from Tally's own TDS master flags plus the operator file. This
+company's masters carry none of those flags, and the operator file
+(ledger-section mappings + parties) is not yet supplied — a separate
+captain decision. So this run can conclude only that the pipeline executes
+end-to-end on live data with graceful degradation; it cannot confirm any
+legal check. Once a company masters its TDS flags — or the operator file
+lands — the same tool narrows to the ~640 small per-ledger month calls the
+plan priced and produces real findings.
