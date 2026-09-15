@@ -1,6 +1,6 @@
 import type { LedgerVoucherRow } from "./downstream.js";
 import { money, displayDate } from "./format.js";
-import { calendarMonths, depositDue, interestOn, lawOf } from "./tds-law.js";
+import { calendarMonths, depositDue, interestOn, lateFeePerDay, lawOf, statementDue } from "./tds-law.js";
 import type { OperatorFile } from "./tds-file.js";
 import { tdsFindingId, type TdsCheckId, type TdsFinding, type TdsScheduleRow } from "./types.js";
 
@@ -495,6 +495,79 @@ export function analyzeTds(
     );
   }
 
+  // Statement checks (Rule 31A): a quarter with deductions or a statement row.
+  const quarterTax = new Map<string, number>();
+  for (const d of events.deductions) {
+    const q = quarterOfDate(d.date);
+    quarterTax.set(q, (quarterTax.get(q) ?? 0) + d.tax);
+  }
+  for (const q of ["Q1", "Q2", "Q3", "Q4"] as const) {
+    const due = statementDue(q, "FY 25-26");
+    if (due > ctx.asOnDate) continue;
+    const rows = (ctx.operator?.statements ?? []).filter((s) => s.quarter === q);
+    const tax = quarterTax.get(q) ?? 0;
+      const latest = rows.length ? rows.map((r) => r.filedDate).sort()[rows.length - 1] : "";
+    if (latest === "" && tax <= TDS_TOLERANCE) continue;
+    if (!latest) {
+      const days = Math.max(0, dateDiffDays(ctx.asOnDate, due));
+      const fee = tax <= ZERO ? 0 : Math.min(lateFeePerDay(tax) * days, tax);
+      push(
+        "tds_statement_missing",
+        "warning",
+        ctx.tdsParties[0] ?? "",
+        null,
+        fee,
+        `the quarter had duty deductions of ${money(tax)}, but no statement row; s.234E fee of ${money(fee)} for ${days} day(s) capped at the quarter's TDS.`,
+        fee > 0 ? [{ kind: "fee", amount: fee, from: due, to: ctx.asOnDate, basis: `200/day for ${days} day(s), capped at ${money(tax)}` }] : undefined,
+      );
+      continue;
+    }
+    const extra = latest > due;
+    if (extra) {
+      const days = Math.max(0, dateDiffDays(latest, due));
+      const fee = tax <= ZERO ? 0 : Math.min(lateFeePerDay(tax) * days, tax);
+      const oneMonth = Math.abs(dateDiffDays(latest, due)) <= 31;
+      push(
+        "tds_statement_late",
+        "warning",
+        ctx.tdsParties[0] ?? "",
+        null,
+        fee,
+        `statement filed on ${displayDate(latest)} after the Rule 31A due date of ${displayDate(due)}; s.234E fee of ${money(fee)};${oneMonth ? " s.271H is not levied where tax, interest and fee are paid and the statement was filed within a month;" : " s.271H penalty (10000 to 100000) may apply."}`,
+        fee > 0 ? [{ kind: "fee", amount: fee, from: due, to: latest, basis: `200/day for ${days} day(s), capped at ${money(tax)}` }] : undefined,
+      );
+    }
+  }
+  // Exposures: 30% disallowance and the s.271C penalty, review-only, never payables.
+  if (notDeducted > ZERO) {
+    push(
+      "tds_exposure_40a_ia",
+      "review",
+      ctx.tdsParties[0] ?? "",
+      null,
+      round2(notDeducted * 0.3),
+      `s.40(a)(ia) exposure: 30% disallowance of ${money(round2(notDeducted * 0.3))} where TDS was not deducted; an exposure, never a payable.`,
+    );
+    push(
+      "tds_exposure_271c",
+      "review",
+      ctx.tdsParties[0] ?? "",
+      null,
+      round2(notDeducted),
+      `s.271C exposure: a penalty equal to the tax not deducted, ${money(notDeducted)}, relieved by s.273B; an exposure, never a payable.`,
+    );
+  }
+  if (notDepositedTax > ZERO) {
+    push(
+      "tds_exposure_40a_ia",
+      "review",
+      ctx.tdsParties[0] ?? "",
+      null,
+      round2(notDepositedTax * 0.3),
+      `s.40(a)(ia) exposure: 30% disallowance of ${money(round2(notDepositedTax * 0.3))} where tax was deducted but not deposited by the s.139(1) due date; an exposure, never a payable.`,
+    );
+  }
+
   const bySection = new Map<string, TdsSectionTotals>();
   for (const agg of aggs.values()) {
     bySection.set(agg.section, { section: agg.section, gross: agg.gross, tax: round2(rateFor(ctx, agg.party, agg.section, agg.bookings[0]?.date ?? ctx.period.fromDate).rate * agg.gross) });
@@ -512,3 +585,13 @@ export function analyzeTds(
     },
   };
 }
+
+/** FY 25-26 quarters by month number: Apr-Jun Q1 ... Jan-Mar Q4. */
+function quarterOfDate(date: string): "Q1" | "Q2" | "Q3" | "Q4" {
+  const m = Number(date.slice(4, 6));
+  if (m >= 4 && m <= 6) return "Q1";
+  if (m >= 7 && m <= 9) return "Q2";
+  if (m >= 10) return "Q3";
+  return "Q4";
+}
+

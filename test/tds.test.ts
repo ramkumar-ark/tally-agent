@@ -54,6 +54,7 @@ export function tdsCtx(
     asOnDate: "20260331",
     round100: true,
     period: { fromDate: "20250401", toDate: "20260331" },
+    operator,
     ...over,
   };
 }
@@ -289,3 +290,117 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
   });
 });
 
+
+describe("TDS deposit checks", () => {
+  it("flags a deduction with no deposit debit by asOnDate as tds_not_deposited", () => {
+    const out = run(tdsCtx(), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const found = ofCheck(out, "tds_not_deposited");
+    expect(found).toEqual([
+      expect.objectContaining({ amount: 5000, severity: "critical", section: "194C" }),
+    ]);
+  });
+
+  it("flags a deposit after the Rule 30 due date with the interest (ii) schedule row", () => {
+    // Worked example: deducted 28-Jun, deposited 15-Aug: 1.5% x 3 = 225.
+    const out = run(tdsCtx(), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const found = ofCheck(out, "tds_late_deposit");
+    expect(found).toEqual([
+      expect.objectContaining({ amount: 5000, severity: "warning" }),
+    ]);
+    expect(found[0].schedule).toEqual([
+      expect.objectContaining({ kind: "ii", amount: 225, from: "20250628", to: "20250815" }),
+    ]);
+  });
+
+  it("keeps a deposit on time (7th next month) out of the findings", () => {
+    const out = run(tdsCtx(), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250707", "P/12", 5000, "Bank Alpha")] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(ofCheck(out, "tds_late_deposit")).toEqual([]);
+    expect(ofCheck(out, "tds_not_deposited")).toEqual([]);
+  });
+
+  it("flags a book-vs-operator-challan month difference as tds_deposit_mismatch", () => {
+    const op: OperatorFile = {
+      ...stdOperator,
+      challans: [{ section: "194C", forMonth: "2025-06", depositDate: "20250915" }],
+    };
+    const out = run(tdsCtx(op), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250702", "P/12", 5000, "Bank Alpha")] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(ofCheck(out, "tds_deposit_mismatch").length).toBe(1);
+  });
+});
+
+describe("TDS statement checks (234E, 271H)", () => {
+  it("flags a statement filed late with the 234E fee schedule row", () => {
+    const op: OperatorFile = {
+      ...stdOperator,
+      statements: [{ form: "26Q", quarter: "Q1", filedDate: "20250820", tdsAmount: 5000 }],
+    };
+    const out = run(tdsCtx(op), [
+      { ledger: dutyLedger, rows: [row("20250510", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const found = ofCheck(out, "tds_statement_late");
+    expect(found).toHaveLength(1);
+    // Q1 due 31-Jul; filed 20-Aug = 20 days; 200 x 20 = 4,000, under the 5,000 cap.
+    expect(found[0].schedule).toEqual([
+      expect.objectContaining({ kind: "fee", from: "20250731", to: "20250820" }),
+    ]);
+  });
+
+  it("flags a past quarter with no statement row at all", () => {
+    const out = run(tdsCtx(), [
+      { ledger: dutyLedger, rows: [row("20250510", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(ofCheck(out, "tds_statement_missing")).toHaveLength(1);
+  });
+
+  it("keeps an on-time statement out of the findings", () => {
+    const op: OperatorFile = {
+      ...stdOperator,
+      statements: [{ form: "26Q", quarter: "Q2", filedDate: "20251015", tdsAmount: 5000 }],
+    };
+    const out = run(tdsCtx(op), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(ofCheck(out, "tds_statement_late")).toEqual([]);
+    expect(ofCheck(out, "tds_statement_late")).toEqual([]);
+  });
+});
+
+describe("TDS exposure findings and the s.201(1) proviso", () => {
+  it("states the s.40(a)(ia) exposure at 30% of the tax not deducted, review-only", () => {
+    const out = run(tdsCtx(), [],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const found = ofCheck(out, "tds_exposure_40a_ia");
+    expect(found).toEqual([
+      expect.objectContaining({ amount: 1500, severity: "review" }), // 30% of 5,000
+    ]);
+  });
+
+  it("states the s.271C exposure equal to the tax not deducted, review-only", () => {
+    const out = run(tdsCtx(), [],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(ofCheck(out, "tds_exposure_271c")[0].amount).toBe(5000);
+  });
+
+  it("the s.201(1) proviso shields interest (i) but keeps the late-deduction finding", () => {
+    const op: OperatorFile = {
+      ...stdOperator,
+      parties: [{ ledger: partyA, section: "194C", transporterDeclaration: false, deducteeFiledReturn: true }],
+    };
+    const ctx = tdsCtx(op, { deducteeFiledReturn: (p) => p === partyA });
+    const out = run(ctx, [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const late = ofCheck(out, "tds_late_deducted");
+    expect(late).toHaveLength(1);
+    expect(late[0].schedule).toBeUndefined();
+    expect(late[0].detail).toContain("proviso");
+  });
+});
