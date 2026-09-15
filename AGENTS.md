@@ -147,6 +147,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   Unlike `loadOverrides`, it throws on a bad keyword. `Finding.expected` may
   hold a group nature (`expense`, `asset`, …) as well as a side.
 
+## TDS compliance review (design of record)
+
+- The TDS review design is `docs/design/2026-09-14-tds-compliance-review-design.md`
+  (operator-file contract, `TDS-` ordinal space, law table with its C1–C8
+  confirm markers) — read that doc before touching `src/tds*.ts`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
