@@ -26,5 +26,28 @@ The gateway masks party, bank, capital and loan ledger identities, runs eight
 trial balance checks in code, and writes de-masked reports to a directory outside
 the harness's reach.
 
-Later milestones, in order: GST summary and mismatch; single-ledger scrutiny;
-Excel read/write; the finalization checklist; and only then the guarded write path.
+Milestone 2 (GST summary and mismatch), Milestone 3 (single-ledger scrutiny)
+and the TDS compliance review (FY 2025-26) are implemented as well; the TDS
+design of record is
+[`docs/design/2026-09-14-tds-compliance-review-design.md`](docs/design/2026-09-14-tds-compliance-review-design.md).
+
+## Tool registry (11 read-only tools)
+
+| Tool | What it does |
+|---|---|
+| `tb_review` | Run the trial balance checks for a date; masked findings out. |
+| `tb_list_companies` | List the companies Tally has open. |
+| `tb_ledger_activity` | Drill into a finding's ledger over a period, by finding id. |
+| `tb_ledger_scrutiny` | Scrutinise one ledger over a period, by finding id. |
+| `tb_write_report` / `tb_write_ledger_report` / `tb_write_gst_report` | Write the de-masked Markdown + findings CSV artifacts. |
+| `tb_gst_summary` | Period GST liability per tax head (aggregate only). |
+| `tb_gst_mismatch` | Filed-returns-vs-books comparison; the returns file travels by path only. |
+| `tb_tds_review` | TDS compliance review for FY 2025-26: TDS not deducted, short deducted or deducted late; deposits missing or late; statements late or missing; s.201(1A) interest, s.234E fee and the s.40(a)(ia)/s.271C exposures. The operator TDS file travels by path only; deductees appear as pseudonyms; drill in with tb_ledger_activity using the finding id. |
+| `tb_write_tds_report` | Write the TDS review report, findings CSV and interest-schedule CSV; real names restored on write. |
+
+Findings live in their own ordinal spaces (`TB-`, `GST-`, `LS-`, `TDS-`); the
+TDS law table with its C1–C8 confirm markers lives in `src/tds-law.ts` and its
+interest money figures come out only through the report writer.
+
+Later milestones, in order: Excel read/write; the finalization checklist; and
+only then the guarded write path.

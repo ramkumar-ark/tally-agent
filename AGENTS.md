@@ -152,6 +152,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - The TDS review design is `docs/design/2026-09-14-tds-compliance-review-design.md`
   (operator-file contract, `TDS-` ordinal space, law table with its C1–C8
   confirm markers) — read that doc before touching `src/tds*.ts`.
+- The TDS review rides the per-ledger monthly Ledger-Vouchers path, never the
+  Day Book; the operator TDS file is the TDS `returnsPath` channel (path only,
+  TANs never echoed); the FY-25-26-only law table lives in `src/tds-law.ts`
+  with its C1–C8 confirm flags.
 
 ## Maintaining this file
 
