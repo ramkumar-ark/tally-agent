@@ -8,13 +8,14 @@ import { z } from "zod";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadWrongGroup } from "./overrides.js";
-import { appendAudit, writeGstReport, writeLedgerReport, writeReport, writeVaultDump } from "./report.js";
+import { appendAudit, writeGstReport, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump } from "./report.js";
 import {
   createSession,
   type GstMismatchResult,
   type LedgerScrutinyResult,
   type ReviewResult,
   type Session,
+  type TdsReviewResult,
 } from "./review.js";
 
 export type ToolRegistrar = (
@@ -76,6 +77,7 @@ export function registerTools(
 ): void {
   let last: ReviewResult | undefined;
   let lastGst: GstMismatchResult | undefined;
+  let lastTds: TdsReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -295,10 +297,92 @@ export function registerTools(
       return JSON.stringify(paths, null, 2);
     },
   );
+
+  register(
+    "tb_tds_review",
+    "TDS compliance review for FY 2025-26: TDS not deducted, short deducted or deducted late; " +
+      "deposits missing or late; statements late or missing; s.201(1A) interest, s.234E fee and " +
+      "s.40(a)(ia)/s.271C exposures. Pass the PATH of the operator TDS file (JSON) - never paste " +
+      "its rows into chat, they carry tax identities. Deductees appear as pseudonyms" +
+      " ('Creditor 3', 'TaxId 2'); drill in with tb_ledger_activity using the finding id.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      asOnDate: z.string().describe("Deposit/state date, YYYYMMDD"),
+      tdsFilePath: z.string().describe("Path to the operator TDS JSON file; its contents are read inside the gateway"),
+      company: z.string().optional(),
+      fullCheckPath: z.string().optional().describe("Optional path to an operator day-book JSON export for the coverage reconciliation"),
+    },
+    async (args) => {
+      const operatorText = await readFile(args.tdsFilePath, "utf8");
+      const fullCheckText = args.fullCheckPath ? await readFile(args.fullCheckPath, "utf8") : undefined;
+      const result = await session.tdsReview(
+        args.company ?? cfg.defaultCompany,
+        args.fromDate,
+        args.toDate,
+        args.asOnDate,
+        operatorText,
+        fullCheckText,
+      );
+      lastTds = result;
+      // The file's PATH is audited, never its contents (the M2 returnsPath contract).
+      await audit(
+        "tb_tds_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          tdsFilePath: args.tdsFilePath,
+          ...(args.fullCheckPath ? { fullCheckPath: args.fullCheckPath } : {}),
+        },
+        result.findings.length,
+        maskedCountTds(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_tds_report",
+    "Write the TDS review report, findings sheet and interest schedule to disk. Real names are " +
+      "restored on write; compose the narrative with the pseudonyms you were given.",
+    {
+      company: z.string(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      markdown: z.string().describe("The narrative report, in masked terms"),
+    },
+    async (args) => {
+      if (!lastTds) throw new Error("run tb_tds_review first: there are no TDS findings to write");
+      const paths = await writeTdsReport({
+        reportDir: cfg.reportDir,
+        company: args.company,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        markdown: args.markdown,
+        findings: lastTds.findings,
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_tds_report",
+        { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
+        lastTds.findings.length,
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
 }
 
 function maskedCount(findings: Array<{ ledger: string }>): number {
   return findings.filter((f) => /^(\w+ \d+)$/.test(f.ledger)).length;
+}
+
+function maskedCountTds(findings: Array<{ deductee: string }>): number {
+  return findings.filter((f) => /^(\w+) \d+$/.test(f.deductee)).length;
 }
 
 /** Kept separate so the tool handler stays synchronous to read. */
@@ -314,7 +398,8 @@ async function main(): Promise<void> {
   );
   const wrongGroup = loadWrongGroup(overridesFile);
   const downstream = await connectDownstream(cfg);
-  const session = createSession(downstream, overrides, wrongGroup);
+  const session = createSession(downstream, overrides, wrongGroup,
+    { tdsRound100: cfg.tdsRound100 });
 
   const server = new McpServer(
     { name: "tally-agent", version: "0.1.0" },

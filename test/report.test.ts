@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendAudit, findingsCsv, writeLedgerReport, writeReport, writeVaultDump } from "../src/report.js";
+import { appendAudit, findingsCsv, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump } from "../src/report.js";
+import type { TdsMaskedFinding } from "../src/review.js";
 import { createVault } from "../src/vault.js";
 import type { Finding } from "../src/types.js";
 
@@ -159,5 +160,44 @@ describe("writeLedgerReport", () => {
     expect(readFileSync(paths.csvPath, "utf8")).toContain(
       "LS-1-002-1,ls_wrong_side_during_period,warning,Acme Traders,Sundry Creditors,82500.00,Dr,Cr,Acme Traders stood on the debit side",
     );
+  });
+});
+
+describe("writeTdsReport", () => {
+  it("writes the report trio with de-masked names and the interest schedule", async () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Sample Builders LLP", "creditor");
+    const findings: TdsMaskedFinding[] = [
+      {
+        id: "TDS-001-1",
+        check: "tds_not_deducted",
+        severity: "critical",
+        deductee: alias,
+        group: "Sundry Creditors",
+        section: "194C",
+        amount: 5000,
+        detail: `${alias} booking 2,50,000.00 on 10-May-2025: no duty credit found`,
+        schedule: [{ kind: "i", amount: 100, from: "20250510", to: "20250628", basis: "1% of 2 month(s)" }],
+      },
+    ];
+    const dir = mkdtempSync(join(tmpdir(), "tally-agent-tds-"));
+    const paths = await writeTdsReport({
+      reportDir: dir,
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      markdown: `# TDS review\n\n${alias} is a pseudonym.`,
+      findings,
+      vault,
+    });
+    const md = readFileSync(paths.markdownPath, "utf8");
+    const csv = readFileSync(paths.csvPath, "utf8");
+    const isched = readFileSync(paths.interestCsvPath, "utf8");
+    expect(md).toContain("Sample Builders LLP");
+    expect(csv).toContain("Sample Builders LLP");
+    expect(csv.split("\n")[0]).toBe("id,check,severity,deductee,group,section,amount,detail");
+    expect(isched.split("\n")[0]).toBe("id,check,deductee,section,kind,amount,from,to,basis");
+    expect(isched).toContain("Sample Builders LLP");
+    expect(isched).toContain("1% of 2 month(s)");
   });
 });

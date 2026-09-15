@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
+import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 
 describe("review", () => {
@@ -243,5 +244,87 @@ describe("ledger in wrong group", () => {
     const f = r.findings.find((x) => x.id === "TB-008-2")!;
     expect(f.ledger).toMatch(/^Ledger \d+$/);
     expect(JSON.stringify(r)).not.toMatch(/nimbus/i);
+  });
+});
+
+  const MASTERS = JSON.stringify([
+    { name: "Sample Builders LLP", parent: "Sundry Creditors", state: "Karnataka", IncomeTaxNumber: "ABCC1234A", IsTDSApplicable: "Yes", TDSDeducteeType: "Firm" },
+    { name: "Site Repairs Contract", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+    { name: "TDS Contractors", parent: "Duties & Taxes", IsTDSApplicable: "Yes" },
+  ]);
+
+describe("tdsReview", () => {
+  const mkSession = (
+    ledgerVouchersByLedger: Record<string, unknown>,
+    callsOut: Array<{ ledger: string; from: string; to: string }> = [],
+  ) => {
+    const s = createSession(
+      Object.assign(fakeDownstream({ tally_get_ledgers: MASTERS }), {
+        ledgerVoucherRows: async (_c: any, ledgerName: string, _f: string, _t: string) => {
+          const body = ledgerVouchersByLedger[String(ledgerName).toLowerCase()] ?? { source: "ledger-vouchers-report", vouchers: [] };
+          const row = (v: any) => ({
+            date: String(v.date).replace(/[-/\.\s]/g, ""),
+            voucherType: String(v.voucherType ?? ""),
+            voucherNumber: String(v.voucherNumber ?? ""),
+            reference: "",
+            counterparty: String(v.counterLedgerName ?? v.partyLedgerName ?? "").trim(),
+            amount:
+              typeof v.amount === "number"
+                ? v.amount
+                : Number(String(v.amount ?? "0").replace(/,/g, "")),
+            matchStatus: "matched" as const,
+            tax: null,
+          });
+          const rows = body.vouchers
+            .map(row)
+            .filter((r: any) => r.date >= _f && r.date <= _t);
+          return { rows, dropped: 0 } as never;
+        },
+      } as never),
+      EMPTY_OVERRIDES,
+      EMPTY_WRONG_GROUP,
+    );
+    return s;
+  };
+
+  const OPERATOR = JSON.stringify({
+    sections: [
+      { ledger: "Site Repairs Contract", section: "194C" },
+      { ledger: "TDS Contractors", section: "194C" },
+    ],
+    parties: [
+      { ledger: "Sample Builders LLP", section: "194C", transporterDeclaration: false, deducteeFiledReturn: false },
+    ],
+    certificates: [],
+    challans: [],
+    statements: [],
+  });
+
+  it("runs the engine over the month-chunked book and masks the deductee", async () => {
+    const s = mkSession({
+      "site repairs contract": {
+        source: "ledger-vouchers-report",
+        vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/12", amount: "-250000.00", partyLedgerName: "Sample Builders LLP" }],
+      },
+      "sample builders llp": { source: "ledger-vouchers-report", vouchers: [] },
+      "tds contractors": { source: "ledger-vouchers-report", vouchers: [] },
+    });
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR);
+    const f = r.findings.find((x) => x.check === "tds_not_deducted");
+    console.log("TDSREVIEW", JSON.stringify(r.findings), JSON.stringify(r.totals), r.ledgerCalls);
+    expect(f).toBeDefined();
+    expect(f!.deductee).toMatch(/^(Creditor|Ledger|Party|Debtor) \d+$/); // a pseudonym, never the real deductee
+    expect(r.totals.notDeducted).toBe(5000);
+    expect(r.ledgerCalls).toBeGreaterThan(0);
+    // Drill-down works by finding id: the session resolves the real ledger.
+    const rows = (await s.ledgerActivity(f!.id, "20250401", "20260331")) as any[];
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it("rejects a bad date shape", async () => {
+    const s = mkSession({});
+    await expect(
+      s.tdsReview(undefined, "2025-04-01", "20260331", "20260331", OPERATOR),
+    ).rejects.toThrow(/YYYYMMDD/);
   });
 });

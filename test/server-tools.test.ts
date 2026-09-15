@@ -19,7 +19,7 @@ function harness() {
 }
 
 describe("tool surface", () => {
-  it("exposes exactly the nine approved tools", () => {
+  it("exposes exactly the eleven approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_gst_mismatch",
@@ -28,9 +28,11 @@ describe("tool surface", () => {
       "tb_ledger_scrutiny",
       "tb_list_companies",
       "tb_review",
+      "tb_tds_review",
       "tb_write_gst_report",
       "tb_write_ledger_report",
       "tb_write_report",
+      "tb_write_tds_report",
     ]);
   });
 

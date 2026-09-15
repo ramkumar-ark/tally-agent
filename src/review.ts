@@ -1,6 +1,6 @@
 import { buildClassifier, type Classifier, type Overrides } from "./classify.js";
 import { runChecks } from "./checks/index.js";
-import type { Downstream, VoucherRow } from "./downstream.js";
+import type { Downstream, LedgerVoucherRow, VoucherRow } from "./downstream.js";
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
@@ -8,6 +8,8 @@ import { dayBefore } from "./format.js";
 import { canonicalKey } from "./key.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
+import { parseDayBook, parseOperatorFile, type OperatorFile } from "./tds-file.js";
+import { analyzeTds, type TdsCtx, type TdsEvents, type TdsLedgerRows } from "./tds.js";
 import { createVault, type Vault } from "./vault.js";
 import {
   EMPTY_WRONG_GROUP,
@@ -18,6 +20,7 @@ import {
   type Severity,
   type Side,
   type TbRow,
+  type TdsFinding,
   type WrongGroupConfig,
 } from "./types.js";
 
@@ -77,6 +80,44 @@ function sweepStrings(value: unknown, vault: Vault): unknown {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value)) out[k] = sweepStrings(v, vault);
   return out;
+}
+
+/** One masked TDS finding: the engine shape with the deductee pseudonymed. */
+export interface TdsMaskedFinding {
+  id: string;
+  check: string;
+  severity: Severity;
+  deductee: string;
+  group: string;
+  section: string | null;
+  amount: number;
+  detail: string;
+  /** Interest-schedule rows for tb_write_tds_report's third artifact. */
+  schedule?: Array<{
+    kind: "i" | "ii" | "fee";
+    amount: number;
+    from: string;
+    to: string;
+    basis: string;
+  }>;
+}
+
+/** tb_tds_review's result: masked findings, the engine totals, and the count of the month-chunked ledger calls made (design doc §5). */
+export interface TdsReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  asOnDate: string;
+  counts: Record<Severity, number>;
+  findings: TdsMaskedFinding[];
+  totals: {
+    bySection: Array<{ section: string; gross: number; tax: number }>;
+    notDeducted: number;
+    shortDeducted: number;
+    interestI: number;
+    interestIi: number;
+  };
+  ledgerCalls: number;
 }
 
 export interface ReviewResult {
@@ -164,6 +205,18 @@ export interface Session {
     toDate: string,
     returnsText: string,
   ): Promise<GstMismatchResult>;
+  /**
+   * TDS compliance review (FY 25-26 law of record in src/tds-law.ts). The
+   * operator file travels by path only; its text is read inside the gateway.
+   */
+  tdsReview(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+    asOnDate: string,
+    operatorText: string,
+    fullCheckText?: string,
+  ): Promise<TdsReviewResult>;
   vault: Vault;
 }
 
@@ -171,6 +224,8 @@ export function createSession(
   d: Downstream,
   overrides: Overrides,
   wrongGroup: WrongGroupConfig = EMPTY_WRONG_GROUP,
+  /** Per-install options: the Rule 119A(c) switch is the config layer's (Task 4). */
+  options: { tdsRound100?: boolean } = {},
 ): Session {
   const vault = createVault();
   /** finding id -> real ledger name, for drill-down without the model holding it. */
@@ -179,6 +234,7 @@ export function createSession(
   let classifier: Classifier | undefined;
   let lastCompany: string | undefined;
   let lastGst: GstMismatchResult | undefined;
+  let lastTds: TdsReviewResult | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -388,6 +444,227 @@ export function createSession(
     return { books, classifier: c, ledgerGroupOf };
   }
 
+  /**
+   * Month chunks over the fiscal period: the one server-side date filter the
+   * live company tolerates — the Day Book is never the input path (design
+   * doc §5). Yields [chunkFrom, chunkTo] in YYYYMMDD.
+   */
+  function monthChunks(fromDate: string, toDate: string): Array<[string, string]> {
+    const chunks: Array<[string, string]> = [];
+    const pad = (n: number) => String(n).padStart(2, "0");
+    let y = Number(fromDate.slice(0, 4));
+    let m = Number(fromDate.slice(4, 6));
+    while (true) {
+      const start = `${y}${pad(m)}01`;
+      const endOfMonth = `${y}${pad(m)}${pad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+      chunks.push([start <= fromDate ? fromDate : start, endOfMonth >= toDate ? toDate : endOfMonth]);
+      if (endOfMonth >= toDate) return chunks;
+      m += 1;
+      if (m > 12) {
+        m = 1;
+        y += 1;
+      }
+    }
+  }
+
+  const fetchLedgerRows = async (
+    company: string | undefined,
+    ledgers: string[],
+    fromDate: string,
+    toDate: string,
+  ): Promise<{ rows: Map<string, LedgerVoucherRow[]>; calls: number }> => {
+    const rows = new Map<string, LedgerVoucherRow[]>();
+    let calls = 0;
+    for (const ledger of ledgers) {
+      for (const [f, t] of monthChunks(fromDate, toDate)) {
+        const fetched = await d.ledgerVoucherRows(company, ledger, f, t);
+        calls += 1;
+        const list = rows.get(canonicalKey(ledger)) ?? [];
+        list.push(...fetched.rows);
+        rows.set(canonicalKey(ledger), list);
+      }
+    }
+    return { rows, calls };
+  };
+
+  /** Voucher-row groups keyed by the queried (real) ledger, engine-ready. */
+  const rowsByLedger = (rows: Map<string, LedgerVoucherRow[]>, ledger: string): LedgerVoucherRow[] =>
+    rows.get(canonicalKey(ledger)) ?? [];
+
+  const asTdsLedgerRows = (
+    rows: Map<string, LedgerVoucherRow[]>,
+    ledgers: string[],
+  ): TdsLedgerRows[] =>
+    ledgers.map((ledger) => ({ ledger: canonicalKey(ledger), rows: rowsByLedger(rows, ledger) }));
+
+  async function tdsReview(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+    asOnDate: string,
+    operatorText: string,
+    fullCheckText?: string,
+  ): Promise<TdsReviewResult> {
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || !/^\d{8}$/.test(asOnDate) || fromDate > toDate) {
+      throw new Error("fromDate, toDate and asOnDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+    const operator: OperatorFile = parseOperatorFile(operatorText);
+    const [groups, masters] = await Promise.all([d.groups(company), d.ledgersTax(company)]);
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const l of masters) groupOfLedger.set(canonicalKey(l.name), l.parent);
+
+    // PAN channel: a real PAN travels only as its TaxId N pseudonym (M2
+    // pattern). The PAN's 4th character feeds the statutory rate.
+    const panAliasOf = new Map<string, string>();
+    for (const l of masters) {
+      if (l.pan && !panAliasOf.has(canonicalKey(l.name))) {
+        panAliasOf.set(canonicalKey(l.name), vault.pseudonym(l.pan, "tax_id"));
+      }
+    }
+    const realOf = (party: string): string =>
+      masters.find((l) => canonicalKey(l.name) === canonicalKey(party))?.name ?? party;
+
+    const roleOfLedger = (ledger: string): GroupRole =>
+      c.role(groupOfLedger.get(canonicalKey(ledger)) ?? "");
+    // Tally's own flags decide the classes: duty (Duties group), party
+    // (creditor/debtor), and the flagged expense/purchase rest — filled in by
+    // the operator file; anything unknown is a tds_section_unknown finding.
+    const isParty = (l: (typeof masters)[number]) => l.isTdsApplicable === true && ["creditor", "debtor", "capital", "suspense"].includes(roleOfLedger(l.name));
+    const isDuty = (l: (typeof masters)[number]) =>
+      c.role(l.parent) === "duties" || c.role(groupOfLedger.get(canonicalKey(l.name)) ?? "") === "duties";
+    const dutyLedgerNames = masters.filter((l) => l.isTdsApplicable === true && isDuty(l)).map((l) => l.name);
+    const partyLedgerNames = [
+      ...masters.filter(isParty).map((l) => l.name),
+      ...operator.parties.map((p) => p.ledger),
+    ];
+    const expenseLedgerNames = [
+      ...masters.filter((l) => l.isTdsApplicable === true && !isDuty(l) && !isParty(l)).map((l) => l.name),
+      ...operator.sections.map((s) => s.ledger),
+      ...operator.certificates.map((s) => s.ledger),
+    ];
+
+    const unique = (names: string[]): string[] => {
+      const seen = new Set<string>();
+      return names.filter((n) => (seen.has(canonicalKey(n)) ? false : (seen.add(canonicalKey(n)), true)));
+    };
+    const fetchSet = unique([...dutyLedgerNames, ...expenseLedgerNames, ...partyLedgerNames]);
+    const fetched = await fetchLedgerRows(company, fetchSet, fromDate, toDate);
+
+    // sectionOf prefers the party's mapping, then the expense ledger's (the
+    // captain's operator-file design; the duty ledger's nature-of-payment is
+    // the P1 resolution once the upstream ships named TDS master fields).
+    const partySection = new Map(operator.parties.map((p) => [canonicalKey(p.ledger), p.section]));
+    const ledgerSection = new Map(operator.sections.map((s) => [canonicalKey(s.ledger), s.section]));
+    const sectionOf = (ledger: string, party: string): string | null =>
+      partySection.get(canonicalKey(party)) ?? ledgerSection.get(canonicalKey(ledger)) ?? null;
+    const dutySectionOf = (dutyLedger: string): string | null =>
+      ledgerSection.get(canonicalKey(dutyLedger)) ?? null;
+
+    const certificateRateOf = (party: string, section: string, date: string): number | null => {
+      const real = realOf(party);
+      for (const cert of operator.certificates) {
+        if (canonicalKey(cert.ledger) === canonicalKey(party) && cert.section === section && cert.from <= date && date <= cert.to) {
+          return cert.rate / 100;
+        }
+      }
+      void real;
+      return null;
+    };
+    const ops = (party: string) => operator.parties.find((p) => canonicalKey(p.ledger) === canonicalKey(party));
+    const transporterDeclared = (party: string): boolean => ops(party)?.transporterDeclaration ?? false;
+    const deducteeFiledReturn = (party: string): boolean => ops(party)?.deducteeFiledReturn ?? false;
+    const entityOf = (party: string): "P" | "H" | "C" | "F" | null => {
+      const real = realOf(party);
+      const pan = masters.find((l) => canonicalKey(l.name) === canonicalKey(real))?.pan ?? null;
+      if (!pan || pan.length < 4) return null;
+      const ch = pan[3].toUpperCase();
+      return ch === "P" || ch === "H" || ch === "C" || ch === "F" ? (ch as "P" | "H" | "C" | "F") : null;
+    };
+    const panKeyOf = (party: string): string | null => panAliasOf.get(canonicalKey(realOf(party))) ?? null;
+    const deducteeTypeOf = (party: string): string =>
+      masters.find((l) => canonicalKey(l.name) === canonicalKey(realOf(party)))?.tdsDeducteeType ?? "";
+
+    const ctx: TdsCtx = {
+      tdsParties: unique([...partyLedgerNames, ...operator.parties.map((p) => p.ledger)]),
+      sectionOf,
+      dutySectionOf,
+      panKeyOf,
+      entityOf,
+      deducteeTypeOf,
+      certificateRateOf,
+      transporterDeclared,
+      deducteeFiledReturn,
+      asOnDate,
+      round100: options.tdsRound100 ?? true,
+      period: { fromDate, toDate },
+    };
+    void ctx;
+
+    // The engine runs month-chunked book events; the day-book reconciliation
+    // (an operator fullCheck export) runs the same engine on operator rows.
+    const bookRows = asTdsLedgerRows(fetched.rows, fetchSet);
+    const analysis = analyzeTds(
+      bookRows.filter((r) => dutyLedgerNames.some((n) => canonicalKey(n) === r.ledger)),
+      bookRows.filter((r) => expenseLedgerNames.some((n) => canonicalKey(n) === r.ledger)),
+      bookRows.filter((r) => ctx.tdsParties.some((p) => canonicalKey(p) === r.ledger)),
+      { ...ctx, operator } as Parameters<typeof analyzeTds>[3],
+    );
+
+    const maskTdsFinding = (f: TdsFinding): TdsMaskedFinding => {
+      // Registry first (drill-down by finding id, R-MCP-4), then masking.
+      realLedgerByFinding.set(f.id, f.deductee);
+      const deducteeMask = maskLedgerName(
+        f.deductee,
+        groupOfLedger.get(canonicalKey(f.deductee)) ?? "",
+        c,
+        vault,
+      );
+      const schedule = (f.schedule ?? []).map((s) => ({
+        ...s,
+        basis: scrubSecrets(s.basis),
+      }));
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        deductee: deducteeMask,
+        group: scrubSecrets(f.group),
+        section: f.section,
+        amount: f.amount,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+        ...(schedule.length ? { schedule } : {}),
+      };
+    };
+    const findings = analysis.findings.map(maskTdsFinding);
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of findings) counts[f.severity] += 1;
+
+    const result: TdsReviewResult = {
+      company,
+      fromDate,
+      toDate,
+      asOnDate,
+      counts,
+      findings,
+      totals: {
+        bySection: analysis.totals.bySection.map((t) => ({
+          section: t.section,
+          gross: t.gross,
+          tax: t.tax,
+        })),
+        notDeducted: analysis.totals.notDeducted,
+        shortDeducted: analysis.totals.shortDeducted,
+        interestI: analysis.totals.interestI,
+        interestIi: analysis.totals.interestIi,
+      },
+      ledgerCalls: fetched.calls,
+    };
+    lastTds = result;
+    return result;
+  }
+
   function maskGstFinding(
     f: {
       id: string;
@@ -478,5 +755,7 @@ export function createSession(
       lastGst = { company, fromDate, toDate, returnRows: returns.length, counts, findings: masked, aggregate };
       return lastGst;
     },
+
+    tdsReview,
   };
 }

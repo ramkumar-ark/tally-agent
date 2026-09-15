@@ -2,6 +2,7 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
+import type { TdsMaskedFinding as TdsCsvFinding } from "./review.js";
 import type { Vault } from "./vault.js";
 
 /**
@@ -130,6 +131,75 @@ export async function writeLedgerReport(opts: {
   await writeFile(csvPath, findingsCsv(opts.findings, opts.vault), "utf8");
 
   return { markdownPath, csvPath };
+}
+
+/**
+ * The TDS artifact trio: the same writer contract and report-directory
+ * boundary (R-R-4). Two findings carry the same CSV shape; the interest
+ * schedule is an extra de-masked artifact, TANs and PAN paths never carry
+ * alias keys to demask (nos PANs land in findings at all).
+ */
+export async function writeTdsReport(opts: {
+  reportDir: string;
+  company: string;
+  fromDate: string;
+  toDate: string;
+  markdown: string;
+  findings: TdsCsvFinding[];
+  vault: Vault;
+}): Promise<{ markdownPath: string; csvPath: string; interestCsvPath: string }> {
+  await mkdir(opts.reportDir, { recursive: true });
+  const stem = `${slug(opts.company)}-${opts.fromDate}-${opts.toDate}`;
+  const markdownPath = join(opts.reportDir, `tds-review-${stem}.md`);
+  const csvPath = join(opts.reportDir, `tds-findings-${stem}.csv`);
+  const interestCsvPath = join(opts.reportDir, `tds-interest-schedule-${stem}.csv`);
+
+  const header = "id,check,severity,deductee,group,section,amount,detail";
+  const rows = opts.findings.map((f) =>
+    [
+      f.id,
+      f.check,
+      f.severity,
+      demaskText(f.deductee, opts.vault),
+      f.group,
+      f.section ?? "",
+      f.amount.toFixed(2),
+      demaskText(f.detail, opts.vault),
+    ]
+      .map(csvField)
+      .join(","),
+  );
+
+  const schedule = [];
+  for (const f of opts.findings) {
+    for (const s of f.schedule ?? []) {
+      schedule.push(
+        [
+          f.id,
+          f.check,
+          demaskText(f.deductee, opts.vault),
+          f.section ?? "",
+          s.kind,
+          s.amount.toFixed(2),
+          s.from,
+          s.to,
+          demaskText(s.basis, opts.vault),
+        ]
+          .map(csvField)
+          .join(","),
+      );
+    }
+  }
+
+  await writeFile(markdownPath, demaskText(opts.markdown, opts.vault), "utf8");
+  await writeFile(csvPath, [header, ...rows].join("\n"), "utf8");
+  await writeFile(
+    interestCsvPath,
+    ["id,check,deductee,section,kind,amount,from,to,basis", ...schedule].join("\n"),
+    "utf8",
+  );
+
+  return { markdownPath, csvPath, interestCsvPath };
 }
 
 export async function appendAudit(
