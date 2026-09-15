@@ -176,3 +176,8 @@ When updating this file, preserve this bar for all agents and keep entries conci
   timeouts on 2026-09-15's run attempt, so Task 13's live `tb_tds_review`
   validation remains open, captain-assisted; the mechanical timeout chain is
   documented in `harness/claude-code.md`.
+- Task 13's live validation was completed 2026-09-15: both narrow-month and
+  full-FY runs execute end-to-end with the Task 12 degradation (see §10 of
+  the TDS design doc), but the company's masters carry 0 TDS flags — zero
+  findings is by construction until it masters its TDS flags or the
+  operator file lands (a separate captain call).
