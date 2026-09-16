@@ -630,3 +630,211 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
 
   return { sections, parties, certificates, challans, statements };
 }
+
+// ---------------------------------------------------------------------------
+// The Winman TDS-summary export (.xlsx). Layout of record is §2 of
+// docs/design/2026-09-16-tds-spreadsheet-input-design.md, examined one Excel
+// sheet at a time there. Five sheets listded by workbook.xml only — `List` is
+// veryHidden scratch and is skipped **by state**, never by name.
+// ---------------------------------------------------------------------------
+
+/** The §8.2 detail: what a Winman file yields, after labels have been stripped. */
+export interface WinmanFacts {
+  /** §8.3: derived from the Deduction sheet's own allocation, not its bare list. */
+  challans: OperatorChallan[];
+  /** Deductee sheet rows, spaces compacted; the join the template declares. */
+  deductees: Array<{ name: string; pan: string | null }>;
+  /** The meta row's `Form : 26Q` — read only. */
+  formType: string | null;
+  skipped: { noSection: number; noJoin: number };
+}
+
+const normWin = (v: unknown): string =>
+  typeof v === "string" ? v.replace(/\s+/g, " ").trim().toLowerCase() : "";
+
+/**
+ * §8.2 section normalisation with **no guessing**: the token before " - "
+ * maps `194I(a)`/`194I(b)` onto the split keys and the rest straight onto the
+ * law table; a bare `194I` (or anything else Winman says) resolves to null —
+ * such a row is counted into `skipped.noSection`, never key-hacked.
+ */
+export function winmanSectionKey(label: unknown): string | null {
+  const s = typeof label === "string" ? label : "";
+  const token = s.split(" - ")[0].replace(/[^A-Za-z0-9()]/g, "").toUpperCase(); // "194I(A)"
+  if (/^194I\(A\)$/.test(token)) return "194-I(a)";
+  if (/^194I\(B\)$/.test(token)) return "194-I(b)";
+  if (/^194[AHQCJT]$/.test(token)) return token; // 194C 194J 194A 194H 194Q 194T — I(on its own) excluded
+  return null;
+}
+
+interface WinCols {
+  byHeader: Map<string, number>;
+  headerIdx: number;
+}
+
+/**
+ * Marker-header location (§2): the header row is found by matching marker
+ * texts — never position, which the Deductor block's shape proves unstable —
+ * and columns map by normalised header text (blank styled padding cells absorb
+ * that; the reader ignores blanks).
+ */
+function locateWinman(sheet: GridSheet, sheetName: string, markers: string[]): WinCols {
+  for (let i = 0; i < sheet.rows.length; i += 1) {
+    const cells = sheet.rows[i].cells;
+    if (markers.every((m) => [...cells.values()].some((c) => c.value === m))) {
+      const byHeader = new Map<string, number>();
+      for (const [idx, c] of cells) {
+        if (typeof c.value === "string" && !byHeader.has(normWin(c.value))) {
+          byHeader.set(normWin(c.value), idx);
+        }
+      }
+      return { byHeader, headerIdx: i };
+    }
+  }
+  throw new Error(
+    `template ${sheet.name} sheet missing or unreadable: no header row says ^<${markers.join("|")}>`,
+  );
+}
+
+function rowAt(sheet: GridSheet, start: WinCols): GridRow[] {
+  return sheet.rows.slice(start.headerIdx + 1);
+}
+
+/**
+ * Parse a Winman `tds summary <company> <fy>.xlsx` export (its five-sheet
+ * shape is §2 of the design). Sheets are located by name among **visible**
+ * state only — the veryHidden `List` scratch sheet is skipped by state, so
+ * even a hidden marker-header twin never misleads the reader. The Deductor
+ * block's TAN is read and **immediately dropped**: it is never bound to a
+ * variable the caller can see (Q7 choice B — TANs live in files, never in
+ * strings). Challans come from the Deduction sheet's allocation joined to the
+ * Challan sheet by `(id, quarter)` — ids restart each quarter, so that pair
+ * is the unique key. Both sheets' section columns key only through §8.2
+ * normalisation; the Challan sheet's bare `194I - Rent` is never a section
+ * key. Errors cite the sheet and column, never a cell value.
+ */
+export function parseWinmanExport(buf: Buffer): WinmanFacts {
+  const sheets = readWorkbook(buf);
+  const visible = sheets.filter((s) => s.state === "visible");
+  const byName = (name: string): GridSheet => {
+    const s = visible.find((x) => normWin(x.name) === normWin(name));
+    if (!s) {
+      throw new Error(
+        `template sheet missing: the Winman export must carry a ${name} sheet — this file has: ` +
+          `${sheets.map((x) => x.name).join(", ")}`,
+      );
+    }
+    return s;
+  };
+
+  // Deductor block: labels in one column, values the next; the TAN is read
+  // and dropped before anything else happens. Nothing is kept.
+  const deductor = visible.find((s) => normWin(s.name) === "deductor");
+  if (deductor) {
+    for (const r of deductor.rows) {
+      for (const [col, c] of [...r.cells.entries()].sort(([a], [b]) => a - b)) {
+        if (typeof c.value === "string" && normWin(c.value) === "tan" && r.cells.get(col + 1)) {
+          break; // matched, used, dropped — no section code sees it
+        }
+      }
+    }
+  }
+
+  // formType from any data sheet's meta row (`Form : 26Q`).
+  let formType: string | null = null;
+  for (const name of ["Deductee", "Challan", "Deduction"]) {
+    const s = byName(name);
+    for (const r of s.rows) {
+      for (const c of r.cells.values()) {
+        const fm = typeof c.value === "string" ? /^form\s*:\s*(\S+)/i.exec(c.value.trim()) : null;
+        if (fm) formType = fm[1];
+      }
+    }
+  }
+
+  // Deductor MAY be absent from a Winman file (it is block-shaped and only
+  // carries the TAN we drop); the three data sheets are required.
+  const deducteesSheet = byName("Deductee");
+  const challanSheet = byName("Challan");
+  const deductionSheet = byName("Deduction");
+
+  // Challan sheet → (id, quarter) → deposit date. `ID No.` and Quarter are
+  // numeric here; `Date of Challan` a serial. The hostile verification-blob
+  // column (an HTML table echoing bank/challan/amount data) is never read.
+  const challanCols = locateWinman(challanSheet, "Challan", ["ID No.", "Date of Challan"]);
+  const depositByJoin = new Map<string, string>();
+  for (const r of rowAt(challanSheet, challanCols)) {
+    const idCell = r.cells.get(challanCols.byHeader.get("id no.")!);
+    const dateCellRaw = r.cells.get(challanCols.byHeader.get("date of challan")!);
+    const quarterCell = r.cells.get(challanCols.byHeader.get("quarter")!);
+    if (!idCell || dateCellRaw === undefined) continue;
+    const id = typeof idCell.value === "number" ? String(Math.trunc(idCell.value)) : String(idCell.value ?? "").trim();
+    const quarter = typeof quarterCell?.value === "number" ? String(Math.trunc(quarterCell.value)) : String(quarterCell?.value ?? "").trim();
+    const date = dateCellRaw.isDate && typeof dateCellRaw.value === "number" ? serialToYmd(dateCellRaw.value) : String(dateCellRaw.value ?? "");
+    if (!id || !/^\d{8}$/.test(date)) continue;
+    depositByJoin.set(`${id}|${quarter}`, date);
+  }
+
+  // Deduction sheet → group by (§8.3-split section, deduction-date month),
+  // each group's earliest deposit date.
+  const deductionCols = locateWinman(deductionSheet, "Deduction", ["Deduction Date", "Section"]);
+  const idCol = deductionCols.byHeader.get("challan id no. / details");
+  const sectionCol = deductionCols.byHeader.get("section");
+  const dateIdx = deductionCols.byHeader.get("deduction date");
+  const quarterCol = deductionCols.byHeader.get("quarter");
+  const earliest = new Map<string, string>(); // `${section|YYYY-MM}` → deposit
+  let noSection = 0;
+  let noJoin = 0;
+  for (const r of rowAt(deductionSheet, deductionCols)) {
+    const label = r.cells.get(sectionCol!)?.value;
+    const section = winmanSectionKey(label);
+    if (section === null) {
+      // A row that cannot say its section is counted, never guessed — but a
+      // wholly blank trailing row is not evidence of anything.
+      const nonBlank = [...r.cells.values()].some((c) => c.value !== null && String(c.value).trim() !== "");
+      if (nonBlank) noSection += 1;
+      continue;
+    }
+    const idCell = r.cells.get(idCol!);
+    const rawId = idCell?.value === undefined || idCell.value === null ? "" : String(idCell.value);
+    const id = /^(\d+)/.exec(rawId)?.[1] ?? "";
+    const dateCellRaw = r.cells.get(dateIdx!);
+    const dedDate =
+      dateCellRaw?.isDate && typeof dateCellRaw.value === "number"
+        ? serialToYmd(dateCellRaw.value)
+        : String(dateCellRaw?.value ?? "");
+    const quarter = `${Math.trunc(Number(r.cells.get(quarterCol!)?.value ?? 0))}`;
+    const deposit = depositByJoin.get(`${id}|${quarter}`);
+    const forMonth = /^\d{8}$/.test(dedDate) ? dedDate.slice(0, 6) : "";
+    if (!/^\d{8}$/.test(dedDate) || deposit === undefined) {
+      noJoin += 1;
+      continue;
+    }
+    const key = `${section}|${forMonth}`;
+    const prev = earliest.get(key);
+    if (prev === undefined || deposit < prev) earliest.set(key, deposit);
+  }
+  const challans: OperatorChallan[] = [...earliest.entries()]
+    .map(([key, depositDate]) => {
+      const [section, forMonth] = key.split("|");
+      return { section, forMonth: `${forMonth.slice(0, 4)}-${forMonth.slice(4, 6)}`, depositDate };
+    })
+    .sort((a, b) => (a.section === b.section ? a.forMonth.localeCompare(b.forMonth) : a.section.localeCompare(b.section)));
+
+  // Deductee sheet rows, spaces compacted. The blank padding header cells
+  // reveal nothing (they are never bound); a row with no PAN still yields the
+  // name — the join declares it, the code never guesses it.
+  const dedCols = locateWinman(deducteesSheet, "Deductee", ["Name", "PAN"]);
+  const nameCol = dedCols.byHeader.get("name");
+  const panCol = dedCols.byHeader.get("pan");
+  const deductees: WinmanFacts["deductees"] = [];
+  for (const r of rowAt(deducteesSheet, dedCols)) {
+    const name = r.cells.get(nameCol!)?.value;
+    if (typeof name !== "string" || name.trim() === "") continue;
+    const panRaw = r.cells.get(panCol!)?.value ?? null;
+    const pan = typeof panRaw === "string" ? panRaw.replace(/\s+/g, "").toUpperCase() : null;
+    deductees.push({ name: name.trim(), pan });
+  }
+
+  return { challans, deductees, formType, skipped: { noSection, noJoin } };
+}
