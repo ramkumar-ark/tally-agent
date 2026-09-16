@@ -1,6 +1,6 @@
 import type { LedgerVoucherRow } from "./downstream.js";
 import type { CreditKind, DepOperatorFile } from "./depreciation-file.js";
-import { isActRate } from "./depreciation-law.js";
+import { ADDITIONAL_DEPRECIATION_RATE, isActRate, isShortPeriod } from "./depreciation-law.js";
 
 /**
  * Everything the engine needs from the world, as closures. There is NO Tally
@@ -194,4 +194,95 @@ export function netDiscounts(
     if (remaining > 0.005) unattributed.push(row);
   }
   return { netted, unattributed };
+}
+
+export const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+export interface BlockInput {
+  block: string;
+  rate: number;
+  openingWdv: number;
+  acquisitions: Acquisition[];
+  /** Moneys payable on assets sold, discarded, demolished or destroyed. */
+  deductions: number;
+  anyAssetLeft: boolean;
+  carryForwardAdditional: number;
+}
+
+export interface BlockResult {
+  block: string; rate: number; openingWdv: number;
+  additionsFull: number; additionsHalf: number; deductions: number;
+  wdvBeforeDep: number;
+  normalDepreciation: number; additionalDepreciation: number; totalDepreciation: number;
+  closingWdv: number;
+  shortTermGain: number; shortTermLoss: number;
+  status: "ok" | "extinguished" | "nil-floor";
+}
+
+export function computeBlock(input: BlockInput, ctx: DepCtx): BlockResult {
+  const net = (a: Acquisition) => Math.max(0, a.cost - a.netted);
+  let additionsFull = 0;
+  let additionsHalf = 0;
+  let additional = input.carryForwardAdditional;
+
+  for (const a of input.acquisitions) {
+    const amount = net(a);
+    const short = isShortPeriod(a.firstUse, ctx.toDate);
+    if (short) additionsHalf += amount;
+    else additionsFull += amount;
+    if (ctx.additionalDepreciationEligible(a.ledger)) {
+      additional += (amount * ADDITIONAL_DEPRECIATION_RATE) / 100 / (short ? 2 : 1);
+    }
+  }
+
+  const gross = input.openingWdv + additionsFull + additionsHalf;
+  const wdvBeforeDep = gross - input.deductions;
+
+  // s.50, limb one: moneys payable exceeded the block.
+  if (wdvBeforeDep < -0.005) {
+    return {
+      block: input.block, rate: input.rate, openingWdv: input.openingWdv,
+      additionsFull: round2(additionsFull), additionsHalf: round2(additionsHalf),
+      deductions: round2(input.deductions), wdvBeforeDep: 0,
+      normalDepreciation: 0, additionalDepreciation: 0, totalDepreciation: 0,
+      closingWdv: 0, shortTermGain: round2(-wdvBeforeDep), shortTermLoss: 0,
+      status: "nil-floor",
+    };
+  }
+
+  // s.50, limb two: value remains but the block holds no asset.
+  if (!input.anyAssetLeft) {
+    return {
+      block: input.block, rate: input.rate, openingWdv: input.openingWdv,
+      additionsFull: round2(additionsFull), additionsHalf: round2(additionsHalf),
+      deductions: round2(input.deductions), wdvBeforeDep: round2(wdvBeforeDep),
+      normalDepreciation: 0, additionalDepreciation: 0, totalDepreciation: 0,
+      closingWdv: 0, shortTermGain: 0, shortTermLoss: round2(wdvBeforeDep),
+      status: "extinguished",
+    };
+  }
+
+  // Deductions bite the full-rate pool first, then the half-rate pool, then
+  // opening: an asset sold out of this year's additions cannot be depreciated.
+  let remaining = input.deductions;
+  const takeFrom = (pool: number): number => {
+    const take = Math.min(pool, remaining);
+    remaining -= take;
+    return pool - take;
+  };
+  const openLeft = takeFrom(input.openingWdv);
+  const fullLeft = takeFrom(additionsFull);
+  const halfLeft = takeFrom(additionsHalf);
+
+  const normal = (openLeft + fullLeft) * (input.rate / 100) + halfLeft * (input.rate / 200);
+  const total = normal + additional;
+
+  return {
+    block: input.block, rate: input.rate, openingWdv: round2(input.openingWdv),
+    additionsFull: round2(additionsFull), additionsHalf: round2(additionsHalf),
+    deductions: round2(input.deductions), wdvBeforeDep: round2(wdvBeforeDep),
+    normalDepreciation: round2(normal), additionalDepreciation: round2(additional),
+    totalDepreciation: round2(total), closingWdv: round2(wdvBeforeDep - total),
+    shortTermGain: 0, shortTermLoss: 0, status: "ok",
+  };
 }
