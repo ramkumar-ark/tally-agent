@@ -3,6 +3,7 @@ import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
+import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
 
 describe("review", () => {
   it("returns findings for the fixture company", async () => {
@@ -287,18 +288,16 @@ describe("tdsReview", () => {
     return s;
   };
 
-  const OPERATOR = JSON.stringify({
+  const OPERATOR: OperatorFile = {
+    ...EMPTY_TDS_OPERATOR,
     sections: [
       { ledger: "Site Repairs Contract", section: "194C" },
       { ledger: "TDS Contractors", section: "194C" },
     ],
     parties: [
-      { ledger: "Sample Builders LLP", section: "194C", transporterDeclaration: false, deducteeFiledReturn: false },
+      { ledger: "Sample Builders LLP", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false },
     ],
-    certificates: [],
-    challans: [],
-    statements: [],
-  });
+  };
 
   it("runs the engine over the month-chunked book and masks the deductee", async () => {
     const s = mkSession({
@@ -309,7 +308,7 @@ describe("tdsReview", () => {
       "sample builders llp": { source: "ledger-vouchers-report", vouchers: [] },
       "tds contractors": { source: "ledger-vouchers-report", vouchers: [] },
     });
-    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR);
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     const f = r.findings.find((x) => x.check === "tds_not_deducted");
     console.log("TDSREVIEW", JSON.stringify(r.findings), JSON.stringify(r.totals), r.ledgerCalls);
     expect(f).toBeDefined();
@@ -324,8 +323,88 @@ describe("tdsReview", () => {
   it("rejects a bad date shape", async () => {
     const s = mkSession({});
     await expect(
-      s.tdsReview(undefined, "2025-04-01", "20260331", "20260331", OPERATOR),
+      s.tdsReview(undefined, "2025-04-01", "20260331", "20260331", OPERATOR, "json"),
     ).rejects.toThrow(/YYYYMMDD/);
+  });
+
+  it("merges the Winman challans into the operator file's (§8.4)", async () => {
+    const s = mkSession({});
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "template", {
+      challans: [
+        { section: "194C", forMonth: "2025-05", depositDate: "20250616" },
+        { section: "194Q", forMonth: "2025-06", depositDate: "20250718" },
+      ],
+      deductees: [{ name: "Sample Builders (Unit 2)", pan: "ABCCS1234A" }],
+      formType: "26Q",
+      skipped: { noSection: 0, noJoin: 0 },
+    });
+    expect(r.winman).toEqual({ used: true, challans: 2, deductees: 1, panAdopted: 0 });
+    expect(r.operatorSource).toBe("template");
+  });
+
+  it("dedupes a Winman challan that equals the operator file's", async () => {
+    const s = mkSession({});
+    const withChallan = {
+      ...OPERATOR,
+      challans: [{ section: "194C", forMonth: "2025-05", depositDate: "20250616" }],
+    };
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", withChallan, "template", {
+      challans: [{ section: "194C", forMonth: "2025-05", depositDate: "20250616" }],
+      deductees: [],
+      formType: null,
+      skipped: { noSection: 0, noJoin: 0 },
+    });
+    expect(r.totals).toBeDefined();
+  });
+
+  it("hard-errors when operator and Winman disagree on a deposit date, naming section and month only", async () => {
+    const s = mkSession({});
+    const withChallan = {
+      ...OPERATOR,
+      challans: [{ section: "194C", forMonth: "2025-05", depositDate: "20250601" }],
+    };
+    await expect(
+      s.tdsReview(undefined, "20250401", "20260331", "20260331", withChallan, "template", {
+        challans: [{ section: "194C", forMonth: "2025-05", depositDate: "20250616" }],
+        deductees: [],
+        formType: null,
+        skipped: { noSection: 0, noJoin: 0 },
+      }),
+    ).rejects.toThrow(/disagree on 194C 2025-05/);
+  });
+
+  it("adopts a Winman PAN through the declared join, as a TaxId pseudonym and never the PAN", async () => {
+    const s = mkSession({});
+    const result = await s.tdsReview(undefined, "20250401", "20260331", "20260331", {
+      ...OPERATOR,
+      parties: [
+        { ledger: "Sample Builders LLP", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false, winmanName: "Sample Builders (Unit 2)" },
+      ],
+    }, "template", {
+      challans: [],
+      deductees: [{ name: "Sample Builders (Unit 2)", pan: "ABCCS1234A" }],
+      formType: null,
+      skipped: { noSection: 0, noJoin: 0 },
+    });
+    expect(result.winman.panAdopted).toBe(1);
+    expect(JSON.stringify(result)).not.toContain("ABCCS1234A");
+  });
+
+  it("errors citing the Parties row when the template PAN disagrees with the Winman PAN", async () => {
+    const s = mkSession({});
+    await expect(
+      s.tdsReview(undefined, "20250401", "20260331", "20260331", {
+        ...OPERATOR,
+        parties: [
+          { ledger: "Sample Builders LLP", tdsApplicable: true, pan: "ABCDX9999X", panRow: 2, transporterDeclaration: false, deducteeFiledReturn: false, winmanName: "Sample Builders (Unit 2)" },
+        ],
+      }, "template", {
+        challans: [],
+        deductees: [{ name: "Sample Builders (Unit 2)", pan: "ABCCS1234A" }],
+        formType: null,
+        skipped: { noSection: 0, noJoin: 0 },
+      }),
+    ).rejects.toThrow(/template Parties row 2, column C \(PAN\)/);
   });
 });
 

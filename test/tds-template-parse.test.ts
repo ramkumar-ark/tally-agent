@@ -128,6 +128,8 @@ describe("parseOperatorTemplate — happy path", () => {
       {
         ledger: "Sample Builders LLP",
         tdsApplicable: true,
+        pan: "ABCCS1234A",
+        panRow: 2,
         transporterDeclaration: false,
         deducteeFiledReturn: true,
         winmanName: "Sample Builders (Unit 2)",

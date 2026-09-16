@@ -375,6 +375,26 @@ describe("tb_write_ledger_report", () => {
   });
 });
 
+describe("tb_tds_review channel selection", () => {
+  const { tools } = harness();
+  const call = (args: Record<string, unknown>) => Promise.resolve(tools.get("tb_tds_review")!(args as never));
+
+  it("refuses both operator channels", async () => {
+    await expect(call({ fromDate: "20250401", toDate: "20260331", asOnDate: "20260331", templatePath: "/a.xlsx", tdsFilePath: "/o.json" }))
+      .rejects.toThrow(/templatePath or tdsFilePath, not both/);
+  });
+
+  it("refuses neither operator channel", async () => {
+    await expect(call({ fromDate: "20250401", toDate: "20260331", asOnDate: "20260331" }))
+      .rejects.toThrow(/pass templatePath/);
+  });
+
+  it("still accepts the legacy JSON channel path", async () => {
+    await expect(call({ fromDate: "20250401", toDate: "20260331", asOnDate: "20260331", tdsFilePath: "/nonexistent.json" }))
+      .rejects.not.toThrow(/templatePath or tdsFilePath/);
+  });
+});
+
 describe("tb_depreciation_review", () => {
   const h = harness();
   const registeredToolNames = () => [...h.tools.keys()];

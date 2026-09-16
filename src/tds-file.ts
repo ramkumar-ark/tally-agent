@@ -31,6 +31,14 @@ export interface OperatorParty {
    * findings. The template's counterpart column is required instead.
    */
   tdsApplicable: boolean;
+  /**
+   * The template's typed PAN (§8.4's rate logic and the Winman-name
+   * agreement check); the JSON channel never sets it (masters carry it).
+   * Compacted on read; never echoed.
+   */
+  pan?: string;
+  /** The Excel row of that PAN — the Parties-row citation in a §8.4 conflict error. */
+  panRow?: number;
   /** 194C(6): suppresses the party's contract-payment TDS liability (review-only). */
   transporterDeclaration: boolean;
   /** The s.201(1) proviso fact: shields interest (i), never book-derived. */
@@ -507,17 +515,20 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
       throw new Error(`template Parties row ${r.row}, column A (Tally Ledger Name): this ledger already appears in row ${seenParties.get(key)} — one row per party`);
     }
     seenParties.set(key, r.row);
-    // PAN is validated (and any Excel mangling rejected) but not carried in
-    // the OperatorFile: no downstream check joins on PAN, the Winman channel
-    // joins on the declared Winman deductee name. Nothing tax-id-bearing
-    // leaves this module.
-    pan(at(partyCols.get("PAN")!, "PAN"), r.cells.get(partyCols.get("PAN")!));
+    // PAN is validated (and any Excel mangling rejected) but never echoed;
+    // the template's own PAN feeds the Winman-name PAN agreement check (§8.4)
+    // and nothing else downstream uses it directly.
+    const panValue = pan(at(partyCols.get("PAN")!, "PAN"), r.cells.get(partyCols.get("PAN")!));
     const row: OperatorParty = {
       ledger,
       tdsApplicable: flag(at(partyCols.get("TDS Applicable")!, "TDS Applicable"), r.cells.get(partyCols.get("TDS Applicable")!)),
       transporterDeclaration: flag(at(partyCols.get("Transporter Declaration 194C(6)")!, "Transporter Declaration 194C(6)"), r.cells.get(partyCols.get("Transporter Declaration 194C(6)")!)),
       deducteeFiledReturn: flag(at(partyCols.get("Deductee Filed Return s.201(1)")!, "Deductee Filed Return s.201(1)"), r.cells.get(partyCols.get("Deductee Filed Return s.201(1)")!)),
     };
+    if (panValue !== undefined) {
+      row.pan = panValue;
+      row.panRow = r.row;
+    }
     const winman = textCell(at(partyCols.get("Winman Deductee Name")!, "Winman Deductee Name"), r.cells.get(partyCols.get("Winman Deductee Name")!));
     if (winman !== undefined) row.winmanName = winman;
     return row;

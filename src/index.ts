@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { buildTemplateWorkbook, templateFileName } from "./tds-template.js";
+import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadWrongGroup } from "./overrides.js";
@@ -334,37 +335,54 @@ export function registerTools(
     "tb_tds_review",
     "TDS compliance review for FY 2025-26: TDS not deducted, short deducted or deducted late; " +
       "deposits missing or late; statements late or missing; s.201(1A) interest, s.234E fee and " +
-      "s.40(a)(ia)/s.271C exposures. Pass the PATH of the operator TDS file (JSON) - never paste " +
-      "its rows into chat, they carry tax identities. Deductees appear as pseudonyms" +
+      "s.40(a)(ia)/s.271C exposures. Pass the PATH of the operator file - the fillable Excel " +
+      "template from tb_write_tds_template (templatePath, recommended; optionally plus a Winman " +
+      "TDS-summary export as winmanPath) or the legacy JSON (tdsFilePath). Never paste their " +
+      "rows into chat, they carry tax identities. Deductees appear as pseudonyms" +
       " ('Creditor 3', 'TaxId 2'); drill in with tb_ledger_activity using the finding id.",
     {
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
       asOnDate: z.string().describe("Deposit/state date, YYYYMMDD"),
-      tdsFilePath: z.string().describe("Path to the operator TDS JSON file; its contents are read inside the gateway"),
+      templatePath: z.string().optional().describe("Path to the filled tds-operator-template-*.xlsx; its contents are read inside the gateway"),
+      tdsFilePath: z.string().optional().describe("Path to the legacy operator TDS JSON file; templatePath takes precedence, give exactly one"),
+      winmanPath: z.string().optional().describe("Optional path to the Winman TDS-summary xlsx export (challans and deductee PANs)"),
       company: z.string().optional(),
       fullCheckPath: z.string().optional().describe("Optional path to an operator day-book JSON export for the coverage reconciliation"),
     },
     async (args) => {
-      const operatorText = await readFile(args.tdsFilePath, "utf8");
+      if (args.templatePath && args.tdsFilePath) {
+        throw new Error("give templatePath or tdsFilePath, not both — the template is the recommended channel");
+      }
+      if (!args.templatePath && !args.tdsFilePath) {
+        throw new Error("pass templatePath (the fillable tds-operator-template-*.xlsx from tb_write_tds_template) or the legacy tdsFilePath (JSON)");
+      }
+      const operator = args.templatePath
+        ? parseOperatorTemplate(await readFile(args.templatePath))
+        : parseOperatorFile(await readFile(args.tdsFilePath!, "utf8"));
+      const winman = args.winmanPath ? parseWinmanExport(await readFile(args.winmanPath)) : undefined;
       const fullCheckText = args.fullCheckPath ? await readFile(args.fullCheckPath, "utf8") : undefined;
       const result = await session.tdsReview(
         args.company ?? cfg.defaultCompany,
         args.fromDate,
         args.toDate,
         args.asOnDate,
-        operatorText,
+        operator,
+        args.templatePath ? "template" : "json",
+        winman,
         fullCheckText,
       );
       lastTds = result;
-      // The file's PATH is audited, never its contents (the M2 returnsPath contract).
+      // The files' PATHS are audited, never their contents (the M2 returnsPath contract).
       await audit(
         "tb_tds_review",
         {
           company: args.company,
           fromDate: args.fromDate,
           toDate: args.toDate,
-          tdsFilePath: args.tdsFilePath,
+          ...(args.templatePath ? { templatePath: args.templatePath } : {}),
+          ...(args.tdsFilePath ? { tdsFilePath: args.tdsFilePath } : {}),
+          ...(args.winmanPath ? { winmanPath: args.winmanPath } : {}),
           ...(args.fullCheckPath ? { fullCheckPath: args.fullCheckPath } : {}),
         },
         result.findings.length,

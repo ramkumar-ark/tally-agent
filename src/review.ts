@@ -13,7 +13,7 @@ import { dayBefore } from "./format.js";
 import { canonicalKey } from "./key.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
-import { parseDayBook, parseOperatorFile, type OperatorFile } from "./tds-file.js";
+import { parseDayBook, type OperatorFile, type WinmanFacts } from "./tds-file.js";
 import { analyzeTds, type TdsCtx, type TdsEvents, type TdsLedgerRows } from "./tds.js";
 import { createVault, type Vault } from "./vault.js";
 import {
@@ -133,6 +133,10 @@ export interface TdsReviewResult {
   toDate: string;
   asOnDate: string;
   counts: Record<Severity, number>;
+  /** Which channel supplied the operator facts (§8.5's envelope addition). */
+  operatorSource: "json" | "template";
+  /** Could-counts only: how much of the Winman side was consumed. */
+  winman: { used: boolean; challans: number; deductees: number; panAdopted: number };
   findings: TdsMaskedFinding[];
   totals: {
     bySection: Array<{ section: string; gross: number; tax: number }>;
@@ -263,14 +267,19 @@ export interface Session {
   ): Promise<GstMismatchResult>;
   /**
    * TDS compliance review (FY 25-26 law of record in src/tds-law.ts). The
-   * operator file travels by path only; its text is read inside the gateway.
+   * operator data arrives already parsed — `src/index.ts` reads the file
+   * (path only, never its contents over the wire) by channel: the legacy
+   * JSON file, the generated fillable template, and the optional Winman
+   * TDS-summary export (§8.4's merge).
    */
   tdsReview(
     company: string | undefined,
     fromDate: string,
     toDate: string,
     asOnDate: string,
-    operatorText: string,
+    operator: OperatorFile,
+    operatorSource: "json" | "template",
+    winman?: WinmanFacts,
     fullCheckText?: string,
   ): Promise<TdsReviewResult>;
   /**
@@ -570,14 +579,38 @@ export function createSession(
     fromDate: string,
     toDate: string,
     asOnDate: string,
-    operatorText: string,
+    operatorIn: OperatorFile,
+    operatorSource: "json" | "template",
+    winman?: WinmanFacts,
     fullCheckText?: string,
   ): Promise<TdsReviewResult> {
     if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || !/^\d{8}$/.test(asOnDate) || fromDate > toDate) {
       throw new Error("fromDate, toDate and asOnDate must be YYYYMMDD, with fromDate on or before toDate");
     }
     lastCompany = company;
-    const operator: OperatorFile = parseOperatorFile(operatorText);
+    // §8.4 merge: Winman challans union into the operator's on
+    // (section, forMonth). The same key with a different deposit date is a
+    // hard error naming the section and month (enum + YYYY-MM — no values at
+    // risk); equal dates dedupe. The Challan sheet's Bare-label rows never
+    // reached here: parseWinmanExport already normalised them.
+    const operator: OperatorFile = { ...operatorIn };
+    if (winman) {
+      const opIndex = new Map(operator.challans.map((c) => [`${c.section}|${c.forMonth}`, c]));
+      const next: typeof operator.challans = [...operator.challans];
+      for (const gc of winman.challans) {
+        const existing = opIndex.get(`${gc.section}|${gc.forMonth}`);
+        if (!existing) {
+          next.push(gc);
+          continue;
+        }
+        if (existing.depositDate !== gc.depositDate) {
+          throw new Error(
+            `the operator file and the Winman export disagree on ${gc.section} ${gc.forMonth}'s deposit date; fix one of them before the review runs`,
+          );
+        }
+      }
+      operator.challans = next;
+    }
     // The verbose whole-company master export is the heaviest downstream call
     // and the only one a large company can wedge — the captain asked for the
     // narrowest request on a shared Tally. When it fails (P1 fields absent or
@@ -604,6 +637,29 @@ export function createSession(
     for (const l of masters) {
       if (l.pan && !panAliasOf.has(canonicalKey(l.name))) {
         panAliasOf.set(canonicalKey(l.name), vault.pseudonym(l.pan, "tax_id"));
+      }
+    }
+    // §8.4 PAN pickup: for each template Parties row declaring a Winman
+    // Deductee Name, that exact string (trimmed) joins one deductee; a
+    // Winman-only PAN is adopted through the same vault channel, identical
+    // masking, no new path. Names are never fuzzy-matched, so a parenthetical
+    // remark in a Winman name is the operator's declared form. Template PAN
+    // and Winman PAN disagreeing after compaction is a hard error citing the
+    // Parties row — never a value.
+    let panAdopted = 0;
+    if (winman) {
+      for (const p of operator.parties) {
+        if (!p.winmanName) continue;
+        const declared = p.winmanName.trim();
+        const hit = winman.deductees.find((x) => x.name === declared);
+        if (!hit?.pan) continue;
+        if (p.pan && p.pan !== hit.pan) {
+          throw new Error(
+            `template Parties row ${p.panRow ?? "?"}, column C (PAN): the cell disagrees with the Winman export's PAN — retype the PAN (text column) or fix the export`,
+          );
+        }
+        if (!p.pan) panAdopted += 1;
+        panAliasOf.set(canonicalKey(p.ledger), vault.pseudonym(hit.pan, "tax_id"));
       }
     }
     const realOf = (party: string): string =>
@@ -775,6 +831,13 @@ export function createSession(
       fromDate,
       toDate,
       asOnDate,
+      operatorSource,
+      winman: {
+        used: winman !== undefined,
+        challans: winman?.challans.length ?? 0,
+        deductees: winman?.deductees.length ?? 0,
+        panAdopted,
+      },
       counts,
       findings,
       totals: {
