@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { registerTools, type ToolRegistrar } from "../src/index.js";
 import { createSession } from "../src/review.js";
+import { writeDepreciationReport } from "../src/report.js";
+import { parseDepOperatorFile } from "../src/depreciation-file.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 
 const SECRETS = JSON.parse(
@@ -297,3 +299,99 @@ function containsCanonically(corpus: string, secret: string): boolean {
   const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
   return norm(corpus).includes(norm(secret));
 }
+
+/**
+ * Depreciation leak surfaces (plan Task 13): a workbook is a new way for a
+ * real asset ledger name to reach the model, and an operator file is a new
+ * way for one to reach an error message. The helpers build on the additive
+ * stub pattern above: the dep engine is fed its own small group tree and one
+ * secret asset ledger, so the review really sees the secret.
+ */
+function depSecretDownstream(name: string) {
+  const depreciationRow = {
+    date: "20260303", voucherType: "Jrnl", voucherNumber: "1", reference: "",
+    counterparty: name, amount: 15000, matchStatus: "matched" as const, tax: null,
+  };
+  const trialBalance = (rows: Array<{ name: string; parent: string; balance: number }>) =>
+    async (_c: unknown, asOn: string) => ({
+      totalDebit: 0, totalCredit: 0,
+      rows: asOn === "20250331"
+        ? rows.map((r) => (r.parent === "Indirect Expenses" ? { ...r, balance: 0 } : r))
+        : rows,
+    });
+  return Object.assign(fakeDownstream(), {
+    groups: async () => [
+      { name: "Fixed Assets", parent: " Primary" },
+      { name: "Block 15%", parent: "Fixed Assets" },
+      { name: "Indirect Expenses", parent: " Primary" },
+    ],
+    trialBalance: trialBalance([
+      { name, parent: "Block 15%", balance: 100000 },
+      { name: "Depreciation A/c", parent: "Indirect Expenses", balance: 0 },
+    ]),
+    ledgerVoucherRows: async (_c: unknown, ledger: string, from: string, to: string) => {
+      if (ledger !== "Depreciation A/c" || from > "20260303" || to < "20260303") {
+        return { rows: [], dropped: 0 };
+      }
+      return { rows: [depreciationRow], dropped: 0 };
+    },
+  } as never);
+}
+
+async function runDepreciationReviewWithSecretLedger(name: string) {
+  const session = createSession(depSecretDownstream(name), EMPTY_OVERRIDES);
+  return session.depreciationReview(undefined, "20250401", "20260331", null);
+}
+
+async function writeDepreciationReportWithSecretLedger(name: string) {
+  const session = createSession(depSecretDownstream(name), EMPTY_OVERRIDES);
+  const masked = await session.depreciationReview(undefined, "20250401", "20260331", null);
+  const { workbookPath, csvPath } = await writeDepreciationReport({
+    reportDir: mkdtempSync(join(tmpdir(), "tally-agent-dep-")),
+    company: "Demo Traders Pvt Ltd",
+    fromDate: "20250401",
+    toDate: "20260331",
+    result: masked,
+    vault: session.vault,
+  });
+  return { workbookPath, csvPath, masked };
+}
+
+describe("depreciation leak surfaces", () => {
+  it("never returns a real asset ledger name from a depreciation review", async () => {
+    const result = await runDepreciationReviewWithSecretLedger("Orchid Medical Plant");
+    // Non-vacuity: the stub's asset ledger really entered the review.
+    expect(JSON.stringify(result)).toMatch(/Ledger \d+/);
+    const text = JSON.stringify(result).toLowerCase();
+    expect(text).not.toContain("orchid");
+    expect(text).not.toContain("medical");
+  });
+
+  it("never echoes an operator file value in a parse error", () => {
+    const bad = JSON.stringify({
+      schema: "tally-agent-depreciation.v1",
+      financialYear: { from: "2025-04-01", to: "2026-03-31" },
+      rateOverrides: [{ ledger: "Orchid Medical Plant", rate: "bad" }],
+    });
+    try {
+      parseDepOperatorFile(bad, "20250401", "20260331");
+      throw new Error("should have thrown");
+    } catch (e) {
+      expect((e as Error).message.toLowerCase()).not.toContain("orchid");
+      expect((e as Error).message.toLowerCase()).not.toContain("medical");
+    }
+  });
+
+  it("writes the real name into the workbook but never into the returned paths", async () => {
+    const { workbookPath, csvPath, masked } = await writeDepreciationReportWithSecretLedger("Orchid Medical Plant");
+    // Non-vacuity: the files really exist and the trio's CSV on the disk
+    // carries the restored real name (the workbook is zip-compressed, so its
+    // strings are not raw-scannable; the CSV is the same de-masked writer).
+    expect(readFileSync(workbookPath).subarray(0, 2).toString("latin1")).toBe("PK");
+    expect(readFileSync(csvPath, "utf8").toLowerCase()).toContain("orchid medical plant");
+    expect(workbookPath.toLowerCase()).not.toContain("orchid");
+    expect(csvPath.toLowerCase()).not.toContain("orchid");
+    expect(JSON.stringify(masked).toLowerCase()).not.toContain("orchid");
+    expect(JSON.stringify(masked).toLowerCase()).not.toContain("medical");
+  });
+});
