@@ -188,6 +188,38 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   design §3's letter); the workbook de-masks them via the vault. Recorded so
   the two documents do not look contradictory.
 
+## Sharp edges found implementing the TDS spreadsheet input (2026-09-16)
+
+- The design of record is
+  `docs/design/2026-09-16-tds-spreadsheet-input-design.md` (kept in the
+  firstmate data tree, section-source report). Section resolution is
+  `resolveSection(expenseLedger)` — one argument, no party — and a bare
+  `194-I` key is rejected everywhere; only `194-I(a)` (plant/machinery) and
+  `194-I(b)` (land/building) exist in the law table.
+- `src/xlsx-read.ts` (reader) deliberately shares **no code** with
+  `src/xlsx.ts` (writer): two independent zip+XML stacks, both zero-new-deps.
+  The writer's `Sheet extends state` (used for the Winman fixture's
+  veryHidden `List` decoy) is the only writer-side addition since the
+  depreciation plan.
+- Template parser and Winman parser share the error contract: sheet, row
+  (as Excel shows it), column letter + header — never a cell value (a stray
+  operator cell can be a PAN/TAN). The parse of the generated blank template
+  is `EMPTY_TDS_OPERATOR`, which is also the no-operator-facts run input.
+- Winman's Deductor block TAN is parsed and **dropped immediately**; it is
+  never bound to a variable any caller can see. Winman challans are derived
+  from the **Deduction sheet's allocation** joined to the Challan sheet by
+  `(id, quarter)` (challan ids restart each quarter); the Challan sheet's own
+  section label is never a section key, and a bare `194I` label counts into
+  `skipped.noSection` instead of folding to either 194-I sub-section.
+- `OperatorParty.pan`/`panRow` exist only for §8.4's template-vs-Winman PAN
+  agreement check (error cites the Parties row, never the value); the JSON
+  channel never sets them, and nothing downstream reads the PAN directly —
+  the Winman-name join adopts the PAN through `vault.pseudonym(.., "tax_id")`
+  like every other tax id.
+- The writer emits `{header:""}` blanks fine, but `buildWorkbook` maps data
+  cells positionally against `columns` — a row cell past the column list is
+  silently dropped (the winman fixture caught this).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

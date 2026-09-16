@@ -172,10 +172,13 @@ interest (i), not the finding.
 - **Timing, strict (captain Q3: A):** the deductible date = the earlier of
   the booking (credit to the party, incl. year-end provision/suspense
   credits) and any payment/advance — "whichever is earlier".
-- **Section resolution:** operator `parties[].section` first, then
-  `sections[].section`, then (once P1 ships) the duty ledger's
-  nature-of-payment. Unmapped → `tds_section_unknown`, no interest, never
-  guessed.
+- **Section resolution** *(amended 2026-09-16, spreadsheet-input design §8.7:
+  "Section resolution: the duty ledger's mapped section for deductions and
+  deposits; the booked expense ledger's mapped section for bookings; there is
+  no party→section mapping. Unmapped or multiply-mapped →
+  `tds_section_unknown`, no interest, never guessed." (was: operator
+  `parties[].section` first, then `sections[].section`, then the duty
+  ledger's nature-of-payment))*
 - **Rate:** PAN 4th char P/H → 194C 1%, C/F → 2%; no PAN → s.206AA higher of
   section rate or 20%, labelled `206AA`; s.197 certificate (operator,
   validity window) overrides within the window; a 194C(6) transporter
