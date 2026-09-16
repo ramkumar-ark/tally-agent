@@ -328,3 +328,86 @@ describe("tdsReview", () => {
     ).rejects.toThrow(/YYYYMMDD/);
   });
 });
+
+/**
+ * Depreciation two-pass fixture. Two asset ledgers under Block 15%. "Quiet
+ * Plant" moves by exactly its own depreciation charge, so the two-pass
+ * residual nets to nil and pass 2 should skip it. "Busy Plant" does not, so
+ * it must be fetched.
+ */
+function depFixture(calls: string[], ranges: Array<[string, string]> = []) {
+  return createSession(
+    Object.assign(fakeDownstream(), {
+      groups: async () => [
+        { name: "Fixed Assets", parent: " Primary" },
+        { name: "Block 15%", parent: "Fixed Assets" },
+        { name: "Indirect Expenses", parent: " Primary" },
+      ],
+      trialBalance: async (_c: unknown, asOn: string) => ({
+        totalDebit: 0, totalCredit: 0,
+        rows: asOn === "20250331"
+          ? [
+              { name: "Quiet Plant", parent: "Block 15%", balance: 100000 },
+              { name: "Busy Plant", parent: "Block 15%", balance: 100000 },
+              { name: "Depreciation A/c", parent: "Indirect Expenses", balance: 0 },
+            ]
+          : [
+              { name: "Quiet Plant", parent: "Block 15%", balance: 85000 },
+              { name: "Busy Plant", parent: "Block 15%", balance: 500000 },
+              { name: "Depreciation A/c", parent: "Indirect Expenses", balance: 15000 },
+            ],
+      }),
+      ledgerVoucherRows: async (_c: unknown, ledger: string, from: string, to: string) => {
+        calls.push(ledger);
+        ranges.push([from, to]);
+        if (ledger !== "Depreciation A/c" || from > "20260303" || to < "20260303") {
+          return { rows: [], dropped: 0 };
+        }
+        return {
+          rows: [{
+            date: "20260303", voucherType: "Jrnl", voucherNumber: "1", reference: "",
+            counterparty: "Quiet Plant", amount: 15000, matchStatus: "matched", tax: null,
+          }],
+          dropped: 0,
+        };
+      },
+    } as never),
+    EMPTY_OVERRIDES,
+    EMPTY_WRONG_GROUP,
+  );
+}
+
+describe("depreciationReview two-pass fetch", () => {
+  it("skips a voucher fetch for an asset ledger whose movement is the depreciation charge", async () => {
+    const calls: string[] = [];
+    await depFixture(calls).depreciationReview(undefined, "20250401", "20260331", null);
+    expect(calls).toContain("Busy Plant");
+    expect(calls).not.toContain("Quiet Plant");
+  });
+
+  it("fetches every asset ledger when TALLY_AGENT_DEP_FETCH_ALL is set", async () => {
+    process.env.TALLY_AGENT_DEP_FETCH_ALL = "1";
+    try {
+      const calls: string[] = [];
+      await depFixture(calls).depreciationReview(undefined, "20250401", "20260331", null);
+      expect(calls).toContain("Quiet Plant");
+    } finally {
+      delete process.env.TALLY_AGENT_DEP_FETCH_ALL;
+    }
+  });
+
+  it("month-chunks every fetch rather than asking for the whole year at once", async () => {
+    const ranges: Array<[string, string]> = [];
+    await depFixture([], ranges).depreciationReview(undefined, "20250401", "20260331", null);
+    expect(ranges.length).toBeGreaterThan(0);
+    expect(ranges.every(([f, t]) => f.slice(0, 6) === t.slice(0, 6))).toBe(true);
+  });
+
+  it("masks asset ledgers as Ledger N, never in clear", async () => {
+    const result = await depFixture([]).depreciationReview(undefined, "20250401", "20260331", null);
+    const text = JSON.stringify(result);
+    expect(text).not.toContain("Busy Plant");
+    expect(text).not.toContain("Quiet Plant");
+    expect(text).toMatch(/Ledger \d+/);
+  });
+});

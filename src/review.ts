@@ -1,6 +1,11 @@
 import { buildClassifier, type Classifier, type Overrides } from "./classify.js";
 import { runChecks } from "./checks/index.js";
 import type { Downstream, LedgerVoucherRow, VoucherRow } from "./downstream.js";
+import {
+  analyzeDepreciation, round2,
+  type AssetRow, type BlockResult, type DepAnalyzeInput, type DepCtx, type ExcludedRow, type MovementRow,
+} from "./depreciation.js";
+import { EMPTY_DEP_OPERATOR, parseDepOperatorFile } from "./depreciation-file.js";
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
@@ -14,6 +19,7 @@ import { createVault, type Vault } from "./vault.js";
 import {
   EMPTY_WRONG_GROUP,
   TOTALS_TOLERANCE,
+  ZERO_TOLERANCE,
   type Finding,
   type GroupRole,
   type GstKind,
@@ -22,6 +28,7 @@ import {
   type TbRow,
   type TdsFinding,
   type WrongGroupConfig,
+  type DepFinding,
 } from "./types.js";
 
 /**
@@ -38,6 +45,20 @@ const NAME_FIELDS: ReadonlySet<string> = new Set([
   // taxBreakup.taxLedgers[].ledgerName, nested one level down.
   "ledgerName",
 ]);
+
+/** Engine-agnostic lowercase canon for the depreciation session. */
+const canon = (s: string): string => s.trim().toLowerCase();
+
+/** Roots the depreciation expense ledger may sit under (engine's own table, mirrored for the fetch). */
+const DEP_EXPENSE_ROOTS = new Set([
+  "indirect expenses", "direct expenses", "expenses (indirect)", "expenses (direct)",
+]);
+/** Roots the disposal-signal ledgers may sit under (design §9). */
+const DEP_DISPOSAL_ROOTS = new Set([
+  "indirect incomes", "direct incomes", "income (indirect)", "income (direct)", "sales accounts",
+]);
+const DEP_EXPENSE_NAME = /deprecia/i;
+const DEP_DISPOSAL_NAME = /sale of (fixed )?asset|profit on sale of (fixed )?asset|asset disposal/i;
 
 function maskVoucherRow(
   row: unknown,
@@ -120,6 +141,38 @@ export interface TdsReviewResult {
     interestIi: number;
   };
   ledgerCalls: number;
+}
+
+/** One masked depreciation finding: the engine shape with ledger+block pseudonymed. */
+export interface DepMaskedFinding {
+  id: string;
+  check: string;
+  severity: Severity;
+  ledger: string;
+  block: string;
+  amount: number;
+  detail: string;
+}
+
+/** tb_depreciation_review's result: every ledger and block name already masked; de-masking happens in the writers only (R-P-5). */
+export interface DepReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  counts: Record<Severity, number>;
+  findings: DepMaskedFinding[];
+  blocks: BlockResult[];
+  assets: AssetRow[];
+  movements: MovementRow[];
+  excluded: ExcludedRow[];
+  bookCharge: number;
+  seedSource: "operator" | "book-seed";
+  /** Whole-company asset ledgers found in the block tree. */
+  assetLedgers: number;
+  /** Asset ledgers whose residual forced a month-chunked pass-2 fetch. */
+  fetched: number;
+  /** Downstream calls the two passes consumed. */
+  calls: number;
 }
 
 export interface ReviewResult {
@@ -219,6 +272,18 @@ export interface Session {
     operatorText: string,
     fullCheckText?: string,
   ): Promise<TdsReviewResult>;
+  /**
+   * Income Tax Act depreciation per block of assets (design of record:
+   * docs/design/2026-09-16-depreciation-verification-design.md), over a
+   * two-pass Tally fetch. The operator file travels by path only; its text
+   * is read inside the gateway.
+   */
+  depreciationReview(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+    operatorText: string | null,
+  ): Promise<DepReviewResult>;
   vault: Vault;
 }
 
@@ -683,6 +748,176 @@ export function createSession(
     return result;
   }
 
+  /**
+   * Income Tax Act depreciation per block of assets, over the two-pass fetch
+   * of the design's §5: pass 1 is cheap and whole-company (groups, two trial
+   * balances, the depreciation expense ledger and the disposal-signal
+   * ledgers, all month-chunked); pass 2 fetches month-chunked voucher rows
+   * only for the asset ledgers whose residual is not already explained by
+   * their own depreciation charge. TALLY_AGENT_DEP_FETCH_ALL=1 forces the
+   * exhaustive path.
+   */
+  async function depreciationReview(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+    operatorText: string | null,
+  ): Promise<DepReviewResult> {
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+    const operator = operatorText === null
+      ? EMPTY_DEP_OPERATOR
+      : parseDepOperatorFile(operatorText, fromDate, toDate);
+
+    // Pass 1: cheap, whole-company. Opening = the trial balance as on the day
+    // before the period; closing = as on its last day (R-MCP-5: positive =
+    // debit; date-bounded, unlike the ledger master's CLOSINGBALANCE).
+    const [groups, opening, closing] = await Promise.all([
+      d.groups(company),
+      d.trialBalance(company, dayBefore(fromDate)),
+      d.trialBalance(company, toDate),
+    ]);
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    // maskVoucherRow and the masking helpers below read this map, so it is
+    // populated before anything is masked.
+    for (const r of closing.rows) groupOfLedger.set(canonicalKey(r.name), r.parent);
+
+    // buildClassifier's rootOf returns string | null — coerced once, here.
+    const rootOf = (group: string): string => c.rootOf(group) ?? "";
+    const groupOf = (ledger: string): string =>
+      groupOfLedger.get(canonicalKey(ledger)) ?? "";
+
+    const assetLedgers = closing.rows
+      .filter((r) => canon(rootOf(r.parent)) === "fixed assets")
+      .map((r) => r.name);
+    const assetKeySet = new Set(assetLedgers.map(canonicalKey));
+    const depreciationLedgers = closing.rows
+      .filter((r) => DEP_EXPENSE_ROOTS.has(canon(rootOf(r.parent))) && DEP_EXPENSE_NAME.test(r.name))
+      .map((r) => r.name);
+    const disposalLedgers = closing.rows
+      .filter((r) => DEP_DISPOSAL_ROOTS.has(canon(rootOf(r.parent))) && DEP_DISPOSAL_NAME.test(r.name))
+      .map((r) => r.name);
+
+    const pass1 = await fetchLedgerRows(
+      company, [...depreciationLedgers, ...disposalLedgers], fromDate, toDate,
+    );
+
+    // The book charge per asset ledger, read once from the expense side: a
+    // debit row on the depreciation expense ledger names the charged asset
+    // and carries the charge, positive = debit (R-MCP-5).
+    const chargeByAsset = new Map<string, number>();
+    let depreciationLedgerDebits = 0;
+    for (const l of depreciationLedgers) {
+      for (const row of rowsByLedger(pass1.rows, l)) {
+        if (row.amount <= 0) continue;
+        depreciationLedgerDebits += row.amount;
+        const key = canonicalKey(row.counterparty);
+        chargeByAsset.set(key, (chargeByAsset.get(key) ?? 0) + row.amount);
+      }
+    }
+
+    // Pass 2: only the ledgers the books do not already explain. The residual
+    // is closing - opening + the charge pass 1 already attributed to this
+    // ledger; a ledger whose only movement was its own depreciation nets to
+    // nil and is skipped. TALLY_AGENT_DEP_FETCH_ALL=1 disables the skip
+    // (design §5).
+    const openingOf = new Map(opening.rows.map((r) => [canonicalKey(r.name), r.balance] as const));
+    const closingOf = new Map(closing.rows.map((r) => [canonicalKey(r.name), r.balance] as const));
+    const fetchAll = process.env.TALLY_AGENT_DEP_FETCH_ALL === "1";
+    const needFetch = assetLedgers.filter((l) => {
+      if (fetchAll) return true;
+      const k = canonicalKey(l);
+      const residual = (closingOf.get(k) ?? 0) - (openingOf.get(k) ?? 0) + (chargeByAsset.get(k) ?? 0);
+      return Math.abs(residual) > ZERO_TOLERANCE;
+    });
+    const pass2 = await fetchLedgerRows(company, needFetch, fromDate, toDate);
+
+    // The engine's ctx of closures: nothing Tally-shaped crosses here, only
+    // what the ctx already carries. Opening block WDV comes from the operator
+    // file when supplied, otherwise from the book balances (and the engine's
+    // check 3 flags the seed as unverified).
+    const blockSeed = new Map<string, number>();
+    for (const r of opening.rows) {
+      if (!assetKeySet.has(canonicalKey(r.name))) continue;
+      const block = groupOf(r.name);
+      blockSeed.set(block, round2((blockSeed.get(block) ?? 0) + r.balance));
+    }
+    const ctx: DepCtx = {
+      fromDate,
+      toDate,
+      operator,
+      groupOf,
+      groupRootOf: (ledger) => rootOf(groupOf(ledger)),
+      isAssetLedger: (ledger) => assetKeySet.has(canonicalKey(ledger)),
+      openingWdv: (block) => {
+        const row = operator.openingWdv.find((o) => canon(o.block) === canon(block));
+        if (row) return { amount: row.amount, source: "operator" };
+        return { amount: blockSeed.get(block) ?? 0, source: "book-seed" };
+      },
+      bookOpening: (ledger) => openingOf.get(canonicalKey(ledger)) ?? 0,
+      bookClosing: (ledger) => closingOf.get(canonicalKey(ledger)) ?? 0,
+      additionalDepreciationEligible: (ledger) =>
+        operator.assetClass.find((a) => canon(a.ledger) === canon(ledger))
+          ?.additionalDepreciation ?? false,
+    };
+    const input: DepAnalyzeInput = {
+      ledgerRows: needFetch.map((l) => ({ ledger: l, rows: rowsByLedger(pass2.rows, l) })),
+      disposalSignals: disposalLedgers.map((l) => ({ ledger: l, rows: rowsByLedger(pass1.rows, l) })),
+      depreciationLedgerDebits,
+    };
+    const result = analyzeDepreciation(input, ctx);
+
+    // The masked view: registry first — the REAL ledger name against each
+    // finding id BEFORE anything is masked (R-MCP-4 drill-down), exactly as
+    // tdsReview does — then masking. Nothing real leaves this function.
+    const maskDepLedger = (ledger: string): string =>
+      ledger ? maskLedgerName(ledger, groupOf(ledger), c, vault) : "";
+    const maskGroup = (group: string): string =>
+      c.maskPolicy(group) === "mask" ? vault.pseudonym(group, "other" satisfies GroupRole) : scrubSecrets(group);
+    const findings: DepMaskedFinding[] = result.findings.map((f: DepFinding) => {
+      realLedgerByFinding.set(f.id, f.ledger);
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        ledger: maskDepLedger(f.ledger),
+        block: f.block ? maskGroup(f.block) : "",
+        amount: f.amount,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+      };
+    });
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of findings) counts[f.severity] += 1;
+
+    const maskedResult: DepReviewResult = {
+      company,
+      fromDate,
+      toDate,
+      counts,
+      findings,
+      blocks: result.blocks.map((b) => ({ ...b, block: maskGroup(b.block) })),
+      assets: result.assets.map((a) => ({
+        ...a, ledger: maskDepLedger(a.ledger), block: maskGroup(a.block),
+        notes: scrubSecrets(maskKnownNames(a.notes, vault)),
+      })),
+      movements: result.movements.map((m) => ({
+        ...m,
+        ledger: maskDepLedger(m.ledger),
+        counterparty: m.counterparty ? maskDepLedger(m.counterparty) : "",
+      })),
+      excluded: result.excluded.map((e) => ({ ...e, ledger: maskDepLedger(e.ledger) })),
+      bookCharge: result.bookCharge,
+      seedSource: result.seedSource,
+      assetLedgers: assetLedgers.length,
+      fetched: needFetch.length,
+      calls: pass1.calls + pass2.calls,
+    };
+    return maskedResult;
+  }
+
   function maskGstFinding(
     f: {
       id: string;
@@ -775,5 +1010,6 @@ export function createSession(
     },
 
     tdsReview,
+    depreciationReview,
   };
 }
