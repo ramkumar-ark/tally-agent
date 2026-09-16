@@ -262,8 +262,12 @@ export function computeBlock(input: BlockInput, ctx: DepCtx): BlockResult {
     };
   }
 
-  // Deductions bite the full-rate pool first, then the half-rate pool, then
-  // opening: an asset sold out of this year's additions cannot be depreciated.
+  // Deductions are taken off opening WDV first, then full-rate additions,
+  // then half-rate additions. Order matters only in the band where the
+  // deductions reach down into the additions pools: this ordering rates the
+  // surviving pool cheaper to depreciate, which is taxpayer-conservative.
+  // The half-rate rule attaches to each asset, so the workbook's allocation
+  // is where a per-asset split is shown (see design §15).
   let remaining = input.deductions;
   const takeFrom = (pool: number): number => {
     const take = Math.min(pool, remaining);
