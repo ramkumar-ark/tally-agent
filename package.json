@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Masking MCP gateway and trial balance review for Tally Prime",
   "type": "module",
+  "engines": { "node": ">=20.15" },
   "main": "dist/index.js",
   "bin": { "tally-agent": "dist/index.js" },
   "scripts": {
