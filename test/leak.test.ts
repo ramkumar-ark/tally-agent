@@ -278,6 +278,7 @@ describe("no secret leaves the gateway", () => {
       "tb_write_ledger_report",
       "tb_write_report",
       "tb_write_tds_report",
+      "tb_write_tds_template",
     ]);
   });
 
