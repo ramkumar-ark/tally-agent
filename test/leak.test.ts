@@ -263,6 +263,7 @@ describe("no secret leaves the gateway", () => {
       reportDir: mkdtempSync(join(tmpdir(), "tally-agent-leak-")),
     });
     expect([...tools.keys()].sort()).toEqual([
+      "tb_depreciation_review",
       "tb_gst_mismatch",
       "tb_gst_summary",
       "tb_ledger_activity",
@@ -270,6 +271,7 @@ describe("no secret leaves the gateway", () => {
       "tb_list_companies",
       "tb_review",
       "tb_tds_review",
+      "tb_write_depreciation_report",
       "tb_write_gst_report",
       "tb_write_ledger_report",
       "tb_write_report",

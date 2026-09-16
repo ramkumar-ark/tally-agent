@@ -8,9 +8,18 @@ import { z } from "zod";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadWrongGroup } from "./overrides.js";
-import { appendAudit, writeGstReport, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump } from "./report.js";
+import {
+  appendAudit,
+  writeDepreciationReport,
+  writeGstReport,
+  writeLedgerReport,
+  writeReport,
+  writeTdsReport,
+  writeVaultDump,
+} from "./report.js";
 import {
   createSession,
+  type DepReviewResult,
   type GstMismatchResult,
   type LedgerScrutinyResult,
   type ReviewResult,
@@ -78,6 +87,7 @@ export function registerTools(
   let last: ReviewResult | undefined;
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
+  let lastDep: DepReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -367,6 +377,80 @@ export function registerTools(
         "tb_write_tds_report",
         { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
         lastTds.findings.length,
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
+
+  register(
+    "tb_depreciation_review",
+    "Income Tax Act depreciation per block of assets for a year, against what the books charged, " +
+      "block-wise and asset-wise (WDV, additional depreciation, s.50). Optionally pass the PATH of the " +
+      "operator depreciation file (JSON) to seed verified opening WDV and overrides - never paste its rows " +
+      "into chat. Without a file the block seed is the book balance, flagged unverified. " +
+      "Asset ledgers appear as pseudonyms such as 'Ledger 2'.",
+    {
+      company: z.string().optional(),
+      fromDate: z.string().describe("YYYYMMDD, the first day of the previous year"),
+      toDate: z.string().describe("YYYYMMDD, the last day of the previous year"),
+      depreciationFilePath: z.string().optional()
+        .describe("Path to the operator depreciation file. The path is read inside the gateway; only the path is audited."),
+    },
+    async (args) => {
+      const operatorText = args.depreciationFilePath
+        ? await readFile(args.depreciationFilePath, "utf8")
+        : null;
+      const result = await session.depreciationReview(
+        args.company ?? cfg.defaultCompany,
+        args.fromDate,
+        args.toDate,
+        operatorText,
+      );
+      lastDep = result;
+      // The file's PATH is audited, never its contents (the M2 returnsPath contract).
+      await audit(
+        "tb_depreciation_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          ...(args.depreciationFilePath ? { depreciationFilePath: args.depreciationFilePath } : {}),
+        },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_depreciation_report",
+    "Write the depreciation review trio (markdown, findings CSV and workbook) to disk. Real names are " +
+      "restored on write; the narrative uses the pseudonyms you were given and is generated from the " +
+      "review result itself.",
+    {
+      company: z.string(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+    },
+    async (args) => {
+      if (!lastDep) throw new Error("run tb_depreciation_review first: there are no depreciation findings to write");
+      const paths = await writeDepreciationReport({
+        reportDir: cfg.reportDir,
+        company: args.company,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        result: lastDep,
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_depreciation_report",
+        { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
+        lastDep.findings.length,
         0,
       );
       if (cfg.dumpVault) {

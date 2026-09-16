@@ -19,9 +19,15 @@ function harness() {
 }
 
 describe("tool surface", () => {
-  it("exposes exactly the eleven approved tools", () => {
+  it("does not expose the ledger master tool that returns bank and address details", () => {
+    const { tools } = harness();
+    expect(tools.has("tally_get_ledger")).toBe(false);
+  });
+
+  it("exposes exactly the thirteen approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
+      "tb_depreciation_review",
       "tb_gst_mismatch",
       "tb_gst_summary",
       "tb_ledger_activity",
@@ -29,16 +35,12 @@ describe("tool surface", () => {
       "tb_list_companies",
       "tb_review",
       "tb_tds_review",
+      "tb_write_depreciation_report",
       "tb_write_gst_report",
       "tb_write_ledger_report",
       "tb_write_report",
       "tb_write_tds_report",
     ]);
-  });
-
-  it("does not expose the ledger master tool that returns bank and address details", () => {
-    const { tools } = harness();
-    expect(tools.has("tally_get_ledger")).toBe(false);
   });
 });
 
@@ -118,7 +120,7 @@ describe("tb_write_report", () => {
   });
 });
 
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 describe("tb_gst_summary", () => {
@@ -369,5 +371,84 @@ describe("tb_write_ledger_report", () => {
     expect(csv).toContain("27AAAAA0000A1Z5");
     expect(csv).not.toContain("TaxId 1");
     expect(csv).not.toContain("Creditor 1");
+  });
+});
+
+describe("tb_depreciation_review", () => {
+  const h = harness();
+  const registeredToolNames = () => [...h.tools.keys()];
+  async function callTool(
+    name: string,
+    args: Record<string, unknown>,
+    onAudit?: (entry: Record<string, unknown>) => void,
+  ): Promise<string> {
+    const out = await h.tools.get(name)!(args);
+    const auditPath = join(h.cfg.reportDir, "session-20260331T100000Z.jsonl");
+    if (existsSync(auditPath)) {
+      for (const line of readFileSync(auditPath, "utf8").split("\n").filter(Boolean)) {
+        onAudit?.(JSON.parse(line));
+      }
+    }
+    return out;
+  }
+
+  it("is registered alongside the other review tools", () => {
+    expect(registeredToolNames()).toContain("tb_depreciation_review");
+    expect(registeredToolNames()).toContain("tb_write_depreciation_report");
+  });
+
+  it("audits the operator file PATH and never its contents", async () => {
+    const depPath = join(mkdtempSync(join(tmpdir(), "dep-op-")), "dep.json");
+    writeFileSync(
+      depPath,
+      JSON.stringify({
+        schema: "tally-agent-depreciation.v1",
+        financialYear: { from: "2025-04-01", to: "2026-03-31" },
+        openingWdv: [{ block: "Block 15%", rate: 15, amount: 4820000 }],
+      }),
+    );
+    const audits: Array<Record<string, unknown>> = [];
+    await callTool(
+      "tb_depreciation_review",
+      {
+        fromDate: "20250401",
+        toDate: "20260331",
+        depreciationFilePath: depPath,
+      },
+      (entry) => audits.push(entry),
+    );
+    expect(audits.some((e) => e.tool === "tb_depreciation_review")).toBe(true);
+    const logged = JSON.stringify(audits);
+    expect(logged).toContain(depPath);
+    expect(logged).not.toContain("openingWdv");
+  });
+
+  it("refuses the writer when no depreciation review has been run", async () => {
+    // A fresh harness: the shared one already cached a review from earlier tests.
+    const tools = new Map<string, (args: any) => Promise<string>>();
+    registerTools((name, _d, _s, handler) => tools.set(name, handler), createSession(fakeDownstream(), EMPTY_OVERRIDES), {
+      reportDir: mkdtempSync(join(tmpdir(), "tally-agent-")),
+    }, "20260331T100000Z");
+    await expect(
+      tools.get("tb_write_depreciation_report")!({
+        company: "Demo Traders Pvt Ltd",
+        fromDate: "20250401",
+        toDate: "20260331",
+      }),
+    ).rejects.toThrow(/run tb_depreciation_review first/i);
+  });
+
+  it("caches the review for the writer, which reports the three artifact paths", async () => {
+    await callTool("tb_depreciation_review", { fromDate: "20250401", toDate: "20260331" });
+    const parsed = JSON.parse(
+      await callTool("tb_write_depreciation_report", {
+        company: "Demo Traders Pvt Ltd",
+        fromDate: "20250401",
+        toDate: "20260331",
+      }),
+    );
+    expect(parsed.markdownPath).toMatch(/depreciation-review-.*\.md$/);
+    expect(parsed.csvPath).toMatch(/depreciation-findings-.*\.csv$/);
+    expect(parsed.workbookPath).toMatch(/depreciation-review-.*\.xlsx$/);
   });
 });
