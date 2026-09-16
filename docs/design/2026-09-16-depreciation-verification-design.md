@@ -964,3 +964,43 @@ the largest disposal of the year was routed outside every asset ledger; and
 that four asset ledgers reconcile exactly from opening through every entry to
 closing, with the book charge equal to the Act rate on the netted cost at the
 asset's first-use date — which is the evidence behind §§7, 9, 10, 11 and 12.
+
+### 18.1 What the implementing run found (2026-09-16)
+
+A full-year `tb_depreciation_review` (FY 2025-26) executed end-to-end against
+the live company through the gateway, via a standalone MCP client with a
+900-second timeout chain. Results: 3 blocks (15% / 40% / 10%), 132 asset rows,
+asset-wise allocation summing exactly to the block totals (1,46,77,335.70 across
+blocks), 2 critical findings — one `dep_credit_unclassified` and one
+`dep_disposal_outside_block` — and 6 warnings including `dep_opening_wdv_unverified`
+(no operator file, book seed reported as such), `dep_book_charge_missing` on the
+year's one late acquisition, and `dep_charge_predates_acquisition` consistent
+with the §12 observation that the annual journal predates year end.
+Check 11 reconciled (no `dep_book_charge_unreconciled` fired).
+
+**Consequence for §5 (two-pass fetch), confirmed live.** The Ledger-Vouchers
+report as seen from the depreciation *expense* side returns **per-voucher
+rows**: the voucher-total amount with one display-particulars ledger as the
+counterparty — the §8 display-column trap applying to pass 1, not just
+classification. Per-asset charge attribution from the expense side is
+therefore not possible on this server shape, `chargeByAsset` is mostly empty,
+and the residual skip does not fire: pass 2 fetched all 132 asset ledgers
+(1,608 upstream calls, ~11 min 45 s wall). The review is correct — per-asset
+book charges come from the asset-ledger credits pass 2 reads, and the
+expense-side journal totals still reconcile check 11 at block level — but the
+call budget is the naive one, not the ~250 designed. Do not redesign now; treat
+the full-year review as a long call that fits the 900-second timeout chain.
+The skip stays in the code (harmless where expense-side rows are per-line,
+useful in fixtures) under a `TALLY_AGENT_DEP_DEBUG` residual-diagnostic hook.
+
+**Narrow-month run: not completed.** Three attempts at a single-month window
+timed out at the gateway after the heavy full-year run, and the upstream was
+not re-loaded for further probing. Recorded as an open observation, not a
+blocker; the fault is most likely upstream connector latency after a heavy
+whole-year export, and it is diagnostic-first (`TALLY_AGENT_DEP_DEBUG`) when
+someone picks it up. The workbook's Excel-open check (§14 spike substitute)
+also remains a manual step for an operator with Excel. Follow-ups, in this
+feature's own terms, kept out of other tasks: a per-line expense-side
+projection (a change to an existing downstream projection, masked like any
+other string) would re-provide the §8 narration-like signal *and* could make
+the residual skip real on live Tally.

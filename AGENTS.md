@@ -159,6 +159,35 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   TANs never echoed); the FY-25-26-only law table lives in `src/tds-law.ts`
   with its C1–C8 confirm flags.
 
+## Sharp edges found implementing depreciation (2026-09-16)
+
+- The design of record is `docs/design/2026-09-16-depreciation-verification-design.md`
+  (including §18.1 live validation) — read it before touching `src/depreciation*.ts`.
+- The Ledger Vouchers report honours only the **last month** of a multi-month
+  range (month chunking is correctness, not optimisation) and some rows leak
+  **forward** into later windows, which is why the range re-filter in
+  `ledgerVoucherRows` (`src/downstream.ts`) must never be removed.
+- Block rates come from the **group** name; a `%` in a **ledger** name is a
+  GST rate and must never be parsed as one (live ledgers end `- 18%` / `- 28 %`).
+- Book depreciation is identified by the counter ledger's group and name
+  (`/deprecia/i` under an expense root), never by voucher type or a year-end
+  date; the live annual journal predates year end and leaves later
+  acquisitions undepreciated (check `DEP-012`).
+- A disposal can be routed entirely outside the asset ledgers (credited to a
+  disposal ledger under `Sales Accounts`), so the disposal-signal income
+  ledgers are a required input, and `DEP-007` fires critical on an unmatched
+  disposal-signal row.
+- **The depreciation review's two-pass residual skip does not fire on live
+  Tally**: Ledger Vouchers seen from the expense side returns per-voucher rows
+  (voucher-total amount, one display-particulars counterparty), so per-asset
+  charge attribution is impossible there and pass 2 fetches every asset
+  ledger. A full-FY run is ~12 min (needs the 900 s timeout chain in
+  `harness/claude-code.md`); the skip remains under `TALLY_AGENT_DEP_DEBUG`
+  diagnostics. See design §18.1 before trying to "fix" the skip.
+- Masked review output masks block group names too (over-redaction beyond
+  design §3's letter); the workbook de-masks them via the vault. Recorded so
+  the two documents do not look contradictory.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
