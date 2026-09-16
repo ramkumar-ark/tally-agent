@@ -228,3 +228,45 @@ export interface TdsFinding {
   detail: string;     // money()/displayDate() only
   schedule?: TdsScheduleRow[];
 }
+
+export type DepCheckId =
+  | "dep_block_rate_unresolved" | "dep_asset_ledger_outside_block"
+  | "dep_opening_wdv_unverified" | "dep_rate_not_in_act"
+  | "dep_credit_unclassified" | "dep_discount_unattributed"
+  | "dep_disposal_outside_block" | "dep_book_charge_missing"
+  | "dep_book_charge_differs" | "dep_block_charge_differs"
+  | "dep_book_charge_unreconciled" | "dep_charge_predates_acquisition"
+  | "dep_block_extinguished" | "dep_block_wdv_nil"
+  | "dep_additional_depreciation_unclaimed";
+
+/** Ordinal used to build stable finding ids. Never renumber. */
+export const DEP_CHECK_ORDINAL: Record<DepCheckId, number> = {
+  dep_block_rate_unresolved: 1, dep_asset_ledger_outside_block: 2,
+  dep_opening_wdv_unverified: 3, dep_rate_not_in_act: 4,
+  dep_credit_unclassified: 5, dep_discount_unattributed: 6,
+  dep_disposal_outside_block: 7, dep_book_charge_missing: 8,
+  dep_book_charge_differs: 9, dep_block_charge_differs: 10,
+  dep_book_charge_unreconciled: 11, dep_charge_predates_acquisition: 12,
+  dep_block_extinguished: 13, dep_block_wdv_nil: 14,
+  dep_additional_depreciation_unclaimed: 15,
+};
+
+export function depFindingId(check: DepCheckId, ordinal: number): string {
+  return `DEP-${String(DEP_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+export interface DepFinding {
+  id: string;
+  check: DepCheckId;
+  severity: Severity;
+  /** Real ledger name pre-mask; "" for a block-level finding. */
+  ledger: string;
+  /** The block group name, or "" where none resolved. */
+  block: string;
+  amount: number;
+  /** money()/displayDate() only — never toFixed(2), never a raw YYYYMMDD. */
+  detail: string;
+}
+
+/** Act-vs-books differences below this are rounding, not findings. */
+export const DEP_TOLERANCE = 1.0;

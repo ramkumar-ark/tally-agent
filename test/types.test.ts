@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TDS_CHECK_ORDINAL, tdsFindingId, type TdsFinding } from "../src/types.js";
 import { findingId, LEDGER_CHECK_ORDINAL, ledgerFindingId, sideOf } from "../src/types.js";
+import { DEP_CHECK_ORDINAL, depFindingId } from "../src/types.js";
 
 describe("sideOf", () => {
   it("returns Dr for a positive balance", () => {
@@ -62,5 +63,32 @@ describe("TDS finding space", () => {
       schedule: [{ kind: "i", amount: 100, from: "20250516", to: "20250628", basis: "1% of 2 months" }],
     };
     expect(f.schedule?.[0].amount).toBe(100);
+  });
+});
+
+describe("DEP- finding space", () => {
+  it("pads the ordinal to three digits like every other family", () => {
+    expect(depFindingId("dep_block_rate_unresolved", 1)).toBe("DEP-001-1");
+    expect(depFindingId("dep_additional_depreciation_unclaimed", 4)).toBe("DEP-015-4");
+  });
+
+  it("pins the ordinals so they are never renumbered", () => {
+    expect(DEP_CHECK_ORDINAL).toEqual({
+      dep_block_rate_unresolved: 1,
+      dep_asset_ledger_outside_block: 2,
+      dep_opening_wdv_unverified: 3,
+      dep_rate_not_in_act: 4,
+      dep_credit_unclassified: 5,
+      dep_discount_unattributed: 6,
+      dep_disposal_outside_block: 7,
+      dep_book_charge_missing: 8,
+      dep_book_charge_differs: 9,
+      dep_block_charge_differs: 10,
+      dep_book_charge_unreconciled: 11,
+      dep_charge_predates_acquisition: 12,
+      dep_block_extinguished: 13,
+      dep_block_wdv_nil: 14,
+      dep_additional_depreciation_unclaimed: 15,
+    });
   });
 });
