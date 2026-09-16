@@ -104,3 +104,94 @@ export function classifyCredit(
   }
   return { kind: null, rule: "", missing: "no rule matched the counter ledger's group" };
 }
+
+export const NETTING_WINDOW_DAYS = 30;
+export const NEW_ACQUISITION_GAP_DAYS = 90;
+
+export interface Acquisition {
+  ledger: string;
+  /** Proxy for the statutory put-to-use date: the earliest debit's date (D8). */
+  firstUse: string;
+  cost: number;
+  counterparty: string;
+  debits: LedgerVoucherRow[];
+  /** Purchase discount netted against this acquisition. */
+  netted: number;
+}
+
+const at = (ymd: string): number =>
+  Date.UTC(Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1, Number(ymd.slice(6, 8)));
+const daysBetween = (a: string, b: string): number => Math.abs(at(a) - at(b)) / 86400000;
+
+/**
+ * Group an asset ledger's debits into acquisitions. A later instalment paid
+ * from a BANK is cost of an asset already in use, not a new asset — verified
+ * against live books, where treating each debit separately disagreed with a
+ * correctly-kept ledger (design §10).
+ */
+export function groupAcquisitions(
+  ledger: string, rows: LedgerVoucherRow[], ctx: DepCtx,
+): Acquisition[] {
+  const debits = rows.filter((r) => r.amount > 0).slice().sort((a, b) => a.date.localeCompare(b.date));
+  const out: Acquisition[] = [];
+  const hasOpening = Math.abs(ctx.bookOpening(ledger)) >= 0.005;
+
+  for (const row of debits) {
+    const root = canon(ctx.groupRootOf(row.counterparty));
+    const fromSupplier = SUPPLIER_ROOTS.has(root) || /^purc/i.test(row.voucherType);
+
+    const sameParty = out.find(
+      (a) => canon(a.counterparty) === canon(row.counterparty)
+        && daysBetween(a.firstUse, row.date) <= NEW_ACQUISITION_GAP_DAYS,
+    );
+
+    if (fromSupplier && !sameParty) {
+      out.push({ ledger, firstUse: row.date, cost: row.amount, counterparty: row.counterparty, debits: [row], netted: 0 });
+      continue;
+    }
+    const target = sameParty ?? out[out.length - 1];
+    if (target) {
+      target.cost += row.amount;
+      target.debits.push(row);
+      continue;
+    }
+    // Nothing open to attach to.
+    if (hasOpening) continue;                       // cost of an asset already in use
+    out.push({ ledger, firstUse: row.date, cost: row.amount, counterparty: row.counterparty, debits: [row], netted: 0 });
+  }
+  return out;
+}
+
+/**
+ * Net purchase discounts against acquisitions: same ledger, same counterparty,
+ * within 30 days, nearest acquisition first and capped at its remaining cost.
+ * A discount that ties to nothing is returned unattributed — it is excluded
+ * and flagged, never assumed against an opening written-down value (§11).
+ */
+export function netDiscounts(
+  acquisitions: Acquisition[],
+  discounts: Array<{ row: LedgerVoucherRow }>,
+  _ctx: DepCtx,
+): { netted: Acquisition[]; unattributed: LedgerVoucherRow[] } {
+  const netted = acquisitions.map((a) => ({ ...a }));
+  const unattributed: LedgerVoucherRow[] = [];
+
+  for (const { row } of discounts.slice().sort((a, b) => a.row.date.localeCompare(b.row.date))) {
+    let remaining = Math.abs(row.amount);
+    const candidates = netted
+      .map((a, i) => ({ a, i, gap: daysBetween(a.firstUse, row.date) }))
+      .filter((c) => canon(c.a.counterparty) === canon(row.counterparty) && c.gap <= NETTING_WINDOW_DAYS)
+      .sort((x, y) => x.gap - y.gap || x.i - y.i);
+
+    for (const c of candidates) {
+      if (remaining <= 0.005) break;
+      const room = c.a.cost - c.a.netted;
+      const take = Math.min(room, remaining);
+      if (take <= 0) continue;
+      c.a.netted += take;
+      remaining -= take;
+    }
+    if (remaining > 0.005) unattributed.push(row);
+  }
+  return { netted, unattributed };
+}
