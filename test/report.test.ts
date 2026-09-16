@@ -1,11 +1,14 @@
 import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendAudit, findingsCsv, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump } from "../src/report.js";
+import { appendAudit, findingsCsv, findingsSheet, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump, writeWorkbook } from "../src/report.js";
 import type { TdsMaskedFinding } from "../src/review.js";
 import { createVault } from "../src/vault.js";
 import type { Finding } from "../src/types.js";
+import { entry } from "./xlsx.test.js";
 
 function fixture() {
   const vault = createVault();
@@ -199,5 +202,43 @@ describe("writeTdsReport", () => {
     expect(isched.split("\n")[0]).toBe("id,check,deductee,section,kind,amount,from,to,basis");
     expect(isched).toContain("Sample Builders LLP");
     expect(isched).toContain("1% of 2 month(s)");
+  });
+});
+
+describe("writeWorkbook", () => {
+  it("de-masks every string cell on the way to disk and leaves numbers alone", async () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Sundry Machinery Supplier", "creditor");
+    const dir = await mkdtemp(join(tmpdir(), "dep-wb-"));
+
+    const path = await writeWorkbook({
+      reportDir: dir,
+      fileName: "wb.xlsx",
+      vault,
+      sheets: [{
+        name: "S",
+        columns: [{ header: "Party", format: "text" }, { header: "Amount", format: "money" }],
+        rows: [[alias, 1234.5]],
+      }],
+    });
+
+    const xml = entry(await readFile(path), "xl/worksheets/sheet1.xml");
+    expect(xml).toContain("Sundry Machinery Supplier");
+    expect(xml).not.toContain(alias);
+    expect(xml).toContain("<v>1234.5</v>");
+    expect(path.startsWith(dir)).toBe(true);
+  });
+
+  it("builds a findings sheet whose columns match findingsCsv's header", () => {
+    const sheet = findingsSheet([{
+      id: "DEP-005-1", check: "dep_credit_unclassified", severity: "critical",
+      ledger: "Ledger 7", group: "Block 15%", amount: 962000,
+      side: null, expected: null, detail: "counter ledger not resolvable",
+    }]);
+    expect(sheet.columns.map((c) => c.header)).toEqual([
+      "id", "check", "severity", "ledger", "group", "amount", "side", "expected", "detail",
+    ]);
+    expect(sheet.rows[0][0]).toBe("DEP-005-1");
+    expect(sheet.rows[0][5]).toBe(962000);
   });
 });

@@ -229,3 +229,58 @@ export async function writeVaultDump(
   await writeFile(path, JSON.stringify(vault.entries(), null, 2), "utf8");
   return path;
 }
+
+import { buildWorkbook, type CellValue, type Sheet } from "./xlsx.js";
+export type { CellValue, Column, Sheet } from "./xlsx.js";
+
+/**
+ * The shared workbook writer (R-X-1, R-X-3). Callers build MASKED sheets;
+ * this is the only place a workbook's strings are de-masked, and it happens
+ * on the way to disk — the same boundary rule as `writeReport` (R-P-5).
+ * Later reports reuse this; they do not grow their own de-masking.
+ */
+export async function writeWorkbook(opts: {
+  reportDir: string;
+  fileName: string;
+  sheets: Sheet[];
+  vault: Vault;
+}): Promise<string> {
+  await mkdir(opts.reportDir, { recursive: true });
+  const path = join(opts.reportDir, opts.fileName);
+  const demasked: Sheet[] = opts.sheets.map((s) => ({
+    name: s.name,
+    title: s.title?.map((t) => demaskText(t, opts.vault)),
+    columns: s.columns,
+    rows: s.rows.map((row) =>
+      row.map((cell): CellValue => (typeof cell === "string" ? demaskText(cell, opts.vault) : cell)),
+    ),
+  }));
+  await writeFile(path, buildWorkbook(demasked));
+  return path;
+}
+
+/**
+ * The adapter that lets any existing findings list become a workbook sheet
+ * without rewriting its writer. Masked in, masked out: `writeWorkbook` does
+ * the de-masking. Columns mirror `findingsCsv`'s header exactly.
+ */
+export function findingsSheet(findings: CsvFinding[]): Sheet {
+  return {
+    name: "Findings",
+    columns: [
+      { header: "id", width: 16, format: "text" },
+      { header: "check", width: 30, format: "text" },
+      { header: "severity", width: 10, format: "text" },
+      { header: "ledger", width: 28, format: "text" },
+      { header: "group", width: 18, format: "text" },
+      { header: "amount", width: 16, format: "money" },
+      { header: "side", width: 8, format: "text" },
+      { header: "expected", width: 12, format: "text" },
+      { header: "detail", width: 70, format: "text" },
+    ],
+    rows: findings.map((f) => [
+      f.id, f.check, f.severity, f.ledger, f.group, f.amount,
+      f.side ?? null, f.expected ?? null, f.detail,
+    ]),
+  };
+}
