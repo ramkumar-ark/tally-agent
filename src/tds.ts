@@ -27,7 +27,14 @@ export interface TdsPeriod {
 
 export interface TdsCtx {
   tdsParties: string[];
-  sectionOf(ledger: string, party: string): string | null;
+  /**
+   * A booking's section comes from the expense ledger it is booked to and
+   * from nothing else (the captain's revision-2 ruling — the party argument
+   * is deliberately absent so no future change can reintroduce a party→section
+   * coupling without changing the type). Zero mapped sections → `{ null, [] }`;
+   * two or more → `{ null, candidates }`, never a pick, never a guess.
+   */
+  resolveSection(expenseLedger: string): { section: string | null; candidates: string[] };
   dutySectionOf(dutyLedger: string): string | null;
   panKeyOf(party: string): string | null;
   entityOf(party: string): "P" | "H" | "C" | "F" | null;
@@ -47,6 +54,8 @@ export interface TdsBooking {
   gross: number;
   ledger: string;
   section: string | null;
+  /** The law-table sections a multi-mapped ledger declared (empty when unmapped). */
+  candidates: string[];
 }
 
 export interface TdsPayment {
@@ -100,6 +109,8 @@ const S206AA_RATE = 0.2;
 const isDebit = (r: LedgerVoucherRow): boolean => r.amount > ZERO;
 const byDate = (rows: readonly LedgerVoucherRow[]): LedgerVoucherRow[] =>
   [...rows].sort((a, b) => a.date.localeCompare(b.date));
+/** Sorted, deduplicated list — used for the candidate enums named in a finding. */
+const uniqueList = (xs: string[]): string[] => [...new Set(xs)].sort();
 
 function dateDiffDays(a: string, b: string): number {
   const ta = Date.UTC(Number(a.slice(0, 4)), Number(a.slice(4, 6)) - 1, Number(a.slice(6, 8)));
@@ -147,7 +158,7 @@ export function extractEvents(
   dutyLedgers: TdsLedgerRows[],
   expenseLedgers: TdsLedgerRows[],
   partyLedgers: TdsLedgerRows[],
-  ctx: Pick<TdsCtx, "tdsParties" | "sectionOf" | "dutySectionOf">,
+  ctx: Pick<TdsCtx, "tdsParties" | "resolveSection" | "dutySectionOf">,
 ): TdsEvents {
   const tdsParties = new Set(ctx.tdsParties);
   const bookings: TdsBooking[] = [];
@@ -158,13 +169,15 @@ export function extractEvents(
   for (const { ledger, rows } of expenseLedgers) {
     for (const r of byDate(rows)) {
       if (r.amount < -ZERO && tdsParties.has(r.counterparty)) {
+        const res = ctx.resolveSection(ledger);
         bookings.push({
           date: r.date,
           voucherNumber: r.voucherNumber,
           party: r.counterparty,
           gross: -r.amount,
           ledger,
-          section: ctx.sectionOf(ledger, r.counterparty),
+          section: res.section,
+          candidates: res.candidates,
         });
       }
     }
@@ -521,8 +534,11 @@ export function analyzeTds(
     }
   }
 
-  // Unmapped sections: review-only, no interest, never guessed.
-  const unknownBookings = events.bookings.filter((b) => b.section === null);
+  // Unmapped sections: review-only, no interest, never guessed. Two cases,
+  // at most two findings: an expense ledger with no mapping at all, and one
+  // mapped to more than one section (whose candidates are law enums — safe to
+  // print — and are named so the fix is actionable: split the ledger).
+  const unknownBookings = events.bookings.filter((b) => b.section === null && b.candidates.length === 0);
   if (unknownBookings.length) {
     const gross = unknownBookings.reduce((a, b) => a + b.gross, 0);
     push(
@@ -531,7 +547,20 @@ export function analyzeTds(
       unknownBookings[0].party,
       null,
       gross,
-      `${unknownBookings.length} booking(s) totalling ${money(gross)} have no section mapping in the operator file; applicability is never guessed.`,
+      `${unknownBookings.length} booking(s) totalling ${money(gross)} are on expense ledgers with no section in the operator file; applicability is never guessed.`,
+    );
+  }
+  const ambiguousBookings = events.bookings.filter((b) => b.section === null && b.candidates.length > 0);
+  if (ambiguousBookings.length) {
+    const gross = ambiguousBookings.reduce((a, b) => a + b.gross, 0);
+    const candidates = uniqueList(ambiguousBookings.flatMap((b) => b.candidates));
+    push(
+      "tds_section_unknown",
+      "review",
+      ambiguousBookings[0].party,
+      null,
+      gross,
+      `${ambiguousBookings.length} booking(s) totalling ${money(gross)} are on expense ledgers mapped to more than one section (${candidates.join(", ")}); the section cannot be decided from the booking, so no tax is computed. Split the ledger per section, or remove the extra mapping.`,
     );
   }
 

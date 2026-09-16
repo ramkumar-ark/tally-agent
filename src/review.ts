@@ -27,6 +27,7 @@ import {
   type Side,
   type TbRow,
   type TdsFinding,
+  tdsFindingId,
   type WrongGroupConfig,
   type DepFinding,
 } from "./types.js";
@@ -617,32 +618,53 @@ export function createSession(
     const isDuty = (l: (typeof masters)[number]) =>
       c.role(l.parent) === "duties" || c.role(groupOfLedger.get(canonicalKey(l.name)) ?? "") === "duties";
     const dutyLedgerNames = masters.filter((l) => l.isTdsApplicable === true && isDuty(l)).map((l) => l.name);
+    // The operator's TDS Applicable column is the counterpart of the master's
+    // own question: `Y` adds the party even when the master misses it; `N`
+    // subtracts it even when the master flags it (that override is made
+    // visible through a review-only tds_master_gap note below).
     const partyLedgerNames = [
       ...masters.filter(isParty).map((l) => l.name),
-      ...operator.parties.map((p) => p.ledger),
+      ...operator.parties.filter((p) => p.tdsApplicable).map((p) => p.ledger),
     ];
+    const operatorNo = operator.parties.filter((p) => !p.tdsApplicable).map((p) => p.ledger);
+    const operatorNoKeys = new Set(operatorNo.map(canonicalKey));
+    // Ledger Kind (design §6a): a `TDS Duty` row never lands on the expense
+    // side — when the verbose master export fails, its duty credits would
+    // otherwise be re-counted as bookings. Empty and masters-unavailable
+    // reproduces yesterday's behaviour exactly.
     const expenseLedgerNames = [
       ...masters.filter((l) => l.isTdsApplicable === true && !isDuty(l) && !isParty(l)).map((l) => l.name),
-      ...operator.sections.map((s) => s.ledger),
+      ...operator.sections.filter((s) => s.kind !== "duty").map((s) => s.ledger),
       ...operator.certificates.map((s) => s.ledger),
     ];
+    const operatorDutyLedgers = operator.sections.filter((s) => s.kind === "duty").map((s) => s.ledger);
 
     const unique = (names: string[]): string[] => {
       const seen = new Set<string>();
       return names.filter((n) => (seen.has(canonicalKey(n)) ? false : (seen.add(canonicalKey(n)), true)));
     };
-    const fetchSet = unique([...dutyLedgerNames, ...expenseLedgerNames, ...partyLedgerNames]);
+    const fetchSet = unique([...dutyLedgerNames, ...operatorDutyLedgers, ...expenseLedgerNames, ...partyLedgerNames]);
     const fetched = await fetchLedgerRows(company, fetchSet, fromDate, toDate);
 
-    // sectionOf prefers the party's mapping, then the expense ledger's (the
-    // captain's operator-file design; the duty ledger's nature-of-payment is
-    // the P1 resolution once the upstream ships named TDS master fields).
-    const partySection = new Map(operator.parties.map((p) => [canonicalKey(p.ledger), p.section]));
-    const ledgerSection = new Map(operator.sections.map((s) => [canonicalKey(s.ledger), s.section]));
-    const sectionOf = (ledger: string, party: string): string | null =>
-      partySection.get(canonicalKey(party)) ?? ledgerSection.get(canonicalKey(ledger)) ?? null;
-    const dutySectionOf = (dutyLedger: string): string | null =>
-      ledgerSection.get(canonicalKey(dutyLedger)) ?? null;
+    // Section resolution (revision 2 of the spreadsheet-input design): the
+    // duty ledger's mapped section for deductions and deposits; the booked
+    // expense ledger's mapped section for bookings; there is no party→section
+    // mapping. Multi-valued, so an ambiguous ledger is *detected* — one
+    // section, or none, resolves; two or more never guesses.
+    const sectionSets = new Map<string, Set<string>>();
+    for (const s of operator.sections) {
+      const set = sectionSets.get(canonicalKey(s.ledger)) ?? new Set<string>();
+      set.add(s.section);
+      sectionSets.set(canonicalKey(s.ledger), set);
+    }
+    const resolveSection = (ledger: string): { section: string | null; candidates: string[] } => {
+      const set = [...(sectionSets.get(canonicalKey(ledger)) ?? [])].sort();
+      return set.length === 1 ? { section: set[0], candidates: [] } : { section: null, candidates: set.length > 1 ? set : [] };
+    };
+    const dutySectionOf = (dutyLedger: string): string | null => {
+      const set = [...(sectionSets.get(canonicalKey(dutyLedger)) ?? [])];
+      return set.length === 1 ? set[0] : null;
+    };
 
     const certificateRateOf = (party: string, section: string, date: string): number | null => {
       const real = realOf(party);
@@ -669,8 +691,11 @@ export function createSession(
       masters.find((l) => canonicalKey(l.name) === canonicalKey(realOf(party)))?.tdsDeducteeType ?? "";
 
     const ctx: TdsCtx = {
-      tdsParties: unique([...partyLedgerNames, ...operator.parties.map((p) => p.ledger)]),
-      sectionOf,
+      tdsParties: unique([
+        ...partyLedgerNames,
+        ...operator.parties.filter((p) => p.tdsApplicable).map((p) => p.ledger),
+      ]).filter((n) => !operatorNoKeys.has(canonicalKey(n))),
+      resolveSection,
       dutySectionOf,
       panKeyOf,
       entityOf,
@@ -682,7 +707,6 @@ export function createSession(
       round100: options.tdsRound100 ?? true,
       period: { fromDate, toDate },
     };
-    void ctx;
 
     // The engine runs month-chunked book events; the day-book reconciliation
     // (an operator fullCheck export) runs the same engine on operator rows.
@@ -693,6 +717,28 @@ export function createSession(
       bookRows.filter((r) => ctx.tdsParties.some((p) => canonicalKey(p) === r.ledger)),
       { ...ctx, operator } as Parameters<typeof analyzeTds>[3],
     );
+
+    // The operator-N override is never silent (design §6b): where the Tally
+    // master flags a ledger TDS-applicable and the operator file says N, the
+    // operator keeps the authority — the file is the more current human fact,
+    // and the master may simply be unconfigured — but the suppression is
+    // visible as the existing review-only tds_master_gap finding.
+    for (const l of masters.filter(
+      (m) => m.isTdsApplicable === true && operatorNoKeys.has(canonicalKey(m.name)),
+    )) {
+      const n = analysis.findings.filter((f) => f.check === "tds_master_gap").length + 1;
+      analysis.findings.push({
+        id: tdsFindingId("tds_master_gap", n),
+        check: "tds_master_gap",
+        severity: "review",
+        deductee: l.name,
+        group: "Sundry Creditors",
+        section: null,
+        amount: 0,
+        detail:
+          "the Tally master flags this ledger TDS-applicable, but the operator file marks it not applicable; the operator's declaration suppresses it — no bookings, payments or findings are produced for it.",
+      });
+    }
 
     const maskTdsFinding = (f: TdsFinding): TdsMaskedFinding => {
       // Registry first (drill-down by finding id, R-MCP-4), then masking.

@@ -6,13 +6,21 @@
     },
     {
       "ledger": "TDS Contractors",
-      "section": "194C"
+      "section": "194C",
+      "kind": "duty"
+    },
+    {
+      "ledger": "Consultancy Services",
+      "section": "194J"
+    },
+    {
+      "ledger": "Rent - Plant and Machinery",
+      "section": "194-I(a)"
     }
   ],
   "parties": [
     {
       "ledger": "Sample Builders LLP",
-      "section": "194C",
       "transporterDeclaration": false,
       "deducteeFiledReturn": false,
       "incomeTaxNumber": "ABCC1234A",
@@ -20,18 +28,17 @@
     },
     {
       "ledger": "Sample Consultants",
-      "section": "194J",
+      "tdsApplicable": true,
       "deducteeFiledReturn": true
     },
     {
-      "ledger": "Sample Developers",
-      "section": "194-I"
+      "ledger": "Sample Developers"
     }
   ],
   "certificates": [
     {
       "ledger": "Sample Developers",
-      "section": "194-I",
+      "section": "194-I(a)",
       "rate": 2,
       "from": "2025-04-01",
       "to": "2026-03-31",

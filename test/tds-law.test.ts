@@ -24,9 +24,24 @@ describe("TDS law table (FY 25-26)", () => {
     expect(law.rates.pan4thChar).toEqual({ P: 0.1, H: 0.1, C: 0.02, F: 0.02 });
     expect(law.threshold).toEqual({ aggregate: 50000 });
   });
-  it("carries 194-I 10% land/building and 2% plant/machinery, per-month threshold", () => {
-    const law = lawOf("194-I")!;
+  it("carries 194-I(a) at 2% (plant and machinery), per-month threshold 50000", () => {
+    const law = lawOf("194-I(a)")!;
+    expect(law.rates.standard).toBe(0.02);
+    expect(law.rates.noPan).toBe(0.2);
+    expect(law.rates.pan4thChar).toBeUndefined();
     expect(law.threshold).toEqual({ perMonth: 50000 });
+    expect(wholeYearOnCross("194-I(a)")).toBe(true);
+  });
+  it("carries 194-I(b) at 10% (land and building), per-month threshold 50000", () => {
+    const law = lawOf("194-I(b)")!;
+    expect(law.rates.standard).toBe(0.1);
+    expect(law.rates.noPan).toBe(0.2);
+    expect(law.rates.pan4thChar).toBeUndefined();
+    expect(law.threshold).toEqual({ perMonth: 50000 });
+    expect(wholeYearOnCross("194-I(b)")).toBe(true);
+  });
+  it("a bare 194-I is no law at all: the two sub-sections never fold", () => {
+    expect(lawOf("194-I")).toBeNull();
   });
   it("carries 194A and 194H", () => {
     expect(lawOf("194A")!.rates.standard).toBe(0.1);
@@ -44,8 +59,8 @@ describe("TDS law table (FY 25-26)", () => {
   it("carries 194T timing-only at 10%", () => {
     expect(lawOf("194T")!.rates.standard).toBe(0.1);
   });
-  it("whole-year on cross for 194C/J/I/A/H and 194T", () => {
-    for (const s of ["194C", "194J", "194-I", "194A", "194H", "194T"]) {
+  it("whole-year on cross for 194C/J/I-b/A/H and 194T", () => {
+    for (const s of ["194C", "194J", "194-I(b)", "194A", "194H", "194T"]) {
       expect(wholeYearOnCross(s)).toBe(true);
     }
   });
@@ -55,9 +70,9 @@ describe("TDS law table (FY 25-26)", () => {
   it("unknown sections are null", () => {
     expect(lawOf("194B")).toBeNull();
   });
-  it("names every section the engine needs", () => {
+  it("names every section the engine needs, with the 194-I split", () => {
     expect(TDS_SECTIONS.map((s) => s.section)).toEqual([
-      "194C", "194J", "194-I", "194A", "194H", "194Q", "194T", "206AA",
+      "194C", "194J", "194-I(a)", "194-I(b)", "194A", "194H", "194Q", "194T", "206AA",
     ]);
   });
 });

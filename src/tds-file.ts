@@ -12,11 +12,24 @@ import { TDS_SECTIONS } from "./tds-law.js";
 export interface OperatorSectionMap {
   ledger: string;
   section: string;
+  /**
+   * Ledger Kind (design §6a): "duty" keeps the ledger off the expense side so
+   * its duty credits are never re-counted as bookings when the verbose master
+   * export fails. Absent = expense.
+   */
+  kind?: "expense" | "duty";
 }
 
 export interface OperatorParty {
   ledger: string;
-  section: string;
+  /**
+   * The party-side yes/no question Tally itself asks (design §6b): N excludes
+   * the ledger from the TDS party set even when the master flags it. The JSON
+   * channel defaults to true when the key is absent — a row here has always
+   * meant "this is a TDS party", and flipping existing files would delete
+   * findings. The template's counterpart column is required instead.
+   */
+  tdsApplicable: boolean;
   /** 194C(6): suppresses the party's contract-payment TDS liability (review-only). */
   transporterDeclaration: boolean;
   /** The s.201(1) proviso fact: shields interest (i), never book-derived. */
@@ -124,18 +137,26 @@ export function parseOperatorFile(text: string): OperatorFile {
 
   const sections: OperatorSectionMap[] = list(d, "sections").map((raw, i) => {
     const r = obj(raw, `sections row ${i + 1}`);
+    const kind = String(r.kind ?? "expense").trim().toLowerCase();
+    if (kind !== "expense" && kind !== "duty") {
+      throw new Error(`operator file sections row ${i + 1}: ledger kind is not Expense or TDS Duty`);
+    }
     return {
       ledger: str(r.ledger, `sections row ${i + 1}`),
       section: sectionOf(r.section, `sections row ${i + 1}`),
+      ...(kind === "duty" ? { kind: "duty" as const } : {}),
     };
   });
 
   const parties: OperatorParty[] = list(d, "parties").map((raw, i) => {
     const at = `parties row ${i + 1}`;
     const r = obj(raw, at);
+    // A legacy `section` key on a party row is accepted and ignored: no
+    // party→section mapping exists any more (design §10).
+    void r.section;
     return {
       ledger: str(r.ledger, at),
-      section: sectionOf(r.section, at),
+      tdsApplicable: r.tdsApplicable === undefined ? true : truthy(r.tdsApplicable),
       transporterDeclaration: truthy(r.transporterDeclaration),
       deducteeFiledReturn: truthy(r.deducteeFiledReturn),
     };

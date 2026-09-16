@@ -41,11 +41,17 @@ export function tdsCtx(
 ): TdsCtx & { period: { fromDate: string; toDate: string } } {
   return {
     tdsParties: [partyA, partyB, partnerA],
-    sectionOf: (ledger, party) =>
-      operator.parties.find((p) => p.ledger === party)?.section ??
-      operator.sections.find((s) => s.ledger === ledger)?.section ??
-      null,
-    dutySectionOf: (ledger) => operator.sections.find((s) => s.ledger === ledger)?.section ?? (ledger === dutyLedger ? "194C" : null),
+    resolveSection: (ledger) => {
+      const set = [...new Set(operator.sections.filter((s) => s.ledger === ledger).map((s) => s.section))].sort();
+      return set.length === 1 ? { section: set[0], candidates: [] } : { section: null, candidates: set.length > 1 ? set : [] };
+    },
+    dutySectionOf: (ledger) => {
+      // Mirrors the session: exactly one mapped section, else null (never guessed).
+      const set = [...new Set(operator.sections.filter((s) => s.ledger === ledger).map((s) => s.section))];
+      if (set.length === 1) return set[0];
+      if (set.length > 1) return null;
+      return ledger === dutyLedger ? "194C" : null;
+    },
     panKeyOf: () => "TaxId 999", // a PAN is present by default
     entityOf: () => null,
     certificateRateOf: () => null,
@@ -392,7 +398,7 @@ describe("TDS exposure findings and the s.201(1) proviso", () => {
   it("the s.201(1) proviso shields interest (i) but keeps the late-deduction finding", () => {
     const op: OperatorFile = {
       ...stdOperator,
-      parties: [{ ledger: partyA, section: "194C", transporterDeclaration: false, deducteeFiledReturn: true }],
+      parties: [{ ledger: partyA, tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: true }],
     };
     const ctx = tdsCtx(op, { deducteeFiledReturn: (p) => p === partyA });
     const out = run(ctx, [
@@ -447,5 +453,131 @@ describe("TDS master-gap findings", () => {
     expect(found).toHaveLength(1);
     expect(found[0].detail).toContain("whole year");
     expect(found[0].severity).toBe("review");
+  });
+});
+
+describe("section attribution from the expense ledger (revision 2)", () => {
+  it("(a) exactly one mapped section wins", () => {
+    const out = run(tdsCtx(), [],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(out.events.bookings[0]).toMatchObject({ section: "194C", candidates: [] });
+  });
+
+  it("(b) zero mappings: no liability, no interest, no section total, one tds_section_unknown", () => {
+    const op: OperatorFile = { ...EMPTY_TDS_OPERATOR };
+    const out = run(tdsCtx(op), [], [
+      { ledger: "Unmapped Ledger", rows: [row("20250510", "P/12", -250000, partyA)] },
+    ]);
+    expect(out.events.bookings[0]).toMatchObject({ section: null, candidates: [] });
+    const unknown = ofCheck(out, "tds_section_unknown");
+    expect(unknown).toHaveLength(1);
+    expect(unknown[0].detail).toContain("no section in the operator file");
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
+    expect(ofCheck(out, "tds_late_deducted")).toEqual([]);
+    expect(ofCheck(out, "tds_late_deposit")).toEqual([]);
+    expect(out.totals.bySection).toEqual([]);
+  });
+
+  it("(c) two mappings: { null, candidates } and a check-11 variant naming both law keys", () => {
+    const op: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [
+        { ledger: "Rent - Mixed", section: "194-I(a)" },
+        { ledger: "Rent - Mixed", section: "194-I(b)" },
+      ],
+    };
+    const out = run(tdsCtx(op), [], [
+      { ledger: "Rent - Mixed", rows: [row("20250510", "P/12", -250000, partyA)] }],
+    []);
+    expect(out.events.bookings[0]).toMatchObject({ section: null, candidates: ["194-I(a)", "194-I(b)"] });
+    const unknown = ofCheck(out, "tds_section_unknown");
+    expect(unknown).toHaveLength(1);
+    expect(unknown[0].detail).toContain("more than one section (194-I(a), 194-I(b))");
+    expect(unknown[0].detail).toContain("Split the ledger per section");
+  });
+
+  it("(d) the resolver sees no party: a party declaring nothing still resolves from the ledger", () => {
+    // One-argument signature by type; simulate the party carrying no facts.
+    const op: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: expenseLedger, section: "194C" }],
+    };
+    // Compile-level guarantee: ctx.resolveSection takes one argument.
+    const out = run(tdsCtx(op), [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(out.events.bookings[0].section).toBe("194C");
+  });
+
+  it("(e) payments carry no section and still feed the earlier-of timing rule", () => {
+    const out = run(tdsCtx(), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }], [
+      { ledger: partyA, rows: [{ ...row("20250420", "P/03", 250000, "Bank Alpha") }] },
+    ]);
+    const late = ofCheck(out, "tds_late_deducted");
+    expect(late[0].schedule?.[0].from).toBe("20250420");
+  });
+
+  it("(f) a duty ledger with two mappings is skipped and parts the master-gap finding", () => {
+    const op: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [
+        { ledger: dutyLedger, section: "194-I(a)" },
+        { ledger: dutyLedger, section: "194-I(b)" },
+      ],
+    };
+    const out = run(tdsCtx(op), [
+      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+    ], []);
+    expect(out.events.deductions).toEqual([]);
+    const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.deductee === dutyLedger);
+    expect(gaps).toEqual([expect.objectContaining({ severity: "review", section: null })]);
+  });
+
+  it("(g) a party marked N produces no events and no findings where Y would", () => {
+    const rows = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }];
+    const duty = [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] }];
+    // Session-level filters model tdsParties; at the engine the party is
+    // simply absent from tdsParties when the operator says N.
+    const withY = run(tdsCtx(), duty, rows);
+    expect(withY.events.bookings).toHaveLength(1);
+    expect(withY.events.deductions).toHaveLength(1);
+    const ctxN = tdsCtx(stdOperator, { tdsParties: [partyB] });
+    const withN = run(ctxN, duty, rows);
+    expect(withN.events.bookings).toHaveLength(0);
+    expect(withN.events.payments).toHaveLength(0);
+    expect(withN.findings.filter((f) => f.deductee === partyA)).toHaveLength(0);
+  });
+
+  it("(i) 194C(6) suppresses on a 194C booking with no section on the party row", () => {
+    const ctx = tdsCtx(stdOperator, { transporterDeclared: (p) => p === partyA });
+    const out = run(ctx, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    expect(out.totals.notDeducted).toBe(0);
+    const found = ofCheck(out, "tds_not_deducted");
+    expect(found).toHaveLength(1);
+    expect(found[0].severity).toBe("review");
+    expect(found[0].amount).toBe(0);
+    expect(found[0].detail).toContain("194C(6)");
+  });
+
+  it("(j) one party booked to a 194C ledger and a 194-I(b) ledger yields two aggregates", () => {
+    const op: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [
+        { ledger: "Site Repairs Contract", section: "194C" },
+        { ledger: "Rent - Office", section: "194-I(b)" },
+      ],
+    };
+    const out = run(tdsCtx(op), [], [
+      { ledger: "Site Repairs Contract", rows: [row("20250510", "P/12", -250000, partyA)] },
+      { ledger: "Rent - Office", rows: [row("20250610", "P/13", -100000, partyA)] },
+    ]);
+    const bySection = out.totals.bySection;
+    expect(bySection.find((t) => t.section === "194C")?.gross).toBe(250000);
+    expect(bySection.find((t) => t.section === "194-I(b)")?.gross).toBe(100000);
+    // And the 194C booking is critical on its own section threshold (the rent
+    // aggregate keeps its own per-month threshold, so its liability is not
+    // driven by the contract aggregate — separate buckets, point 5 end to end).
+    const notDeducted = ofCheck(out, "tds_not_deducted");
+    expect(notDeducted.map((f) => f.section)).toEqual(["194C"]);
   });
 });

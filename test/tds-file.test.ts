@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { parseDayBook, parseOperatorFile } from "../src/tds-file.js";
+import {
+  EMPTY_TDS_OPERATOR,
+  parseDayBook,
+  parseOperatorFile,
+  type OperatorFile,
+} from "../src/tds-file.js";
 
 const load = async () => readFile("test/fixtures/tds_operator_file.json", "utf8");
 
@@ -9,24 +14,26 @@ describe("parseOperatorFile", () => {
     const doc = parseOperatorFile(await load());
     expect(doc.sections).toEqual([
       { ledger: "Site Repairs Contract", section: "194C" },
-      { ledger: "TDS Contractors", section: "194C" },
+      { ledger: "TDS Contractors", section: "194C", kind: "duty" },
+      { ledger: "Consultancy Services", section: "194J" },
+      { ledger: "Rent - Plant and Machinery", section: "194-I(a)" },
     ]);
     expect(doc.parties[0]).toEqual({
       ledger: "Sample Builders LLP",
-      section: "194C",
+      tdsApplicable: true,
       transporterDeclaration: false,
       deducteeFiledReturn: false,
     });
     expect(doc.parties.length).toBe(3);
     expect(doc.parties[1]).toEqual({
       ledger: "Sample Consultants",
-      section: "194J",
+      tdsApplicable: true,
       transporterDeclaration: false,
       deducteeFiledReturn: true,
     });
     expect(doc.certificates[0]).toEqual({
       ledger: "Sample Developers",
-      section: "194-I",
+      section: "194-I(a)",
       rate: 2,
       from: "20250401",
       to: "20260331",
@@ -45,16 +52,72 @@ describe("parseOperatorFile", () => {
     });
   });
 
-  it("rejects a section unknown to the law table without echoing its value", async () => {
+  it("carries no section on a party row: there is no party→section mapping", async () => {
+    const doc = parseOperatorFile(await load());
+    for (const p of doc.parties) {
+      expect((p as unknown as Record<string, unknown>).section).toBeUndefined();
+    }
+  });
+
+  it("ignores a legacy parties[].section key: existing files still parse unchanged", async () => {
     const text = await load();
     const doc = JSON.parse(text) as Record<string, unknown>;
     const parties = (doc.parties as Array<Record<string, unknown>>).map((p) => ({ ...p }));
-    parties[1].section = "MUMA04826B";
-    const bad = JSON.stringify({ ...doc, parties });
+    parties[1].section = "MUMA04826B"; // even a nonsense value changes nothing
+    const file = parseOperatorFile(JSON.stringify({ ...doc, parties }));
+    expect(file.parties[1]).toMatchObject({
+      ledger: "Sample Consultants",
+      tdsApplicable: true,
+      deducteeFiledReturn: true,
+    });
+  });
+
+  it("defaults an absent tdsApplicable key to true (a party row has always meant a TDS party)", () => {
+    const file = parseOperatorFile(
+      JSON.stringify({ parties: [{ ledger: "Rent - Office Building" }] }),
+    );
+    expect(file.parties[0].tdsApplicable).toBe(true);
+  });
+
+  it("reads an explicit tdsApplicable=false and never treats an unrecognised key as false", () => {
+    const file = parseOperatorFile(
+      JSON.stringify({
+        parties: [
+          { ledger: "A", tdsApplicable: "no" },
+          { ledger: "B", tdsApplicable: true },
+        ],
+      }),
+    );
+    expect(file.parties[0].tdsApplicable).toBe(false);
+    expect(file.parties[1].tdsApplicable).toBe(true);
+  });
+
+  it("rejects a section unknown to the law table without echoing its value", async () => {
+    const text = await load();
+    const doc = JSON.parse(text) as Record<string, unknown>;
+    const sections = (doc.sections as Array<Record<string, unknown>>).map((s) => ({ ...s }));
+    sections[0].section = "MUMA04826B";
+    const bad = JSON.stringify({ ...doc, sections });
     // Never echo the value: a malformed section string is a stray operator
     // value, and an error message is an outbound string.
-    expect(() => parseOperatorFile(bad)).toThrow(/parties row 2: section is not a TDS section/);
+    expect(() => parseOperatorFile(bad)).toThrow(/sections row 1: section is not a TDS section/);
     expect(() => parseOperatorFile(bad)).not.toThrow(/MUMA04826B/);
+  });
+
+  it("rejects a bare 194-I wherever a section is still read (the split keys are the only rent sections)", async () => {
+    const text = await load();
+    const doc = JSON.parse(text) as Record<string, unknown>;
+    const certificates = [(doc.certificates as Array<Record<string, unknown>>)[0]];
+    certificates[0] = { ...certificates[0], section: "194-I" };
+    const bad = JSON.stringify({ ...doc, certificates });
+    expect(() => parseOperatorFile(bad)).toThrow(/certificates row 1: section is not a TDS section/);
+  });
+
+  it("rejects a ledger kind outside Expense / TDS Duty", () => {
+    const bad = JSON.stringify({
+      sections: [{ ledger: "Rent - Plant and Machinery", section: "194-I(a)", kind: "Party" }],
+    });
+    expect(() => parseOperatorFile(bad)).toThrow(/ledger kind is not Expense or TDS Duty/);
   });
 
   it("propagates every flag the engine reads (transporter declaration, s.201(1) proviso)", async () => {
@@ -68,7 +131,7 @@ describe("parseOperatorFile", () => {
     expect(file.parties.find((p) => p.ledger === "Sample Builders LLP")!.transporterDeclaration).toBe(true);
   });
 
-  it("rejects wholesale on a malformed row, citing the row index", async () => {
+  it("rejects wholesale on a malformed row, citing the row index", () => {
     expect(() => parseOperatorFile("not json")).toThrow(/not valid JSON/);
     expect(() => parseOperatorFile("[]")).toThrow(/must be an object/);
   });
@@ -108,3 +171,10 @@ describe("parseDayBook", () => {
   });
 });
 
+describe("EMPTY_TDS_OPERATOR", () => {
+  it("is a valid parse of a blank file", () => {
+    const empty: OperatorFile = EMPTY_TDS_OPERATOR;
+    expect(empty.sections).toEqual([]);
+    expect(empty.parties).toEqual([]);
+  });
+});
