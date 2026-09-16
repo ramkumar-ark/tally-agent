@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendAudit, findingsCsv, findingsSheet, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump, writeWorkbook } from "../src/report.js";
+import { appendAudit, findingsCsv, findingsSheet, depreciationSheets, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump, writeWorkbook, writeDepreciationReport } from "../src/report.js";
+import type { MaskedDepResult } from "../src/report.js";
 import type { TdsMaskedFinding } from "../src/review.js";
 import { createVault } from "../src/vault.js";
 import type { Finding } from "../src/types.js";
@@ -240,5 +241,98 @@ describe("writeWorkbook", () => {
     ]);
     expect(sheet.rows[0][0]).toBe("DEP-005-1");
     expect(sheet.rows[0][5]).toBe(962000);
+  });
+});
+
+/** A masked result standing in for one block with one asset. Invented figures. */
+const sampleMaskedResult: MaskedDepResult = {
+  seedSource: "operator",
+  bookCharge: 150000,
+  blocks: [{
+    block: "Block 15%", rate: 15, openingWdv: 0, additionsFull: 1000000, additionsHalf: 0,
+    deductions: 0, wdvBeforeDep: 1000000, normalDepreciation: 150000,
+    additionalDepreciation: 0, totalDepreciation: 150000, closingWdv: 850000,
+    shortTermGain: 0, shortTermLoss: 0, status: "ok",
+  }],
+  assets: [{
+    ledger: "Ledger 7", block: "Block 15%", rate: 15, opening: 0, additionsNet: 1000000,
+    firstUse: "20250515", shortPeriod: false, actDepreciation: 150000,
+    bookCharge: 150000, difference: 0, notes: "",
+  }],
+  movements: [],
+  excluded: [{
+    ledger: "Ledger 9", date: "20250901", amount: 90000,
+    rule: "", missing: "no rule matched the counter ledger's group",
+  }],
+  findings: [],
+};
+
+describe("depreciationSheets", () => {
+  it("builds the six sheets the design names, in order", () => {
+    const sheets = depreciationSheets(sampleMaskedResult);
+    expect(sheets.map((s) => s.name)).toEqual([
+      "Summary", "Blocks", "Assets", "Movements", "Excluded", "Findings",
+    ]);
+  });
+
+  it("puts the unverified-seed banner on the Summary sheet, not in a footnote", () => {
+    const sheets = depreciationSheets({ ...sampleMaskedResult, seedSource: "book-seed" });
+    expect(sheets[0].title?.join(" ")).toContain("UNVERIFIED BOOK SEED");
+  });
+
+  it("states on the Assets sheet that the split is an allocation", () => {
+    const assets = depreciationSheets(sampleMaskedResult)[2];
+    expect(assets.title?.join(" ")).toMatch(/block figure is (the )?statutory/i);
+    expect(assets.title?.join(" ")).toMatch(/allocation/i);
+  });
+
+  it("shows no alternative figure on the Excluded sheet", () => {
+    const excluded = depreciationSheets(sampleMaskedResult)[4];
+    expect(excluded.columns.map((c) => c.header)).toEqual([
+      "Asset", "Date", "Amount", "Closest rule", "What is missing", "Operator file stanza",
+    ]);
+  });
+});
+
+describe("writeDepreciationReport", () => {
+  it("writes the trio with de-masked names, the seed banner and the allocation note", async () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Sample Machinery LLP", "creditor");
+    const result: MaskedDepResult = {
+      ...sampleMaskedResult,
+      seedSource: "book-seed",
+      assets: [{ ...sampleMaskedResult.assets[0], ledger: alias }],
+      excluded: [...sampleMaskedResult.excluded],
+      findings: [{
+        id: "DEP-006-1", check: "dep_credit_unclassified", severity: "critical",
+        ledger: alias, block: "Block 15%", amount: 90000,
+        detail: `a credit is excluded: ${alias} is unclassified`,
+      }],
+    };
+    const dir = mkdtempSync(join(tmpdir(), "tally-agent-dep-"));
+    const paths = await writeDepreciationReport({
+      reportDir: dir,
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      result,
+      vault,
+    });
+    expect(paths.workbookPath).toMatch(/depreciation-review-demo-traders-pvt-ltd-20250401-20260331\.xlsx$/);
+    const md = readFileSync(paths.markdownPath, "utf8");
+    expect(paths.markdownPath).toMatch(/depreciation-review-demo-traders-pvt-ltd-20250401-20260331\.md$/);
+    expect(md).toContain("UNVERIFIED BOOK SEED");
+    expect(md).toContain("Sample Machinery LLP");
+    expect(md).not.toContain("Creditor 1");
+    expect(md).toMatch(/block figure is (the )?statutory/i);
+    const csv = readFileSync(paths.csvPath, "utf8");
+    expect(csv.split("\n")[0]).toBe("id,check,severity,ledger,block,amount,detail");
+    expect(csv).toContain("Sample Machinery LLP");
+    const wb = await readFile(paths.workbookPath);
+    const summaryXml = entry(wb, "xl/worksheets/sheet1.xml");
+    expect(summaryXml).toContain("UNVERIFIED BOOK SEED");
+    const excludedXml = entry(wb, "xl/worksheets/sheet5.xml");
+    expect(excludedXml).toContain("Operator file stanza");
+    expect(excludedXml).not.toContain("Creditor 1");
   });
 });
