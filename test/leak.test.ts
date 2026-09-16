@@ -9,6 +9,10 @@ import { createSession } from "../src/review.js";
 import { writeDepreciationReport } from "../src/report.js";
 import { parseDepOperatorFile } from "../src/depreciation-file.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
+import { buildWorkbook } from "../src/xlsx.js";
+import { buildTemplateWorkbook } from "../src/tds-template.js";
+import { buildWinmanFixture } from "./fixtures/winman-test-fixture.js";
+import { readWorkbook } from "../src/xlsx-read.js";
 
 const SECRETS = JSON.parse(
   readFileSync(fileURLToPath(new URL("./fixtures/secrets.json", import.meta.url)), "utf8"),
@@ -290,6 +294,47 @@ describe("no secret leaves the gateway", () => {
     });
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
+
+  it("holds across the template and Winman channels (planted PAN/TAN never ride back out)", async () => {
+    // Planted identifiers, invented for this test; the test itself seeds them
+    // into the files the gateway reads, so the absence assertions below are
+    // never vacuous. The PAN/TAN shapes follow §11's invented-identifier rule.
+    const PAN = "CCBMX2222D"; // the template's planted PAN (a Party row's PAN cell)
+    const TAN = "MUMA 04826 B"; // the Winman fixture's planted Deductor TAN
+    const planted = [PAN, TAN, "AABBX1111C", "MUMA04826B", "Sample Construction LLP"];
+
+    const tools = new Map<string, (args: any) => Promise<string>>();
+    const registrar: ToolRegistrar = (name, _d, _s, handler) => tools.set(name, handler);
+
+    const session = createSession(
+      Object.assign(fakeDownstream(), {
+        ledgerVoucherRows: async () => ({ rows: [], dropped: 0}) as never,
+      }),
+      EMPTY_OVERRIDES,
+    );
+    const reportDir = mkdtempSync(join(tmpdir(), "tally-agent-leak-"));
+    registerTools(registrar, session, { reportDir });
+
+    // The Winman fixture carries the planted TAN (Deductor block, parsed and
+    // dropped) and deductee PANs. It feeds the gateway by path only.
+    const winmanPath = join(reportDir, "winman-fixture.xlsx");
+    writeFileSync(winmanPath, buildWinmanFixture());
+    // A filled template with a planted PAN on the Parties sheet (same §6
+    // headers the generator emits).
+    const templatePath = join(reportDir, "tds-operator-template-test-20260916.xlsx");
+    writeFileSync(templatePath, filledTemplateWithPan(PAN, "Sample Movers"));
+
+    const out = await tools.get("tb_tds_review")!({
+      fromDate: "20250401",
+      toDate: "20260331",
+      asOnDate: "20260331",
+      templatePath,
+      winmanPath,
+    });
+    for (const secret of planted) {
+      expect(out, `secret "${secret}" leaked via the template/Winman channel`).not.toContain(secret);
+    }
+  });
 });
 
 /**
@@ -396,3 +441,59 @@ describe("depreciation leak surfaces", () => {
     expect(JSON.stringify(masked).toLowerCase()).not.toContain("medical");
   });
 });
+
+/**
+ * A filled-template helper for the spreadsheet-channel leak test: same §6
+ * headers, one Parties row carrying the planted PAN and a Winman name declared
+ * to the Winman fixture's deductee. Sections/Parties/Certificates/…
+ * icons share the generator's exact header strings via the template sheets.
+ */
+function filledTemplateWithPan(pan: string, winmanName: string): Buffer {
+  const partiesSheet = {
+    name: "Parties",
+    columns: [
+      { header: "Tally Ledger Name" },
+      { header: "TDS Applicable" },
+      { header: "PAN" },
+      { header: "Transporter Declaration 194C(6)" },
+      { header: "Deductee Filed Return s.201(1)" },
+      { header: "Winman Deductee Name" },
+    ],
+    rows: [["Sample Concrete Works ( proprietorship)", "Y", pan, "N", "N", winmanName]] as (string | number | null)[][],
+  };
+  const sectionSheet = {
+    name: "Sections",
+    columns: [
+      { header: "Tally Ledger Name" },
+      { header: "Section" },
+      { header: "Ledger Kind" },
+    ],
+    rows: [["Site Works Contract", "194C"]] as (string | number | null)[][],
+  };
+  const certsSheet = {
+    name: "Certificates",
+    columns: [
+      { header: "Tally Ledger Name" }, { header: "Section" }, { header: "Rate %" },
+      { header: "From Date" }, { header: "To Date" }, { header: "Limit" },
+    ],
+    rows: [] as (string | number | null)[][],
+  };
+  const challansSheet = {
+    name: "Challans",
+    columns: [{ header: "Section" }, { header: "For Month" }, { header: "Deposit Date" }],
+    rows: [] as (string | number | null)[][],
+  };
+  const statementsSheet = {
+    name: "Statements",
+    columns: [{ header: "Form" }, { header: "Quarter" }, { header: "Filed Date" }, { header: "TDS Amount" }],
+    rows: [] as (string | number | null)[][],
+  };
+  return buildWorkbook([
+    { name: "Instructions", columns: [{ header: "How to fill this template" }], rows: [["See the instructions."]] },
+    sectionSheet,
+    partiesSheet,
+    certsSheet,
+    challansSheet,
+    statementsSheet,
+  ]);
+}
