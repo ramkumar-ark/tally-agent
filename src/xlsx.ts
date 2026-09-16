@@ -7,6 +7,11 @@ export interface Column {
   header: string;
   width?: number;
   format?: "text" | "money" | "date" | "pct";
+  /**
+   * An in-cell dropdown for the column's data rows (OOXML list validation).
+   * Convenience only — the parser re-validates everything it reads.
+   */
+  validation?: { list: string[] };
 }
 
 export interface Sheet {
@@ -95,8 +100,23 @@ function sheetXml(sheet: Sheet): string {
         .map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.width ?? 12}" customWidth="1"/>`)
         .join("")}</cols>`
     : "";
+  // In-cell dropdowns on the data rows of a validated column (never the header).
+  const validations = sheet.columns.filter((c) => c.validation?.list.length);
+  const dataValidations = validations.length
+    ? `<dataValidations count="${validations.length}">${validations
+        .map((c, i) => {
+          const idx = sheet.columns.indexOf(c);
+          const firstDataRow = (sheet.title?.length ?? 0) + 2;
+          return (
+            `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" ` +
+            `sqref="${colName(idx)}${firstDataRow}:${colName(idx)}${firstDataRow + 249}">` +
+            `<formula1>"${c.validation!.list.join(",")}"</formula1></dataValidation>`
+          );
+        })
+        .join("")}</dataValidations>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols}<sheetData>${out.join("")}</sheetData></worksheet>`;
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols}<sheetData>${out.join("")}</sheetData>${dataValidations}</worksheet>`;
 }
 
 /**

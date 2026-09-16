@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { buildTemplateWorkbook, templateFileName } from "./tds-template.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadWrongGroup } from "./overrides.js";
@@ -305,6 +306,27 @@ export function registerTools(
         await writeVaultDump(cfg.reportDir, sessionId, session.vault);
       }
       return JSON.stringify(paths, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_tds_template",
+    "Generate the fillable Excel TDS operator template (tds-operator-template-<company>-<date>.xlsx) into the " +
+      "report directory and return its path. Fill the Sections, Parties, Certificates, Challans and Statements sheets " +
+      "in Excel, then pass its path to tb_tds_review as templatePath - never paste its rows into chat.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+    },
+    async (args) => {      const outPath = join(
+        cfg.reportDir,
+        templateFileName(
+          args.company,
+          new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+        ),
+      );
+      await writeFile(outPath, buildTemplateWorkbook(args.company));
+      await audit("tb_write_tds_template", { company: args.company }, 0, 0);
+      return JSON.stringify({ templatePath: outPath }, null, 2);
     },
   );
 

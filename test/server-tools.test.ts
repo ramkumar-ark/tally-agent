@@ -24,7 +24,7 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the thirteen approved tools", () => {
+  it("exposes exactly the fourteen approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_depreciation_review",
@@ -40,6 +40,7 @@ describe("tool surface", () => {
       "tb_write_ledger_report",
       "tb_write_report",
       "tb_write_tds_report",
+      "tb_write_tds_template",
     ]);
   });
 });

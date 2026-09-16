@@ -78,3 +78,28 @@ describe("buildWorkbook", () => {
     expect(xml).toMatch(/<row r="4">[^]*?<c r="A4" t="inlineStr">/);
   });
 });
+
+describe("buildWorkbook validations", () => {
+  const dropdown: Sheet = {
+    name: "Pick",
+    columns: [
+      { header: "Section", validation: { list: ["194C", "194-I(a)", "194-I(b)"] } },
+      { header: "Plain" },
+    ],
+    rows: [["194C", "x"]],
+  };
+
+  it("emits the dataValidations list block for a validated column", () => {
+    const xml = entry(buildWorkbook([dropdown]), "xl/worksheets/sheet1.xml");
+    expect(xml).toContain("<dataValidations count=\"1\">");
+    expect(xml).toContain("<formula1>\"194C,194-I(a),194-I(b)\"</formula1>");
+    expect(xml).toMatch(/sqref="A2:A251"/); // header at row 1, data from row 2
+  });
+
+  it("emits no validation block without a validation and leaves other sheets untouched", () => {
+    const xml = entry(buildWorkbook([sheet]), "xl/worksheets/sheet1.xml");
+    expect(xml).not.toContain("<dataValidation");
+    const xml2 = entry(buildWorkbook([dropdown]), "xl/worksheets/sheet1.xml");
+    expect(xml2).toContain("<sheetData>");
+  });
+});
