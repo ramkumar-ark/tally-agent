@@ -831,6 +831,9 @@ export function createSession(
       if (fetchAll) return true;
       const k = canonicalKey(l);
       const residual = (closingOf.get(k) ?? 0) - (openingOf.get(k) ?? 0) + (chargeByAsset.get(k) ?? 0);
+      if (process.env.TALLY_AGENT_DEP_DEBUG) {
+        console.error(`DEPDBG skip-check ledger=${JSON.stringify(l)} open=${openingOf.get(k)} close=${closingOf.get(k)} charge=${chargeByAsset.get(k)} residual=${residual} depKeys=${chargeByAsset.size}`);
+      }
       return Math.abs(residual) > ZERO_TOLERANCE;
     });
     const pass2 = await fetchLedgerRows(company, needFetch, fromDate, toDate);
