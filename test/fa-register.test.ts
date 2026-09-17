@@ -309,3 +309,39 @@ describe("disposal signals", () => {
     expect(unmatched[0].detail).toContain("96,000.00");
   });
 });
+
+describe("FA ordering and derived views", () => {
+  it("numbers findings per check (ordinal then ledger) and links rows and summaries to ids", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [
+        { ledger: "Tipper Lorry 3", rows: [row("20250710", "Safe Motors", 2000000, "Purc")] },
+        { ledger: "Site Van 2", rows: [row("20250801", "Safe Motors", 900000, "Purc")] },
+      ],
+      incidentalExpenseRows: [
+        { ledger: "Insurance Expenses", rows: [row("20250712", "HDFC Bank", 46000)] },
+      ],
+      disposalSignals: [
+        { ledger: "Sale of Fixed Asset A/c", rows: [row("20251005", "Buyer of Plant", -96000, "Sale", "SL/14")] },
+      ],
+    }, ctxFor({
+      groupOf: (l) => (l === "Site Van 2" ? "Block 30%" : GROUPS[l] ?? ""),
+      isAssetLedger: (l) => ["Tipper Lorry 3", "Site Van 2", "Mixer Plant 2"].includes(l),
+      closingBalanceOf: (l) => (l === "Safe Motors" ? -150000 : 0),
+    }));
+    // One ambiguous expensed insurance hit (window covers both acquisitions), the
+    // two rto absences ordered by ledger, one unsettled vendor, one unmatched signal.
+    expect(r.findings.map((f) => f.id)).toEqual([
+      "FA-001-1", "FA-002-1", "FA-002-2", "FA-003-1", "FA-004-1",
+    ]);
+    expect(r.vehicleCosts).toHaveLength(6); // 2 vehicles x 3 cost types
+    const ins = r.vehicleCosts.filter((v) => v.costType === "insurance");
+    expect(ins.every((v) => v.findingId === "FA-001-1" && v.ambiguous)).toBe(true);
+    expect(r.vendors[0].findingId).toBe("FA-003-1");
+    const tipper = r.purchases.find((p) => p.asset === "Tipper Lorry 3")!;
+    expect(tipper.incidentalSummary).toBe(
+      "insurance: expensed — FA-001-1; rto: not found — FA-002-2; accessories: none (not flagged)",
+    );
+    const van = r.purchases.find((p) => p.asset === "Site Van 2")!;
+    expect(van.incidentalSummary).toContain("rto: not found — FA-002-1");
+  });
+});

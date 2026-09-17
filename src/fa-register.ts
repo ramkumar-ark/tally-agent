@@ -354,21 +354,12 @@ export function analyzeFaRegister(input: FaAnalyzeInput, ctx: FaCtx): FaResult {
     }
   }
 
-  // Incidental summaries on the acquisition's first instalment. Interim form
-  // here: finding ids land in the ordering pass at the end of the engine.
+  // Incidental resolutions keyed per acquisition; the summaries themselves are
+  // filled after id assignment, at the end of the engine.
   const resByAcquisition = new Map<string, CostResolution[]>();
   for (const r of resolutions) {
     const key = `${canon(r.v.ledger)}|${r.v.acq.firstUse}`;
     resByAcquisition.set(key, [...(resByAcquisition.get(key) ?? []), r]);
-  }
-  for (const p of purchases) {
-    if (p.rule !== "acquisition" || p.instalment !== 1 || !p.isVehicle) continue;
-    const rs = resByAcquisition.get(`${canon(p.asset)}|${p.acquisitionDate}`) ?? [];
-    if (rs.length === 0) continue;
-    p.incidentalSummary = COST_TYPES.map((t) => {
-      const r = rs.find((x) => x.costType === t);
-      return `${t}: ${r ? r.status : "none"}`;
-    }).join("; ");
   }
 
   // ---- Vehicle vendor pass (D7) ----
@@ -424,5 +415,57 @@ export function analyzeFaRegister(input: FaAnalyzeInput, ctx: FaCtx): FaResult {
     }
   }
 
-  return { purchases, disposals, vehicleCosts: [], vendors, findings };
+  // ---- Ordering and id assignment (D6): ordinal, then ledger, then n per check ----
+  findings.sort((x, y) => {
+    const byOrdinal = FA_CHECK_ORDINAL[x.check] - FA_CHECK_ORDINAL[y.check];
+    return byOrdinal !== 0 ? byOrdinal : x.ledger.localeCompare(y.ledger);
+  });
+  const seqs = new Map<FaCheckId, number>();
+  for (const f of findings) {
+    const n = (seqs.get(f.check) ?? 0) + 1;
+    seqs.set(f.check, n);
+    f.id = faFindingId(f.check, n);
+  }
+
+  const vehicleCosts: FaResult["vehicleCosts"] = resolutions.map((r) => ({
+    vehicle: r.v.ledger,
+    block: r.v.group,
+    firstUse: r.v.acq.firstUse,
+    costType: r.costType,
+    status: r.status,
+    amount: r.amount,
+    date: r.date,
+    where: r.where,
+    voucherType: r.row?.voucherType ?? "",
+    voucherNumber: r.row?.voucherNumber ?? "",
+    reference: r.row?.reference ?? "",
+    ambiguous: r.ambiguous,
+    findingId: r.finding?.id ?? "",
+  }));
+
+  for (const v of vendors) {
+    v.findingId =
+      findings.find((f) => f.check === "fa_vehicle_vendor_unsettled" && f.ledger === v.vendor)?.id ?? "";
+  }
+
+  // Incidental summaries, now that ids exist.
+  const statusText = (r: { status: string; finding?: FaFinding }): string => {
+    switch (r.status) {
+      case "capitalised": return "capitalised";
+      case "expensed": return `expensed — ${r.finding?.id ?? "FA"}`;
+      case "not-found": return `not found — ${r.finding?.id ?? "FA"}`;
+      default: return "none (not flagged)";
+    }
+  };
+  for (const p of purchases) {
+    if (p.rule !== "acquisition" || p.instalment !== 1 || !p.isVehicle) continue;
+    const rs = resByAcquisition.get(`${canon(p.asset)}|${p.acquisitionDate}`) ?? [];
+    if (rs.length === 0) continue;
+    p.incidentalSummary = COST_TYPES.map((t) => {
+      const r = rs.find((x) => x.costType === t);
+      return `${t}: ${r ? statusText(r) : "none"}`;
+    }).join("; ");
+  }
+
+  return { purchases, disposals, vehicleCosts, vendors, findings };
 }
