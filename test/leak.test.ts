@@ -6,13 +6,14 @@ import { describe, expect, it } from "vitest";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { registerTools, type ToolRegistrar } from "../src/index.js";
 import { createSession } from "../src/review.js";
-import { writeDepreciationReport } from "../src/report.js";
+import { writeDepreciationReport, writeFaRegisterReport } from "../src/report.js";
 import { parseDepOperatorFile } from "../src/depreciation-file.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { buildWorkbook } from "../src/xlsx.js";
 import { buildTemplateWorkbook } from "../src/tds-template.js";
 import { buildWinmanFixture } from "./fixtures/winman-test-fixture.js";
 import { readWorkbook } from "../src/xlsx-read.js";
+import { entry } from "./xlsx.test.js";
 
 const SECRETS = JSON.parse(
   readFileSync(fileURLToPath(new URL("./fixtures/secrets.json", import.meta.url)), "utf8"),
@@ -270,6 +271,7 @@ describe("no secret leaves the gateway", () => {
     });
     expect([...tools.keys()].sort()).toEqual([
       "tb_depreciation_review",
+      "tb_fixed_asset_register",
       "tb_gst_mismatch",
       "tb_gst_summary",
       "tb_ledger_activity",
@@ -278,6 +280,7 @@ describe("no secret leaves the gateway", () => {
       "tb_review",
       "tb_tds_review",
       "tb_write_depreciation_report",
+      "tb_write_fixed_asset_report",
       "tb_write_gst_report",
       "tb_write_ledger_report",
       "tb_write_report",
@@ -497,3 +500,104 @@ function filledTemplateWithPan(pan: string, winmanName: string): Buffer {
     statementsSheet,
   ]);
 }
+
+/**
+ * Fixed asset register leak surfaces: the register is a new way for a real
+ * asset ledger name, a real vendor name and a real voucher number to reach
+ * the model. Same additive stub pattern as the depreciation block above.
+ */
+function faSecretDownstream() {
+  const vehicle = "Orchid Medical Lorry";
+  const vendor = "Safe Orchid Motors";
+  const voucherNo = "PUR/918020045566771";
+  return Object.assign(fakeDownstream(), {
+    groups: async () => [
+      { name: "Fixed Assets", parent: "\u0004 Primary" },
+      { name: "Block 30%", parent: "Fixed Assets" },
+      { name: "Indirect Expenses", parent: "\u0004 Primary" },
+      { name: "Sundry Creditors", parent: "\u0004 Primary" },
+      { name: "Bank Accounts", parent: "\u0004 Primary" },
+    ],
+    trialBalance: async (_c: unknown, asOn: string) => ({
+      totalDebit: 0, totalCredit: 0,
+      rows: asOn === "20250331"
+        ? [
+            { name: vehicle, parent: "Block 30%", balance: 0 },
+            { name: vendor, parent: "Sundry Creditors", balance: 0 },
+            { name: "Insurance Expenses", parent: "Indirect Expenses", balance: 0 },
+          ]
+        : [
+            { name: vehicle, parent: "Block 30%", balance: 2046000 },
+            { name: vendor, parent: "Sundry Creditors", balance: -150000 },
+            { name: "Insurance Expenses", parent: "Indirect Expenses", balance: 46000 },
+          ],
+    }),
+    ledgerVoucherRows: async (_c: unknown, ledger: string, from: string, to: string) => {
+      if (ledger === vehicle && from <= "20250710" && to >= "20250710") {
+        return {
+          rows: [{
+            date: "20250710", voucherType: "Purc", voucherNumber: voucherNo, reference: "INV-771",
+            counterparty: vendor, amount: 2000000, matchStatus: "matched" as const, tax: null,
+          }],
+          dropped: 0,
+        };
+      }
+      if (ledger === "Insurance Expenses" && from <= "20250712" && to >= "20250712") {
+        return {
+          rows: [{
+            date: "20250712", voucherType: "Payt", voucherNumber: "PY/550", reference: "",
+            counterparty: "HDFC Bank", amount: 46000, matchStatus: "matched" as const, tax: null,
+          }],
+          dropped: 0,
+        };
+      }
+      return { rows: [], dropped: 0 };
+    },
+  } as never);
+}
+
+describe("fixed asset register leak surfaces", () => {
+  it("never returns a real ledger, vendor or voucher id from the register", async () => {
+    const session = createSession(faSecretDownstream(), EMPTY_OVERRIDES);
+    const r = await session.faRegister(undefined, "20250401", "20260331");
+    // Non-vacuity: the stub's acquisition really entered the register, masked.
+    const text = JSON.stringify(r);
+    expect(text).toMatch(/Ledger \d+/);
+    expect(text).toMatch(/Creditor \d+/);
+    expect(text).toMatch(/Doc \d+/);
+    expect(r.purchases[0].voucherNumber).toMatch(/^Doc \d+$/);
+    expect(session.vault.resolve(r.purchases[0].voucherNumber)).toBe("PUR/918020045566771");
+    const lower = text.toLowerCase();
+    expect(lower).not.toContain("orchid");
+    expect(lower).not.toContain("medical");
+    expect(lower).not.toContain("pur/918020045566771");
+    expect(lower).not.toContain("inv-771");
+    // Non-vacuity: the vehicle checks really fired on the secret ledger.
+    expect(r.findings.map((f) => f.check)).toContain("fa_vehicle_incidental_expensed");
+    expect(r.findings.map((f) => f.check)).toContain("fa_vehicle_vendor_unsettled");
+  });
+
+  it("writes the real names into the CSV but never into the returned paths", async () => {
+    const session = createSession(faSecretDownstream(), EMPTY_OVERRIDES);
+    const masked = await session.faRegister(undefined, "20250401", "20260331");
+    const { workbookPath, csvPath } = await writeFaRegisterReport({
+      reportDir: mkdtempSync(join(tmpdir(), "tally-agent-fa-")),
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      result: masked,
+      vault: session.vault,
+    });
+    // The workbook is zip-compressed; the CSV is the same de-masked writer.
+    expect(readFileSync(workbookPath).subarray(0, 2).toString("latin1")).toBe("PK");
+    const csv = readFileSync(csvPath, "utf8").toLowerCase();
+    expect(csv).toContain("orchid medical lorry");
+    expect(csv).toContain("safe orchid motors");
+    // Voucher numbers never appear in finding details (scrubDigits territory);
+    // their restored home is the workbook's Purchases sheet.
+    const purchasesXml = entry(readFileSync(workbookPath), "xl/worksheets/sheet2.xml");
+    expect(purchasesXml).toContain("PUR/918020045566771");
+    expect(workbookPath.toLowerCase()).not.toContain("orchid");
+    expect(csvPath.toLowerCase()).not.toContain("orchid");
+  });
+});

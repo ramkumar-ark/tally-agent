@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createVault } from "../src/vault.js";
 import { faFindingId, FA_CHECK_ORDINAL } from "../src/types.js";
+import { displayDate } from "../src/format.js";
 
 describe("FA finding space", () => {
   it("builds FA ids from its own ordinal space", () => {
@@ -343,5 +344,21 @@ describe("FA ordering and derived views", () => {
     );
     const van = r.purchases.find((p) => p.asset === "Site Van 2")!;
     expect(van.incidentalSummary).toContain("rto: not found — FA-002-1");
+  });
+});
+
+describe("FA output hygiene", () => {
+  it("uses money()/displayDate() shapes in every finding detail", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: [row("20250710", "Safe Motors", 2000000, "Purc")] }],
+      incidentalExpenseRows: [], disposalSignals: [],
+    }, ctxFor({ closingBalanceOf: (l) => (l === "Safe Motors" ? -1500000 : 0) }));
+    for (const f of r.findings) {
+      expect(f.detail).not.toMatch(/\d{6,}/);     // no bare digit runs (scrubDigits collision)
+      expect(f.detail).not.toMatch(/\b\d{8}\b/);  // no raw YYYYMMDD dates
+    }
+    const unsettled = r.findings.find((f) => f.check === "fa_vehicle_vendor_unsettled");
+    expect(unsettled?.detail).toContain("15,00,000.00");
+    expect(unsettled?.detail).toContain(displayDate("20260331"));
   });
 });
