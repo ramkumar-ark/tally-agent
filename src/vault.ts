@@ -14,6 +14,7 @@ const ROLE_LABEL: Record<GroupRole, string> = {
   capital: "Capital",
   duties: "Ledger",
   tax_id: "TaxId",
+  doc: "Doc",
   other: "Ledger",
 };
 

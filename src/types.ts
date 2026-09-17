@@ -59,7 +59,7 @@ export const GST_HEADS: readonly GstHead[] = [
 export type Side = "Dr" | "Cr";
 
 /** Semantic role of a group, used by the checks. Distinct from mask policy.
- * `tax_id` is a vault-label-only role (TaxId N aliases); the classifier never returns it. */
+ * `tax_id` and `doc` are vault-label-only roles (TaxId N / Doc N aliases); the classifier never returns them. */
 export type GroupRole =
   | "debtor"
   | "creditor"
@@ -73,6 +73,7 @@ export type GroupRole =
   | "capital"
   | "duties"
   | "tax_id"
+  | "doc"
   | "other";
 
 export type MaskPolicy = "mask" | "clear";
@@ -253,6 +254,36 @@ export const DEP_CHECK_ORDINAL: Record<DepCheckId, number> = {
 
 export function depFindingId(check: DepCheckId, ordinal: number): string {
   return `DEP-${String(DEP_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+export type FaCheckId =
+  | "fa_vehicle_incidental_expensed"
+  | "fa_vehicle_incidental_missing"
+  | "fa_vehicle_vendor_unsettled"
+  | "fa_disposal_unmatched";
+
+/** FA ids live in their own ordinal space (FA-<ordinal>-<n>); other tables are never renumbered. */
+export const FA_CHECK_ORDINAL: Record<FaCheckId, number> = {
+  fa_vehicle_incidental_expensed: 1,
+  fa_vehicle_incidental_missing: 2,
+  fa_vehicle_vendor_unsettled: 3,
+  fa_disposal_unmatched: 4,
+};
+
+export function faFindingId(check: FaCheckId, ordinal: number): string {
+  return `FA-${String(FA_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+export interface FaFinding {
+  id: string;
+  check: FaCheckId;
+  severity: Severity;
+  /** Real ledger name pre-mask: the vehicle ledger, the vendor, or the signal ledger. */
+  ledger: string;
+  block: string;
+  amount: number;
+  /** money()/displayDate() only — never toFixed(2), never a raw YYYYMMDD. */
+  detail: string;
 }
 
 export interface DepFinding {
