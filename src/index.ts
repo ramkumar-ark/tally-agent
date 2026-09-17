@@ -13,6 +13,7 @@ import { loadOverrides, loadWrongGroup } from "./overrides.js";
 import {
   appendAudit,
   writeDepreciationReport,
+  writeFaRegisterReport,
   writeGstReport,
   writeLedgerReport,
   writeReport,
@@ -22,6 +23,7 @@ import {
 import {
   createSession,
   type DepReviewResult,
+  type FaReviewResult,
   type GstMismatchResult,
   type LedgerScrutinyResult,
   type ReviewResult,
@@ -90,6 +92,7 @@ export function registerTools(
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
   let lastDep: DepReviewResult | undefined;
+  let lastFa: FaReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -499,6 +502,63 @@ export function registerTools(
       return JSON.stringify(paths, null, 2);
     },
   );
+
+  register(
+    "tb_fixed_asset_register",
+    "Fixed asset purchase & sale register for audit: one row per acquisition debit with date, asset, " +
+      "block, counterparty, vendor, amount and voucher identification; disposals from asset-ledger credits " +
+      "and disposal-signal ledgers; vehicle incidental-cost checks (insurance, RTO, accessories; s.43(1)); " +
+      "vehicle-vendor settlement. Accounting PII is masked; voucher numbers appear as Doc N aliases.",
+    {
+      company: z.string().optional()
+        .describe("Company name as in Tally. Omit to use the default company."),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+    },
+    async (args) => {
+      const result = await session.faRegister(args.company ?? cfg.defaultCompany, args.fromDate, args.toDate);
+      lastFa = result;
+      await audit(
+        "tb_fixed_asset_register",
+        { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_fixed_asset_report",
+    "Write the fixed asset register trio (markdown, findings CSV and the six-sheet workbook) to disk. " +
+      "Real names and voucher numbers are restored on write.",
+    {
+      company: z.string(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+    },
+    async (args) => {
+      if (!lastFa) throw new Error("run tb_fixed_asset_register first: there is no register to write");
+      const paths = await writeFaRegisterReport({
+        reportDir: cfg.reportDir,
+        company: args.company,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        result: lastFa,
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_fixed_asset_report",
+        { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
+        lastFa.findings.length,
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
 }
 
 function maskedCount(findings: Array<{ ledger: string }>): number {
@@ -532,9 +592,13 @@ async function main(): Promise<void> {
         "Read-only Tally Prime review (trial balance, GST, single-ledger scrutiny), with accounting PII masked. " +
         "Party ledgers, bank accounts, capital accounts and loan accounts appear as stable " +
         "pseudonyms such as 'Creditor 3'; tax IDs appear as aliases such as 'TaxId 2'; " +
+        "voucher numbers appear as aliases such as 'Doc 4'; " +
         "nominal accounts appear by their real names. " +
         "You cannot see the trial balance itself, only the exceptions the checks found. " +
         "Drill into a finding by its id with tb_ledger_activity or tb_ledger_scrutiny, never by ledger name. " +
+        "The depreciation review (tb_depreciation_review) and the fixed asset register " +
+        "(tb_fixed_asset_register) cover blocks, acquisitions and disposals; the register's " +
+        "workbook is written with tb_write_fixed_asset_report. " +
         "Write the report with tb_write_report (or tb_write_gst_report, tb_write_ledger_report) using the pseudonyms; " +
         "real names are restored on write. GST returns data is passed by file path only - " +
         "never paste return rows into chat.",
