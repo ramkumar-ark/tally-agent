@@ -174,7 +174,26 @@ export function analyzeFaRegister(input: FaAnalyzeInput, ctx: FaCtx): FaResult {
     const discountRows = [...creditKinds.entries()]
       .filter(([, k]) => k.kind === "discount")
       .map(([r]) => ({ row: r }));
-    const grouped = groupAcquisitions(ledger, rows, depCtx);
+    // Incidental-cost debits (insurer / RTO / accessory counterparty) never seed
+    // acquisitions — s.43(1) makes them cost of the asset they sit against — so
+    // they are split out before grouping and attached to the acquisition whose
+    // first-use window contains them (nearest first use wins).
+    const isCostDebit = (r: LedgerVoucherRow): boolean =>
+      r.amount > 0 && COST_TYPES.some((t) => COST_VOCAB[t].test(r.counterparty));
+    const seedRows = rows.filter((r) => !isCostDebit(r));
+    const grouped = groupAcquisitions(ledger, seedRows, depCtx);
+    for (const c of rows.filter(isCostDebit)) {
+      const target = grouped
+        .filter((a) => inVehicleWindow(a.firstUse, c.date))
+        .sort((a, b) => (at(c.date) - at(a.firstUse)) ** 2 - (at(c.date) - at(b.firstUse)) ** 2)[0];
+      if (target) {
+        target.debits.push(c);
+        target.cost += c.amount;
+      }
+      // No window-matching acquisition: the debit stays unattached. It can only
+      // become an R3 row (in-use ledger); Direction A never capitalises it and
+      // Directions B/C never see it either — consistent by construction.
+    }
     const { netted } = netDiscounts(grouped, discountRows, depCtx);
 
     for (const a of netted) {
@@ -228,7 +247,129 @@ export function analyzeFaRegister(input: FaAnalyzeInput, ctx: FaCtx): FaResult {
   }
 
   void saleCredits; // the disposal-signal pass consumes this
-  void findings;
+
+  // ---- Vehicle incidental-cost pass (D4) ----
+  interface VehicleAcq { ledger: string; group: string; rows: LedgerVoucherRow[]; acq: Acquisition; }
+  const vehicleAcqs: VehicleAcq[] = [];
+  for (const p of perLedger) {
+    if (!isVehicleAsset(p.ledger, p.group)) continue;
+    for (const a of p.acquisitions) vehicleAcqs.push({ ledger: p.ledger, group: p.group, rows: p.rows, acq: a });
+  }
+
+  // B hits: debits on incidental-pattern expense ledgers inside some vehicle's window.
+  // A ledger maps to exactly ONE cost type (first matching vocabulary, in COST_TYPES
+  // order) so a dual-named ledger cannot double-count one debit.
+  interface BHit { row: LedgerVoucherRow; ledger: string; costType: FaCostType; vehicles: VehicleAcq[]; finding?: FaFinding; }
+  const bHits = new Map<string, BHit>();
+  for (const { ledger, rows } of input.incidentalExpenseRows) {
+    const costType = COST_TYPES.find((t) => COST_VOCAB[t].test(ledger));
+    if (!costType) continue;
+    for (const r of rows) {
+      if (r.amount <= 0) continue;
+      const vehicles = vehicleAcqs.filter((v) => inVehicleWindow(v.acq.firstUse, r.date));
+      if (vehicles.length === 0) continue;
+      const key = `${canon(ledger)}|${r.date}|${r.voucherNumber}|${r.amount}`;
+      const existing = bHits.get(key);
+      if (existing) {
+        for (const v of vehicles) if (!existing.vehicles.includes(v)) existing.vehicles.push(v);
+      } else {
+        bHits.set(key, { row: r, ledger, costType, vehicles: [...vehicles] });
+      }
+    }
+  }
+
+  const push = (check: FaCheckId, ledger: string, block: string, amount: number, detail: string): void => {
+    findings.push({ id: "", check, severity: SEVERITY[check], ledger, block, amount, detail });
+  };
+
+  const windowText = `${VEHICLE_WINDOW_BEFORE_DAYS} days before to ${VEHICLE_WINDOW_AFTER_DAYS} days after`;
+
+  interface CostResolution {
+    v: VehicleAcq; costType: FaCostType;
+    status: "capitalised" | "expensed" | "not-found" | "none";
+    amount: number; date: string | null; where: string;
+    row: LedgerVoucherRow | null; ambiguous: boolean; finding?: FaFinding;
+  }
+  const resolutions: CostResolution[] = [];
+  const emittedHits = new Set<BHit>();
+
+  for (const v of vehicleAcqs) {
+    for (const t of COST_TYPES) {
+      // Direction A: capitalised — a debit on the vehicle ledger, in window, whose
+      // counterparty names the cost (insurer, RTO office, accessory vendor, or an
+      // expense ledger a journal transferred from).
+      const aRow = v.rows.find(
+        (d) => d.amount > 0 && COST_VOCAB[t].test(d.counterparty) && inVehicleWindow(v.acq.firstUse, d.date),
+      ) ?? null;
+      let res: CostResolution;
+      if (aRow) {
+        res = {
+          v, costType: t, status: "capitalised", amount: aRow.amount, date: aRow.date,
+          where: aRow.counterparty, row: aRow, ambiguous: false,
+        };
+      } else {
+        // Direction B: the cost sits in an expense ledger.
+        const hit = [...bHits.values()].find((h) => h.costType === t && h.vehicles.includes(v)) ?? null;
+        if (hit) {
+          if (!emittedHits.has(hit)) {
+            emittedHits.add(hit);
+            const names = [...new Set(hit.vehicles.map((x) => x.ledger))];
+            const ambiguity = hit.vehicles.length > 1
+              ? ` (attribution ambiguous: the window covers ${hit.vehicles.length} vehicle acquisitions — ${names.join("; ")})`
+              : "";
+            const f: FaFinding = {
+              id: "", check: "fa_vehicle_incidental_expensed", severity: SEVERITY.fa_vehicle_incidental_expensed,
+              ledger: v.ledger, block: v.group, amount: Math.abs(hit.row.amount),
+              detail:
+                `${t} cost of first use appears as a debit of ${money(Math.abs(hit.row.amount))} on ` +
+                `${displayDate(hit.row.date)} in expense ledger ${hit.ledger}, within ${windowText} the first use on ` +
+                `${displayDate(hit.vehicles[0].acq.firstUse)}: costs incidental to putting a vehicle to its first use ` +
+                `form part of its actual cost under s.43(1) and belong in the vehicle's own asset ledger — ` +
+                `verify and capitalise if confirmed${ambiguity}`,
+            };
+            findings.push(f);
+            hit.finding = f;
+          }
+          res = {
+            v, costType: t, status: "expensed", amount: Math.abs(hit.row.amount), date: hit.row.date,
+            where: hit.ledger, row: hit.row, ambiguous: hit.vehicles.length > 1, finding: hit.finding,
+          };
+        } else if (ABSENCE_CHECKED.includes(t)) {
+          // Direction C: nowhere to be found (insurance and RTO only).
+          const f: FaFinding = {
+            id: "", check: "fa_vehicle_incidental_missing", severity: SEVERITY.fa_vehicle_incidental_missing,
+            ledger: v.ledger, block: v.group, amount: 0,
+            detail:
+              `no ${t} cost of first use appears in either the vehicle ledger or any ${t}-pattern expense ledger ` +
+              `within ${windowText} the first use on ${displayDate(v.acq.firstUse)}: either the cost was included ` +
+              `in the supplier's invoice — verify against the purchase invoice — or it was never booked`,
+          };
+          findings.push(f);
+          res = { v, costType: t, status: "not-found", amount: 0, date: null, where: "", row: null, ambiguous: false, finding: f };
+        } else {
+          res = { v, costType: t, status: "none", amount: 0, date: null, where: "", row: null, ambiguous: false };
+        }
+      }
+      resolutions.push(res);
+    }
+  }
+
+  // Incidental summaries on the acquisition's first instalment. Interim form
+  // here: finding ids land in the ordering pass at the end of the engine.
+  const resByAcquisition = new Map<string, CostResolution[]>();
+  for (const r of resolutions) {
+    const key = `${canon(r.v.ledger)}|${r.v.acq.firstUse}`;
+    resByAcquisition.set(key, [...(resByAcquisition.get(key) ?? []), r]);
+  }
+  for (const p of purchases) {
+    if (p.rule !== "acquisition" || p.instalment !== 1 || !p.isVehicle) continue;
+    const rs = resByAcquisition.get(`${canon(p.asset)}|${p.acquisitionDate}`) ?? [];
+    if (rs.length === 0) continue;
+    p.incidentalSummary = COST_TYPES.map((t) => {
+      const r = rs.find((x) => x.costType === t);
+      return `${t}: ${r ? r.status : "none"}`;
+    }).join("; ");
+  }
 
   return { purchases, disposals, vehicleCosts: [], vendors: [], findings };
 }

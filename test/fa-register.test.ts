@@ -116,7 +116,10 @@ describe("analyzeFaRegister purchases", () => {
     expect(second.vendor).toBe("Safe Motors");
     expect(second.instalment).toBe(2);
     expect(second.acquisitionCost).toBe(0); // acquisition-level fields on the first instalment only
-    expect(r.findings).toHaveLength(0);
+    // The acquisition is a vehicle with no insurance/RTO anywhere: the absence
+    // check fires (captain steering), and nothing else does.
+    expect(r.findings.filter((f) => f.check === "fa_vehicle_incidental_missing")).toHaveLength(2);
+    expect(r.findings.filter((f) => f.check !== "fa_vehicle_incidental_missing")).toHaveLength(0);
   });
 
   it("carries rule-3 debits as purchases with rule R3", () => {
@@ -145,5 +148,106 @@ describe("analyzeFaRegister disposals", () => {
       asset: "Mixer Plant 2", counterparty: "Buyer of Plant", amount: 300000,
       voucherNumber: "SL/9", reference: "PO-4412",
     });
+  });
+});
+
+describe("vehicle incidental-cost check", () => {
+  const vehiclePurchase = [
+    row("20250710", "Safe Motors", 2000000, "Purc", "PUR/101", "INV-2201"),
+  ];
+
+  it("shows all three costs capitalised when they are debited in the vehicle ledger", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: [
+        ...vehiclePurchase,
+        row("20250715", "Bharat General Insurance", 46000, "Jrnl", "J/501"),
+        row("20250718", "RTO Office", 21000, "Jrnl", "J/502"),
+        row("20250901", "Style Auto Accessories", 12500, "Jrnl", "J/530"),
+      ] }],
+      incidentalExpenseRows: [], disposalSignals: [],
+    }, ctxFor());
+    expect(r.findings.filter((f) => f.check.startsWith("fa_vehicle"))).toHaveLength(0);
+    expect(r.purchases[0].incidentalSummary).toBe(
+      "insurance: capitalised; rto: capitalised; accessories: capitalised",
+    );
+  });
+
+  it("flags each cost sitting in an expense ledger, naming the ledger and the amount", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: vehiclePurchase }],
+      incidentalExpenseRows: [
+        { ledger: "Insurance Expenses", rows: [row("20250712", "HDFC Bank", 46000)] },
+        { ledger: "RTO and Registration", rows: [row("20250720", "HDFC Bank", 21000)] },
+        { ledger: "Auto Accessories Exp", rows: [row("20250815", "HDFC Bank", 12500)] },
+      ],
+      disposalSignals: [],
+    }, ctxFor());
+    const expensed = r.findings.filter((f) => f.check === "fa_vehicle_incidental_expensed");
+    expect(expensed).toHaveLength(3);
+    expect(expensed.map((f) => f.amount).sort((a, b) => a - b)).toEqual([12500, 21000, 46000]);
+    for (const f of expensed) {
+      expect(f.detail).toContain("s.43(1)");
+      expect(f.ledger).toBe("Tipper Lorry 3");
+    }
+    expect(r.findings.filter((f) => f.check === "fa_vehicle_incidental_missing")).toHaveLength(0);
+    const ins = r.findings.find((f) => f.detail.includes("Insurance Expenses"));
+    expect(ins?.detail).toContain("46,000.00");
+  });
+
+  it("does not trigger for a non-vehicle asset", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Mixer Plant 2", rows: [row("20250710", "Machinery Supplier", 800000, "Purc")] }],
+      incidentalExpenseRows: [
+        { ledger: "Insurance Expenses", rows: [row("20250712", "HDFC Bank", 46000)] },
+      ],
+      disposalSignals: [],
+    }, ctxFor());
+    expect(r.findings.filter((f) => f.check.startsWith("fa_vehicle"))).toHaveLength(0);
+    expect(r.purchases.every((p) => !p.isVehicle)).toBe(true);
+  });
+
+  it("flags missing insurance and RTO, but not missing accessories", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: vehiclePurchase }],
+      incidentalExpenseRows: [], disposalSignals: [],
+    }, ctxFor());
+    const missing = r.findings.filter((f) => f.check === "fa_vehicle_incidental_missing");
+    expect(missing.map((f) => f.ledger)).toEqual(["Tipper Lorry 3", "Tipper Lorry 3"]);
+    expect(missing.every((f) => /insurance|rto/.test(f.detail))).toBe(true);
+    expect(missing[0].detail).toContain("included in the supplier's invoice");
+  });
+
+  it("ignores an expense debit outside the window, and flags the absence instead", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: vehiclePurchase }],
+      incidentalExpenseRows: [
+        { ledger: "Insurance Expenses", rows: [row("20250609", "HDFC Bank", 46000)] },  // 31 days before first use
+        { ledger: "RTO and Registration", rows: [row("20251009", "HDFC Bank", 21000)] }, // 91 days after
+      ],
+      disposalSignals: [],
+    }, ctxFor());
+    expect(r.findings.filter((f) => f.check === "fa_vehicle_incidental_expensed")).toHaveLength(0);
+    expect(r.findings.filter((f) => f.check === "fa_vehicle_incidental_missing")).toHaveLength(2);
+  });
+
+  it("emits ONE ambiguous finding when two vehicle acquisitions share the window", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [
+        { ledger: "Tipper Lorry 3", rows: vehiclePurchase },
+        { ledger: "Site Van 2", rows: [row("20250801", "Safe Motors", 900000, "Purc")] },
+      ],
+      incidentalExpenseRows: [
+        { ledger: "Insurance Expenses", rows: [row("20250805", "HDFC Bank", 46000)] },
+      ],
+      disposalSignals: [],
+    }, ctxFor({
+      groupOf: (l) => (l === "Site Van 2" ? "Block 30%" : GROUPS[l] ?? ""),
+      isAssetLedger: (l) => l === "Tipper Lorry 3" || l === "Site Van 2" || l === "Mixer Plant 2",
+    }));
+    const expensed = r.findings.filter((f) => f.check === "fa_vehicle_incidental_expensed");
+    expect(expensed).toHaveLength(1);
+    expect(expensed[0].detail).toContain("ambiguous");
+    expect(expensed[0].detail).toContain("Tipper Lorry 3");
+    expect(expensed[0].detail).toContain("Site Van 2");
   });
 });
