@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendAudit, findingsCsv, findingsSheet, depreciationSheets, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump, writeWorkbook, writeDepreciationReport } from "../src/report.js";
-import type { MaskedDepResult } from "../src/report.js";
+import { appendAudit, findingsCsv, findingsSheet, depreciationSheets, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump, writeWorkbook, writeDepreciationReport, fixedAssetSheets, writeFaRegisterReport } from "../src/report.js";
+import type { MaskedDepResult, MaskedFaResult } from "../src/report.js";
 import type { TdsMaskedFinding } from "../src/review.js";
 import { createVault } from "../src/vault.js";
 import type { Finding } from "../src/types.js";
@@ -334,5 +334,96 @@ describe("writeDepreciationReport", () => {
     const excludedXml = entry(wb, "xl/worksheets/sheet5.xml");
     expect(excludedXml).toContain("Operator file stanza");
     expect(excludedXml).not.toContain("Creditor 1");
+  });
+});
+
+/** A masked FA register standing in for one vehicle acquisition. Invented names and figures. */
+const sampleFaResult: MaskedFaResult = {
+  fromDate: "20250401",
+  toDate: "20260331",
+  counts: { critical: 0, warning: 0, review: 2 },
+  purchases: [{
+    date: "20250710", asset: "Ledger 7", block: "Block 30%", rate: 30,
+    counterparty: "Creditor 1", vendor: "Creditor 1", amount: 2000000,
+    voucherType: "Purc", voucherNumber: "Doc 1", reference: "Doc 2",
+    acquisitionDate: "20250710", instalment: 1, instalments: 1,
+    acquisitionCost: 2000000, netted: 0, rule: "acquisition",
+    isVehicle: true, incidentalSummary: "insurance: capitalised; rto: not found — FA-002-1; accessories: none (not flagged)",
+  }],
+  disposals: [{
+    date: "20251005", asset: "", block: "", counterparty: "Ledger 11", amount: 96000,
+    voucherType: "Sale", voucherNumber: "Doc 3", reference: "",
+    kind: "disposal-signal", rule: "§9", note: "no matching credit in any asset ledger",
+  }],
+  vehicleCosts: [{
+    vehicle: "Ledger 7", block: "Block 30%", firstUse: "20250710", costType: "rto",
+    status: "not-found", amount: 0, date: null, where: "",
+    voucherType: "", voucherNumber: "", reference: "",
+    ambiguous: false, findingId: "FA-002-1",
+  }],
+  vendors: [{
+    vendor: "Creditor 1", vehicles: ["Ledger 7"], acquisitionsTotal: 2000000,
+    closingBalance: -150000, side: "Cr", squaredOff: false, findingId: "FA-003-1",
+  }],
+  findings: [
+    {
+      id: "FA-002-1", check: "fa_vehicle_incidental_missing", severity: "review",
+      ledger: "Ledger 7", block: "Block 30%", amount: 0,
+      detail: "no rto cost of first use appears ... within 30 days before to 90 days after the first use on 10-Jul-2025",
+    },
+    {
+      id: "FA-003-1", check: "fa_vehicle_vendor_unsettled", severity: "review",
+      ledger: "Creditor 1", block: "", amount: 150000,
+      detail: "the supplier's ledger closes the period on 31-Mar-2026 with a Cr balance of 1,50,000.00",
+    },
+  ],
+  assetLedgers: 3,
+};
+
+describe("fixedAssetSheets", () => {
+  it("builds the six sheets the design names, in order", () => {
+    const sheets = fixedAssetSheets(sampleFaResult);
+    expect(sheets.map((s) => s.name)).toEqual([
+      "Summary", "Purchases", "Disposals", "Vehicle costs", "Vendors", "Findings",
+    ]);
+    expect(sheets[0].title?.join(" ")).toContain("Asset ledgers: 3");
+    expect(sheets[1].rows[0]).toContain("Doc 1");
+  });
+});
+
+describe("writeFaRegisterReport", () => {
+  it("writes the trio with de-masked names and voucher numbers, displayDate and grouped money", async () => {
+    const vault = createVault();
+    vault.pseudonym("Tipper Works Ltd", "other"); // warm the counter for determinism
+    const assetAlias = vault.pseudonym("Tipper Lorry 3", "other");
+    const vendorAlias = vault.pseudonym("Safe Motors", "creditor");
+    const docAlias = vault.pseudonym("PUR/918020045566771", "doc");
+    const refAlias = vault.pseudonym("INV-2201", "doc");
+    const result: MaskedFaResult = {
+      ...sampleFaResult,
+      purchases: [{
+        ...sampleFaResult.purchases[0],
+        asset: assetAlias, counterparty: vendorAlias, vendor: vendorAlias,
+        voucherNumber: docAlias, reference: refAlias,
+      }],
+      vendors: [{ ...sampleFaResult.vendors[0], vendor: vendorAlias, vehicles: [assetAlias] }],
+    };
+    const dir = await mkdtemp(join(tmpdir(), "fa-reg-"));
+    const paths = await writeFaRegisterReport({
+      reportDir: dir, company: "Sample Works", fromDate: "20250401", toDate: "20260331",
+      result, vault,
+    });
+    expect(paths.markdownPath).toContain("fixed-asset-register-sample-works-20250401-20260331.md");
+    const md = await readFile(paths.markdownPath, "utf8");
+    expect(md).toContain("Safe Motors"); // de-masked from the finding's ledger pseudonym
+    expect(md).toContain("1,50,000.00");
+    expect(md).toContain("31-Mar-2026");
+    expect(md).not.toMatch(/\d{6,}/);
+    const csv = await readFile(paths.csvPath, "utf8");
+    expect(csv).toContain("Safe Motors");
+    const wb = await readFile(paths.workbookPath);
+    const purchasesXml = entry(wb, "xl/worksheets/sheet2.xml");
+    expect(purchasesXml).toContain("PUR/918020045566771");
+    expect(purchasesXml).not.toContain(docAlias);
   });
 });

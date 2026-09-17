@@ -597,3 +597,255 @@ export async function writeDepreciationReport(opts: {
 
   return { markdownPath, csvPath, workbookPath };
 }
+
+export interface MaskedFaResult {
+  company?: string;
+  fromDate?: string;
+  toDate?: string;
+  counts: Record<string, number>;
+  purchases: Array<{
+    date: string; asset: string; block: string; rate: number | null;
+    counterparty: string; vendor: string; amount: number;
+    voucherType: string; voucherNumber: string; reference: string;
+    acquisitionDate: string; instalment: number; instalments: number;
+    acquisitionCost: number; netted: number; rule: string;
+    isVehicle: boolean; incidentalSummary: string;
+  }>;
+  disposals: Array<{
+    date: string; asset: string; block: string; counterparty: string; amount: number;
+    voucherType: string; voucherNumber: string; reference: string;
+    kind: string; rule: string; note: string;
+  }>;
+  vehicleCosts: Array<{
+    vehicle: string; block: string; firstUse: string; costType: string; status: string;
+    amount: number; date: string | null; where: string;
+    voucherType: string; voucherNumber: string; reference: string;
+    ambiguous: boolean; findingId: string;
+  }>;
+  vendors: Array<{
+    vendor: string; vehicles: string[]; acquisitionsTotal: number;
+    closingBalance: number; side: string | null; squaredOff: boolean; findingId: string;
+  }>;
+  findings: Array<{
+    id: string; check: string; severity: string; ledger: string; block: string;
+    amount: number; detail: string;
+  }>;
+  assetLedgers: number;
+}
+
+/**
+ * The fixed asset register workbook, six sheets (D2). Masked in, masked out:
+ * `writeWorkbook` de-masks. Cell formatting — dd-mmm-yyyy dates and
+ * Indian-grouped money — is applied by the workbook's column formats.
+ */
+export function fixedAssetSheets(result: MaskedFaResult): Sheet[] {
+  const creditDisposals = result.disposals.filter((d) => d.kind !== "disposal-signal");
+  const signals = result.disposals.filter((d) => d.kind === "disposal-signal");
+  const vehicleFirsts = result.purchases.filter((p) => p.isVehicle && p.instalment === 1);
+  const unsettled = result.vendors.filter((v) => !v.squaredOff);
+
+  const summary: Sheet = {
+    name: "Summary",
+    title: [
+      `Fixed asset purchase & sale register, ${displayDate(result.fromDate ?? "")} to ${displayDate(result.toDate ?? "")}`,
+      `Asset ledgers: ${result.assetLedgers}; acquisition debits: ${result.purchases.filter((p) => p.rule === "acquisition").length}; ` +
+        `rule-3 debits: ${result.purchases.filter((p) => p.rule === "R3").length}; disposal credits: ${creditDisposals.length}; ` +
+        `disposal signals: ${signals.length}; vehicle acquisitions: ${vehicleFirsts.length}; vendors: ${result.vendors.length}; findings: ${result.findings.length}`,
+      "One row per acquisition debit. Depreciation charges, opening balances and unattributed discounts are outside this register (depreciation review owns them).",
+    ],
+    columns: [textCol("Figure", 44), moneyCol("Amount")],
+    rows: [
+      ["Purchases (all debits listed)", round2(result.purchases.reduce((a, p) => a + p.amount, 0))],
+      ["Disposal credits (sale + write-off)", round2(creditDisposals.reduce((a, d) => a + d.amount, 0))],
+      ["Vehicle acquisitions", round2(vehicleFirsts.reduce((a, p) => a + p.acquisitionCost, 0))],
+      ["Vendors not squared off", unsettled.length],
+      ["Findings", result.findings.length],
+    ],
+  };
+
+  const purchases: Sheet = {
+    name: "Purchases",
+    columns: [
+      dateCol("Date"),
+      textCol("Asset", 28),
+      textCol("Block", 22),
+      { header: "Rate %", width: 8, format: "text" },
+      textCol("Counterparty", 28),
+      textCol("Vendor", 28),
+      moneyCol("Debit"),
+      textCol("Voucher type", 12),
+      textCol("Voucher no.", 22),
+      textCol("Reference", 22),
+      dateCol("First use"),
+      textCol("Instalment", 12),
+      moneyCol("Acquisition cost", 18),
+      moneyCol("Discount netted", 16),
+      { header: "Rule", width: 10, format: "text" },
+      { header: "Vehicle", width: 8, format: "text" },
+      textCol("Incidental costs", 40),
+    ],
+    rows: result.purchases.map((p) => [
+      p.date,
+      p.asset,
+      p.block,
+      p.rate === null ? "" : String(p.rate),
+      p.counterparty,
+      p.vendor,
+      p.amount,
+      p.voucherType,
+      p.voucherNumber,
+      p.reference,
+      p.acquisitionDate,
+      p.instalments ? `${p.instalment} / ${p.instalments}` : "",
+      p.acquisitionCost,
+      p.netted,
+      p.rule,
+      p.isVehicle ? "yes" : "no",
+      p.incidentalSummary,
+    ]),
+  };
+
+  const disposals: Sheet = {
+    name: "Disposals",
+    columns: [
+      dateCol("Date"),
+      textCol("Asset", 28),
+      textCol("Block", 22),
+      textCol("Counterparty", 28),
+      moneyCol("Amount"),
+      textCol("Voucher type", 12),
+      textCol("Voucher no.", 22),
+      textCol("Reference", 22),
+      { header: "Kind", width: 15, format: "text" },
+      { header: "Rule", width: 8, format: "text" },
+      textCol("Note", 44),
+    ],
+    rows: result.disposals.map((d) => [
+      d.date, d.asset, d.block, d.counterparty, d.amount,
+      d.voucherType, d.voucherNumber, d.reference, d.kind, d.rule, d.note,
+    ]),
+  };
+
+  const vehicleCosts: Sheet = {
+    name: "Vehicle costs",
+    columns: [
+      textCol("Vehicle", 28),
+      textCol("Block", 22),
+      dateCol("First use"),
+      { header: "Cost", width: 12, format: "text" },
+      { header: "Status", width: 22, format: "text" },
+      moneyCol("Amount"),
+      dateCol("Date"),
+      textCol("Where", 28),
+      textCol("Voucher no.", 22),
+      { header: "Ambiguous", width: 10, format: "text" },
+      textCol("Finding", 12),
+    ],
+    rows: result.vehicleCosts.map((v) => [
+      v.vehicle, v.block, v.firstUse, v.costType, v.status,
+      v.amount, v.date ?? "", v.where, v.voucherNumber,
+      v.ambiguous ? "yes" : "no", v.findingId,
+    ]),
+  };
+
+  const vendors: Sheet = {
+    name: "Vendors",
+    columns: [
+      textCol("Vendor", 28),
+      textCol("Vehicles", 40),
+      moneyCol("Acquisitions"),
+      moneyCol("Closing balance", 16),
+      { header: "Side", width: 6, format: "text" },
+      { header: "Squared off", width: 12, format: "text" },
+      textCol("Finding", 12),
+    ],
+    rows: result.vendors.map((v) => [
+      v.vendor, v.vehicles.join("; "), v.acquisitionsTotal,
+      v.closingBalance, v.side ?? "", v.squaredOff ? "yes" : "no", v.findingId,
+    ]),
+  };
+
+  const findings: Sheet = findingsSheet(
+    result.findings.map((f) => ({
+      id: f.id, check: f.check, severity: f.severity as Severity,
+      ledger: f.ledger, group: f.block, amount: f.amount, detail: f.detail,
+    })),
+  );
+  return [summary, purchases, disposals, vehicleCosts, vendors, findings];
+}
+
+/** The markdown half: summary + findings, masked; de-masked on the way to disk. */
+function fixedAssetMarkdown(result: MaskedFaResult): string {
+  const period = displayDate(result.fromDate ?? "") === "unknown date"
+    ? "Fixed asset purchase & sale register"
+    : `Fixed asset purchase & sale register, ${displayDate(result.fromDate ?? "")} to ${displayDate(result.toDate ?? "")}`;
+  const lines: string[] = [
+    `# ${period}`,
+    "",
+    "One row per acquisition debit. Depreciation charges, opening balances and unattributed discounts are outside this register.",
+    "",
+    `Acquisition debits ${result.purchases.filter((p) => p.rule === "acquisition").length} · ` +
+      `rule-3 debits ${result.purchases.filter((p) => p.rule === "R3").length} · ` +
+      `disposals ${result.disposals.filter((d) => d.kind !== "disposal-signal").length} · ` +
+      `disposal signals ${result.disposals.filter((d) => d.kind === "disposal-signal").length} · ` +
+      `vendors ${result.vendors.length} (unsettled ${result.vendors.filter((v) => !v.squaredOff).length}) · ` +
+      `findings ${result.findings.length}.`,
+    "",
+    "## Findings",
+    "",
+    "| Id | Check | Severity | Ledger | Amount | Detail |",
+    "|---|---|---|---|---:|---|",
+  ];
+  for (const f of result.findings) {
+    lines.push(`| ${f.id} | ${f.check} | ${f.severity} | ${f.ledger} | ${money(f.amount)} | ${f.detail} |`);
+  }
+  return lines.join("\n");
+}
+
+/** The register trio (R-R-4): markdown, de-masked findings CSV, six-sheet workbook. */
+export async function writeFaRegisterReport(opts: {
+  reportDir: string;
+  company: string;
+  fromDate: string;
+  toDate: string;
+  result: MaskedFaResult;
+  vault: Vault;
+}): Promise<{ markdownPath: string; csvPath: string; workbookPath: string }> {
+  await mkdir(opts.reportDir, { recursive: true });
+  const stem = `${slug(opts.company)}-${opts.fromDate}-${opts.toDate}`;
+  const markdownPath = join(opts.reportDir, `fixed-asset-register-${stem}.md`);
+  const csvPath = join(opts.reportDir, `fixed-asset-findings-${stem}.csv`);
+  const workbookPath = join(opts.reportDir, `fixed-asset-register-${stem}.xlsx`);
+
+  const withPeriod = {
+    ...opts.result,
+    fromDate: opts.result.fromDate ?? opts.fromDate,
+    toDate: opts.result.toDate ?? opts.toDate,
+  };
+  await writeFile(markdownPath, demaskText(fixedAssetMarkdown(withPeriod), opts.vault), "utf8");
+
+  const header = "id,check,severity,ledger,block,amount,detail";
+  const rows = withPeriod.findings.map((f) =>
+    [
+      f.id,
+      f.check,
+      f.severity,
+      demaskText(f.ledger, opts.vault),
+      demaskText(f.block, opts.vault),
+      f.amount.toFixed(2),
+      demaskText(f.detail, opts.vault),
+    ]
+      .map(csvField)
+      .join(","),
+  );
+  await writeFile(csvPath, [header, ...rows].join("\n"), "utf8");
+
+  await writeWorkbook({
+    reportDir: opts.reportDir,
+    fileName: `fixed-asset-register-${stem}.xlsx`,
+    sheets: fixedAssetSheets(withPeriod),
+    vault: opts.vault,
+  });
+
+  return { markdownPath, csvPath, workbookPath };
+}
