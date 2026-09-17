@@ -251,3 +251,61 @@ describe("vehicle incidental-cost check", () => {
     expect(expensed[0].detail).toContain("Site Van 2");
   });
 });
+
+describe("vehicle vendor settlement", () => {
+  it("flags a vendor whose ledger is not squared off, with side and amount", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: [row("20250710", "Safe Motors", 2000000, "Purc")] }],
+      incidentalExpenseRows: [
+        { ledger: "Insurance Expenses", rows: [row("20250712", "HDFC Bank", 46000)] },
+        { ledger: "RTO and Registration", rows: [row("20250720", "HDFC Bank", 21000)] },
+      ],
+      disposalSignals: [],
+    }, ctxFor({ closingBalanceOf: (l) => (l === "Safe Motors" ? -150000 : 0) }));
+    const unsettled = r.findings.filter((f) => f.check === "fa_vehicle_vendor_unsettled");
+    expect(unsettled).toHaveLength(1);
+    expect(unsettled[0].ledger).toBe("Safe Motors");
+    expect(unsettled[0].amount).toBe(150000);
+    expect(unsettled[0].detail).toContain("1,50,000.00");
+    expect(unsettled[0].detail).toContain("Cr");
+    expect(r.vendors).toHaveLength(1);
+    expect(r.vendors[0]).toMatchObject({
+      vendor: "Safe Motors", vehicles: ["Tipper Lorry 3"], acquisitionsTotal: 2000000,
+      closingBalance: -150000, side: "Cr", squaredOff: false,
+    });
+  });
+
+  it("does not flag a squared-off vendor", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Tipper Lorry 3", rows: [row("20250710", "Safe Motors", 2000000, "Purc")] }],
+      incidentalExpenseRows: [], disposalSignals: [],
+    }, ctxFor());
+    expect(r.findings.filter((f) => f.check === "fa_vehicle_vendor_unsettled")).toHaveLength(0);
+    expect(r.vendors[0].squaredOff).toBe(true);
+  });
+});
+
+describe("disposal signals", () => {
+  it("lists an unmatched disposal-signal row and flags it; a matched one is listed without a finding", () => {
+    const r = analyzeFaRegister({
+      ledgerRows: [{ ledger: "Mixer Plant 2", rows: [
+        row("20250630", "Buyer of Plant", -300000, "Sale", "SL/9"),
+      ] }],
+      incidentalExpenseRows: [],
+      disposalSignals: [
+        { ledger: "Sale of Fixed Asset A/c", rows: [
+          row("20250630", "Buyer of Plant", -300000, "Sale", "SL/9"),  // matches the asset credit
+          row("20251005", "Buyer of Plant", -96000, "Sale", "SL/14"),   // no matching asset credit
+        ] },
+      ],
+    }, ctxFor());
+    const signals = r.disposals.filter((d) => d.kind === "disposal-signal");
+    expect(signals).toHaveLength(2);
+    expect(signals[0].note).toContain("matched");
+    expect(signals[1].note).toContain("no matching credit");
+    const unmatched = r.findings.filter((f) => f.check === "fa_disposal_unmatched");
+    expect(unmatched).toHaveLength(1);
+    expect(unmatched[0].amount).toBe(96000);
+    expect(unmatched[0].detail).toContain("96,000.00");
+  });
+});

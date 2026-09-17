@@ -246,7 +246,7 @@ export function analyzeFaRegister(input: FaAnalyzeInput, ctx: FaCtx): FaResult {
     perLedger.push({ ledger, group, rows, acquisitions: netted });
   }
 
-  void saleCredits; // the disposal-signal pass consumes this
+  // saleCredits feeds the disposal-signal pass below.
 
   // ---- Vehicle incidental-cost pass (D4) ----
   interface VehicleAcq { ledger: string; group: string; rows: LedgerVoucherRow[]; acq: Acquisition; }
@@ -371,5 +371,58 @@ export function analyzeFaRegister(input: FaAnalyzeInput, ctx: FaCtx): FaResult {
     }).join("; ");
   }
 
-  return { purchases, disposals, vehicleCosts: [], vendors: [], findings };
+  // ---- Vehicle vendor pass (D7) ----
+  const vendors: FaResult["vendors"] = [];
+  const vendorAgg = new Map<string, { vendor: string; vehicles: string[]; total: number }>();
+  for (const v of vehicleAcqs) {
+    const name = v.acq.counterparty.trim();
+    if (!name) continue;
+    const key = canon(name);
+    const e = vendorAgg.get(key) ?? { vendor: name, vehicles: [], total: 0 };
+    if (!e.vehicles.some((n) => canon(n) === canon(v.ledger))) e.vehicles.push(v.ledger);
+    e.total = round2(e.total + Math.max(0, v.acq.cost - v.acq.netted));
+    vendorAgg.set(key, e);
+  }
+  for (const e of vendorAgg.values()) {
+    const closing = ctx.closingBalanceOf(e.vendor);
+    const side = sideOf(closing);
+    const squaredOff = Math.abs(closing) <= ZERO_TOLERANCE;
+    if (!squaredOff) {
+      push(
+        "fa_vehicle_vendor_unsettled", e.vendor, "", Math.abs(closing),
+        `the supplier's ledger closes the period on ${displayDate(ctx.toDate)} with a ${side} balance of ` +
+          `${money(Math.abs(closing))} (acquisitions of ${money(e.total)} for ${e.vehicles.join("; ")}): ` +
+          `obtain the vendor's ledger statement and reconcile`,
+      );
+    }
+    vendors.push({
+      vendor: e.vendor, vehicles: e.vehicles, acquisitionsTotal: e.total,
+      closingBalance: closing, side, squaredOff, findingId: "",
+    });
+  }
+
+  // ---- Disposal-signal pass (depreciation design §9) ----
+  for (const { ledger, rows } of input.disposalSignals) {
+    for (const r of rows) {
+      const amount = Math.abs(r.amount);
+      if (amount < 0.005) continue;
+      const matched = saleCredits.some((s) => s.date === r.date && Math.abs(s.amount - amount) < 0.005);
+      disposals.push({
+        date: r.date, asset: "", block: "", counterparty: ledger, amount,
+        voucherType: r.voucherType, voucherNumber: r.voucherNumber, reference: r.reference,
+        kind: "disposal-signal", rule: "§9",
+        note: matched ? "matched to an asset-ledger credit" : "no matching credit in any asset ledger",
+      });
+      if (!matched) {
+        push(
+          "fa_disposal_unmatched", ledger, "", amount,
+          `disposal proceeds of ${money(amount)} on ${displayDate(r.date)} credited to this ledger have no ` +
+            `matching credit in any asset ledger: the asset removed cannot be identified from the books — ` +
+            `verify against the disposal proof`,
+        );
+      }
+    }
+  }
+
+  return { purchases, disposals, vehicleCosts: [], vendors, findings };
 }
