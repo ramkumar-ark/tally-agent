@@ -6,6 +6,10 @@ import {
   type AssetRow, type BlockResult, type DepAnalyzeInput, type DepCtx, type ExcludedRow, type MovementRow,
 } from "./depreciation.js";
 import { EMPTY_DEP_OPERATOR, parseDepOperatorFile } from "./depreciation-file.js";
+import {
+  analyzeFaRegister, COST_TYPES, COST_VOCAB,
+  type FaCtx, type FaDisposalRow, type FaPurchaseRow, type FaResult,
+} from "./fa-register.js";
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
@@ -180,6 +184,34 @@ export interface DepReviewResult {
   calls: number;
 }
 
+/** One masked FA finding: same shape as the engine's, pseudonyms in. */
+export interface FaMaskedFinding {
+  id: string;
+  check: string;
+  severity: Severity;
+  ledger: string;
+  block: string;
+  amount: number;
+  detail: string;
+}
+
+/** tb_fixed_asset_register's result: every ledger/block name and voucher id masked; de-masking happens in the writer only (R-P-5). */
+export interface FaReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  counts: Record<Severity, number>;
+  purchases: FaPurchaseRow[];
+  disposals: FaDisposalRow[];
+  vehicleCosts: FaResult["vehicleCosts"];
+  vendors: FaResult["vendors"];
+  findings: FaMaskedFinding[];
+  /** Whole-company asset ledgers found in the block tree. */
+  assetLedgers: number;
+  /** Downstream calls the three fetches consumed. */
+  calls: number;
+}
+
 export interface ReviewResult {
   asOnDate: string;
   company?: string;
@@ -294,6 +326,13 @@ export interface Session {
     toDate: string,
     operatorText: string | null,
   ): Promise<DepReviewResult>;
+  /**
+   * Fixed asset purchase & sale register (audit artifact). Fetches EVERY
+   * asset ledger month-chunked — an audit register must be complete, so
+   * there is deliberately no residual skip — plus the incidental-pattern
+   * expense ledgers and the disposal-signal ledgers.
+   */
+  faRegister(company: string | undefined, fromDate: string, toDate: string): Promise<FaReviewResult>;
   vault: Vault;
 }
 
@@ -1030,6 +1069,150 @@ export function createSession(
     return maskedResult;
   }
 
+  /**
+   * Fixed asset purchase & sale register: groups + opening/closing trial
+   * balances + every asset ledger + the incidental-pattern expense ledgers
+   * + the disposal-signal ledgers, all month-chunked (D5). The masked view
+   * (D11) registers real ledger names against finding ids BEFORE masking,
+   * and voucher numbers travel as Doc N aliases.
+   */
+  async function faRegister(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+  ): Promise<FaReviewResult> {
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+    const [groups, opening, closing] = await Promise.all([
+      d.groups(company),
+      d.trialBalance(company, dayBefore(fromDate)),
+      d.trialBalance(company, toDate),
+    ]);
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const r of closing.rows) groupOfLedger.set(canonicalKey(r.name), r.parent);
+    const rootOf = (group: string): string => c.rootOf(group) ?? "";
+    const groupOf = (ledger: string): string => groupOfLedger.get(canonicalKey(ledger)) ?? "";
+
+    const assetLedgers = closing.rows
+      .filter((r) => canon(rootOf(r.parent)) === "fixed assets")
+      .map((r) => r.name);
+    const assetKeySet = new Set(assetLedgers.map(canonicalKey));
+    const incidentalExpenseLedgers = closing.rows
+      .filter(
+        (r) =>
+          DEP_EXPENSE_ROOTS.has(canon(rootOf(r.parent))) &&
+          COST_TYPES.some((t) => COST_VOCAB[t].test(r.name)),
+      )
+      .map((r) => r.name);
+    const disposalLedgers = closing.rows
+      .filter((r) => DEP_DISPOSAL_ROOTS.has(canon(rootOf(r.parent))) && DEP_DISPOSAL_NAME.test(r.name))
+      .map((r) => r.name);
+
+    const [assetPass, incidentalPass, disposalPass] = await Promise.all([
+      fetchLedgerRows(company, assetLedgers, fromDate, toDate),
+      fetchLedgerRows(company, incidentalExpenseLedgers, fromDate, toDate),
+      fetchLedgerRows(company, disposalLedgers, fromDate, toDate),
+    ]);
+
+    const openingOf = new Map(opening.rows.map((r) => [canonicalKey(r.name), r.balance] as const));
+    const closingOf = new Map(closing.rows.map((r) => [canonicalKey(r.name), r.balance] as const));
+    const ctx: FaCtx = {
+      fromDate,
+      toDate,
+      groupOf,
+      groupRootOf: (ledger) => rootOf(groupOf(ledger)),
+      isAssetLedger: (ledger) => assetKeySet.has(canonicalKey(ledger)),
+      bookOpening: (ledger) => openingOf.get(canonicalKey(ledger)) ?? 0,
+      closingBalanceOf: (ledger) => closingOf.get(canonicalKey(ledger)) ?? 0,
+    };
+    const result = analyzeFaRegister(
+      {
+        ledgerRows: assetLedgers.map((l) => ({ ledger: l, rows: rowsByLedger(assetPass.rows, l) })),
+        incidentalExpenseRows: incidentalExpenseLedgers.map((l) => ({
+          ledger: l,
+          rows: rowsByLedger(incidentalPass.rows, l),
+        })),
+        disposalSignals: disposalLedgers.map((l) => ({
+          ledger: l,
+          rows: rowsByLedger(disposalPass.rows, l),
+        })),
+      },
+      ctx,
+    );
+
+    // Masked view: registry first — the REAL ledger name against each finding
+    // id BEFORE anything is masked (R-MCP-4 drill-down) — then masking. Voucher
+    // numbers and references become Doc N aliases: scrubSecrets would otherwise
+    // eat the 12+-digit voucher ids Tally mints, and the workbook needs them back.
+    const maskFaLedger = (ledger: string): string =>
+      ledger ? maskLedgerName(ledger, groupOf(ledger), c, vault) : "";
+    const maskGroup = (group: string): string =>
+      group && c.maskPolicy(group) === "mask"
+        ? vault.pseudonym(group, "other" satisfies GroupRole)
+        : scrubSecrets(group);
+    const maskDoc = (s: string): string => (s ? vault.pseudonym(s, "doc" satisfies GroupRole) : "");
+
+    const findings: FaMaskedFinding[] = result.findings.map((f) => {
+      realLedgerByFinding.set(f.id, f.ledger);
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        ledger: maskFaLedger(f.ledger),
+        block: maskGroup(f.block),
+        amount: f.amount,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+      };
+    });
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of findings) counts[f.severity] += 1;
+
+    return {
+      company,
+      fromDate,
+      toDate,
+      counts,
+      purchases: result.purchases.map((p) => ({
+        ...p,
+        asset: maskFaLedger(p.asset),
+        block: maskGroup(p.block),
+        counterparty: maskFaLedger(p.counterparty),
+        vendor: maskFaLedger(p.vendor),
+        voucherNumber: maskDoc(p.voucherNumber),
+        reference: maskDoc(p.reference),
+        incidentalSummary: scrubSecrets(p.incidentalSummary),
+      })),
+      disposals: result.disposals.map((x) => ({
+        ...x,
+        asset: maskFaLedger(x.asset),
+        block: maskGroup(x.block),
+        counterparty: maskFaLedger(x.counterparty),
+        voucherNumber: maskDoc(x.voucherNumber),
+        reference: maskDoc(x.reference),
+        note: scrubSecrets(maskKnownNames(x.note, vault)),
+      })),
+      vehicleCosts: result.vehicleCosts.map((v) => ({
+        ...v,
+        vehicle: maskFaLedger(v.vehicle),
+        block: maskGroup(v.block),
+        where: maskFaLedger(v.where),
+        voucherNumber: maskDoc(v.voucherNumber),
+        reference: maskDoc(v.reference),
+      })),
+      vendors: result.vendors.map((v) => ({
+        ...v,
+        vendor: maskFaLedger(v.vendor),
+        vehicles: v.vehicles.map(maskFaLedger),
+      })),
+      findings,
+      assetLedgers: assetLedgers.length,
+      calls: assetPass.calls + incidentalPass.calls + disposalPass.calls,
+    };
+  }
+
   function maskGstFinding(
     f: {
       id: string;
@@ -1123,5 +1306,6 @@ export function createSession(
 
     tdsReview,
     depreciationReview,
+    faRegister,
   };
 }

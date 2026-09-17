@@ -490,3 +490,100 @@ describe("depreciationReview two-pass fetch", () => {
     expect(text).toMatch(/Ledger \d+/);
   });
 });
+
+/**
+ * FA register fixture. One vehicle acquisition ("Tipper Lorry 3" under
+ * Block 30%) from "Safe Motors", its insurance expensed in "Insurance
+ * Expenses", an unmatched disposal signal, and an unsettled vendor.
+ */
+function faFixture() {
+  return createSession(
+    Object.assign(fakeDownstream(), {
+      groups: async () => [
+        { name: "Fixed Assets", parent: "\u0004 Primary" },
+        { name: "Block 30%", parent: "Fixed Assets" },
+        { name: "Indirect Expenses", parent: "\u0004 Primary" },
+        { name: "Sales Accounts", parent: "\u0004 Primary" },
+        { name: "Sundry Creditors", parent: "\u0004 Primary" },
+        { name: "Bank Accounts", parent: "\u0004 Primary" },
+        { name: "Sundry Debtors", parent: "\u0004 Primary" },
+      ],
+      trialBalance: async (_c: unknown, asOn: string) => ({
+        totalDebit: 0, totalCredit: 0,
+        rows: asOn === "20250331"
+          ? [
+              { name: "Tipper Lorry 3", parent: "Block 30%", balance: 0 },
+              { name: "Safe Motors", parent: "Sundry Creditors", balance: 0 },
+              { name: "Insurance Expenses", parent: "Indirect Expenses", balance: 0 },
+              { name: "Sale of Fixed Asset A/c", parent: "Sales Accounts", balance: 0 },
+            ]
+          : [
+              { name: "Tipper Lorry 3", parent: "Block 30%", balance: 2046000 },
+              { name: "Safe Motors", parent: "Sundry Creditors", balance: -150000 },
+              { name: "Insurance Expenses", parent: "Indirect Expenses", balance: 46000 },
+              { name: "Sale of Fixed Asset A/c", parent: "Sales Accounts", balance: 96000 },
+            ],
+      }),
+      ledgerVoucherRows: async (_c: unknown, ledger: string, from: string, to: string) => {
+        const inRange = (date: string): boolean => from <= date && date <= to;
+        if (ledger === "Tipper Lorry 3" && inRange("20250710")) {
+          return {
+            rows: [{
+              date: "20250710", voucherType: "Purc", voucherNumber: "PUR/918020045566771", reference: "INV-2201",
+              counterparty: "Safe Motors", amount: 2000000, matchStatus: "matched", tax: null,
+            }],
+            dropped: 0,
+          };
+        }
+        if (ledger === "Insurance Expenses" && inRange("20250712")) {
+          return {
+            rows: [{
+              date: "20250712", voucherType: "Payt", voucherNumber: "PY/550", reference: "",
+              counterparty: "HDFC Bank", amount: 46000, matchStatus: "matched", tax: null,
+            }],
+            dropped: 0,
+          };
+        }
+        if (ledger === "Sale of Fixed Asset A/c" && inRange("20251005")) {
+          return {
+            rows: [{
+              date: "20251005", voucherType: "Sale", voucherNumber: "SL/14", reference: "",
+              counterparty: "Buyer of Plant", amount: -96000, matchStatus: "matched", tax: null,
+            }],
+            dropped: 0,
+          };
+        }
+        return { rows: [], dropped: 0 };
+      },
+    } as never),
+    EMPTY_OVERRIDES,
+    EMPTY_WRONG_GROUP,
+  );
+}
+
+describe("faRegister (session)", () => {
+  it("returns a masked register: Doc aliases for voucher ids, pseudonyms for parties, no digit runs", async () => {
+    const s = faFixture();
+    const r = await s.faRegister(undefined, "20250401", "20260331");
+    expect(r.purchases).toHaveLength(1);
+    expect(r.purchases[0].voucherNumber).toMatch(/^Doc \d+$/);
+    expect(r.purchases[0].reference).toMatch(/^Doc \d+$/);
+    expect(s.vault.resolve(r.purchases[0].voucherNumber)).toBe("PUR/918020045566771");
+    const checks = r.findings.map((f) => f.check).sort();
+    expect(checks).toEqual([
+      "fa_disposal_unmatched", "fa_vehicle_incidental_expensed",
+      "fa_vehicle_incidental_missing", "fa_vehicle_vendor_unsettled",
+    ]);
+    for (const f of r.findings) {
+      expect(f.detail).not.toMatch(/\d{6,}/);
+    }
+    const text = JSON.stringify(r);
+    expect(text).not.toContain("Tipper Lorry 3");
+    expect(text).not.toContain("Safe Motors");
+    expect(text).not.toContain("HDFC Bank");
+    expect(text).not.toContain("PUR/918020045566771");
+    expect(r.vendors).toHaveLength(1);
+    expect(r.vendors[0].vendor).toMatch(/^Creditor \d+$/);
+    expect(r.vendors[0].squaredOff).toBe(false);
+  });
+});
