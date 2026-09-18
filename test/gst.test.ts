@@ -223,7 +223,6 @@ const ret = (over: Partial<ReturnRow> = {}): ReturnRow => ({
   cess: 0,
   ...over,
 });
-import type { ReturnRow } from "../src/returns.js";
 
 describe("gstMismatch", () => {
   const booksOf = (cgst: number): GstBooks =>

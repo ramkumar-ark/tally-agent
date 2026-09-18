@@ -1,7 +1,6 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { appendAudit, findingsCsv, findingsSheet, depreciationSheets, writeLedgerReport, writeReport, writeTdsReport, writeVaultDump, writeWorkbook, writeDepreciationReport, fixedAssetSheets, writeFaRegisterReport } from "../src/report.js";
