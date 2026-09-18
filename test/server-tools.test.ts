@@ -439,9 +439,10 @@ describe("tb_depreciation_review", () => {
       },
       (entry) => audits.push(entry),
     );
-    expect(audits.some((e) => e.tool === "tb_depreciation_review")).toBe(true);
+    const entry = audits.find((e) => e.tool === "tb_depreciation_review");
+    expect(entry).toBeDefined();
+    expect((entry?.args as { depreciationFilePath?: unknown } | undefined)?.depreciationFilePath).toBe(depPath);
     const logged = JSON.stringify(audits);
-    expect(logged).toContain(depPath);
     expect(logged).not.toContain("openingWdv");
   });
 
