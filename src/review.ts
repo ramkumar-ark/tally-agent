@@ -155,6 +155,22 @@ export interface TdsReviewResult {
     interestIi: number;
   };
   ledgerCalls: number;
+  /** Where the per-ledger rows came from. "live" is ~640 Ledger-Vouchers calls. */
+  booksSource: "live" | "daybook-file";
+  /**
+   * Present only for "daybook-file". Counts and dates only: the file's SHA-256
+   * digest and byte size go to the audit log and the written report, never
+   * here — a 64-character hex digest can hold a 6-digit run and scrubDigits
+   * would mangle it into a different-looking digest.
+   */
+  books?: {
+    vouchers: number;
+    ledgersProjected: number;
+    fromObserved: string;
+    toObserved: string;
+    rejected: number;
+    mastersSource: "live" | "bundle" | "absent";
+  };
 }
 
 /** One masked depreciation finding: the engine shape with ledger+block pseudonymed. */
@@ -958,6 +974,23 @@ export function createSession(
         interestIi: analysis.totals.interestIi,
       },
       ledgerCalls: fetched.calls,
+      booksSource: dayBook ? "daybook-file" : "live",
+      ...(dayBook
+        ? {
+            books: {
+              vouchers: dayBook.vouchers.length,
+              ledgersProjected: fetchSet.length,
+              fromObserved: dayBook.observedFrom,
+              toObserved: dayBook.observedTo,
+              rejected: dayBook.rejected,
+              mastersSource: mastersUnavailable.value
+                ? dayBook.ledgers
+                  ? ("bundle" as const)
+                  : ("absent" as const)
+                : ("live" as const),
+            },
+          }
+        : {}),
     };
     lastTds = result;
     return result;

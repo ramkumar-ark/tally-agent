@@ -337,6 +337,57 @@ describe("tdsReview with a day book", () => {
 });
 
 /**
+ * Live-path harness: Ledger-Vouchers rows are fetched from a fake downstream
+ * (positive = debit after the gateway flip), as at review time with no day book.
+ */
+const runTdsReviewLive = async (o: { fromDate: string; toDate: string }) => {
+  const s = createSession(
+    Object.assign(fakeDownstream({ tally_get_ledgers: REVIEW_MASTERS }), {
+      ledgerVoucherRows: async (_c: unknown, _ledger: string) => ({
+        rows: [{
+          date: "20250510", voucherType: "Purchase", voucherNumber: "PU/1",
+          reference: "", counterparty: "Sample Builders LLP",
+          amount: 25000, matchStatus: "unknown", tax: null,
+        }],
+        dropped: 0,
+      } as never),
+    } as never),
+    EMPTY_OVERRIDES,
+    EMPTY_WRONG_GROUP,
+  );
+  const result = await s.tdsReview(
+    undefined, o.fromDate, o.toDate, o.toDate, REVIEW_OPERATOR, "json", undefined,
+  );
+  return { result };
+};
+
+describe("books provenance", () => {
+  it("says live when no day book is given", async () => {
+    const { result } = await runTdsReviewLive({ fromDate: "20250401", toDate: "20250531" });
+    expect(result.booksSource).toBe("live");
+    expect(result.books).toBeUndefined();
+  });
+
+  it("says daybook-file and reports counts and observed span", async () => {
+    const { result } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
+    expect(result.booksSource).toBe("daybook-file");
+    expect(result.books).toMatchObject({
+      vouchers: 3,
+      rejected: 0,
+      fromObserved: "20250510",
+      toObserved: "20260115",
+      mastersSource: "live",
+    });
+  });
+
+  it("never carries a digest or a byte count in the result", async () => {
+    const { result } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
+    expect(JSON.stringify(result)).not.toMatch(/[0-9a-f]{32}/);
+    expect(Object.keys(result.books ?? {})).not.toContain("bytes");
+  });
+});
+
+/**
  * Real operator export layout (structure verified against a genuine
  * tallymessage export; all names, figures and numbers below are invented).
  * Six facts the reader must handle: tallymessage envelope, string amounts,
