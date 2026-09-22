@@ -12,6 +12,8 @@ export interface GatewayConfig {
   dumpVault: boolean;
   /** Rule 119A(c) ₹100 interest treatment, default on; TALLY_AGENT_TDS_ROUND100_OFF=1 disables. */
   tdsRound100: boolean;
+  /** Largest operator day-book file accepted, in bytes. TALLY_AGENT_DAYBOOK_MAX_MB, default 64. */
+  dayBookMaxBytes: number;
 }
 
 /**
@@ -56,6 +58,21 @@ function parseDownstreamTimeoutMs(raw: string | undefined): number | undefined {
   return Number(trimmed);
 }
 
+/**
+ * Largest operator day-book file accepted, in whole megabytes. Absent means
+ * the 64 MB default; anything present must be a positive whole number.
+ */
+function parseDayBookMaxBytes(raw: string | undefined): number {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return 64 * 1024 * 1024;
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) <= 0 || !Number.isSafeInteger(Number(trimmed))) {
+    throw new Error(
+      `TALLY_AGENT_DAYBOOK_MAX_MB must be a positive whole number of megabytes, got "${raw}"`,
+    );
+  }
+  return Number(trimmed) * 1024 * 1024;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   const downstreamCommand = env.TALLY_MCP_COMMAND;
   if (!downstreamCommand) {
@@ -77,5 +94,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     downstreamTimeoutMs: parseDownstreamTimeoutMs(env.TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS),
     dumpVault: env.TALLY_AGENT_DUMP_VAULT === "1",
     tdsRound100: env.TALLY_AGENT_TDS_ROUND100_OFF !== "1",
+    dayBookMaxBytes: parseDayBookMaxBytes(env.TALLY_AGENT_DAYBOOK_MAX_MB),
   };
 }

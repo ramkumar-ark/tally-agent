@@ -49,3 +49,164 @@ export function projectLedgerRows(
     rows: byLedger.get(canonicalKey(l)) ?? [],
   }));
 }
+
+import { readFile, stat } from "node:fs/promises";
+import { parseVoucherRows } from "./downstream.js";
+import { displayDate } from "./format.js";
+
+export interface DayBookInput {
+  shape: "array" | "envelope" | "bundle";
+  vouchers: VoucherRow[];
+  /** Declared by a bundle; null for the shapes that cannot say. */
+  company: string | null;
+  groups: { name: string; parent: string }[] | null;
+  ledgers: { name: string; parent: string }[] | null;
+  /** YYYYMMDD, from the vouchers themselves. */
+  observedFrom: string;
+  observedTo: string;
+  /** Array entries that did not become a voucher. Counted, never guessed at. */
+  rejected: number;
+  /** "YYYY-MM" keys inside the review period with no voucher at all. */
+  emptyMonths: string[];
+}
+
+const monthKey = (yyyymmdd: string): string =>
+  `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}`;
+
+function monthsBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  let y = Number(from.slice(0, 4));
+  let m = Number(from.slice(4, 6));
+  const endY = Number(to.slice(0, 4));
+  const endM = Number(to.slice(4, 6));
+  while (y < endY || (y === endY && m <= endM)) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Read an operator day-book export. Every refusal here happens before any
+ * downstream call, so a bad file costs nothing and leaves no partial artifact.
+ * No message ever quotes a value out of the file: positions, counts and month
+ * labels only.
+ */
+export function readDayBook(
+  text: string,
+  opts: { company?: string; fromDate: string; toDate: string },
+): DayBookInput {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(
+      "the day-book file is not valid JSON — it is most likely truncated or was copied while Tally was still writing it; re-export it and try again",
+    );
+  }
+
+  let shape: DayBookInput["shape"];
+  let rawRows: unknown[];
+  let envelope: Record<string, unknown> = {};
+  if (Array.isArray(parsed)) {
+    shape = "array";
+    rawRows = parsed;
+  } else if (
+    parsed &&
+    typeof parsed === "object" &&
+    Array.isArray((parsed as Record<string, unknown>).vouchers)
+  ) {
+    envelope = parsed as Record<string, unknown>;
+    shape =
+      envelope.tallyAgentExport !== undefined || envelope.company !== undefined
+        ? "bundle"
+        : "envelope";
+    rawRows = envelope.vouchers as unknown[];
+  } else {
+    throw new Error(
+      "the day-book file must be a JSON array of vouchers, an object with a `vouchers` array, or a tally-agent export bundle",
+    );
+  }
+
+  const company =
+    typeof envelope.company === "string" && envelope.company.trim()
+      ? envelope.company.trim()
+      : null;
+  if (company && opts.company && canonicalKey(company) !== canonicalKey(opts.company)) {
+    throw new Error(
+      "the day-book file was exported from a different company than the one under review; re-export it from the company under review",
+    );
+  }
+
+  const vouchers = parseVoucherRows(rawRows, null, null);
+  const rejected = rawRows.length - vouchers.length;
+
+  const dates = vouchers
+    .map((v) => String(v.date))
+    .filter((d) => /^\d{8}$/.test(d))
+    .sort();
+  const observedFrom = dates[0] ?? "";
+  const observedTo = dates[dates.length - 1] ?? "";
+
+  const declaredFrom = typeof envelope.fromDate === "string" ? envelope.fromDate : null;
+  const declaredTo = typeof envelope.toDate === "string" ? envelope.toDate : null;
+  if (declaredFrom && declaredTo) {
+    if (declaredFrom > opts.fromDate || declaredTo < opts.toDate) {
+      throw new Error(
+        `the day-book file declares a period that does not cover the review period ${displayDate(opts.fromDate)} to ${displayDate(opts.toDate)}; export the whole period or narrow the review`,
+      );
+    }
+    if (observedFrom && (observedFrom < declaredFrom || observedTo > declaredTo)) {
+      throw new Error(
+        "the day-book file misdescribes itself: it holds vouchers outside the period it declares; re-export it",
+      );
+    }
+  }
+
+  const present = new Set(dates.map(monthKey));
+  const wanted = monthsBetween(opts.fromDate, opts.toDate);
+  const emptyMonths = wanted.filter((m) => !present.has(m));
+  if (emptyMonths.length === wanted.length) {
+    throw new Error(
+      `the day-book file holds no voucher in any month of ${displayDate(opts.fromDate)} to ${displayDate(opts.toDate)}; it is for a different period`,
+    );
+  }
+
+  const masters = (
+    key: "groups" | "ledgers",
+  ): { name: string; parent: string }[] | null => {
+    const v = envelope[key];
+    if (!Array.isArray(v)) return null;
+    return v
+      .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+      .map((x) => ({ name: String(x.name ?? ""), parent: String(x.parent ?? "") }))
+      .filter((x) => x.name !== "");
+  };
+
+  return {
+    shape,
+    vouchers,
+    company,
+    groups: masters("groups"),
+    ledgers: masters("ledgers"),
+    observedFrom,
+    observedTo,
+    rejected,
+    emptyMonths,
+  };
+}
+
+/** Read the file, refusing anything over the configured ceiling before it is read into memory. */
+export async function loadDayBookText(path: string, maxBytes: number): Promise<string> {
+  const info = await stat(path);
+  if (info.size > maxBytes) {
+    throw new Error(
+      `the day-book file is too large for this gateway (limit ${Math.round(maxBytes / (1024 * 1024))} MB); export it one quarter at a time, or raise TALLY_AGENT_DAYBOOK_MAX_MB`,
+    );
+  }
+  return readFile(path, "utf8");
+}

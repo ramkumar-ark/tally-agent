@@ -107,3 +107,122 @@ describe("projectLedgerRows", () => {
     expect(out[0].rows[0].voucherNumber).toBe("12");
   });
 });
+
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadDayBookText, readDayBook } from "../src/tds-daybook.js";
+
+const raw = (date: number, num: string) => ({
+  date: String(date),
+  voucherType: "Purchase",
+  voucherNumber: num,
+  partyLedgerName: "Acme Contracting",
+  entries: [
+    { LEDGERNAME: "Site Expenses", AMOUNT: -25000 },
+    { LEDGERNAME: "Acme Contracting", AMOUNT: 25000 },
+  ],
+});
+
+const year = [raw(20250510, "PU/1"), raw(20250612, "PU/2"), raw(20260115, "PU/3")];
+const opts = { fromDate: "20250401", toDate: "20260331" };
+
+describe("readDayBook", () => {
+  it("accepts a bare array and reports its shape", () => {
+    const out = readDayBook(JSON.stringify(year), opts);
+    expect(out.shape).toBe("array");
+    expect(out.vouchers).toHaveLength(3);
+    expect(out.company).toBeNull();
+  });
+
+  it("accepts a { vouchers } envelope", () => {
+    const out = readDayBook(JSON.stringify({ vouchers: year }), opts);
+    expect(out.shape).toBe("envelope");
+    expect(out.vouchers).toHaveLength(3);
+  });
+
+  it("accepts a bundle and carries its masters through", () => {
+    const bundle = {
+      tallyAgentExport: 1,
+      company: "Example Infra",
+      fromDate: "20250401",
+      toDate: "20260331",
+      groups: [{ name: "Indirect Expenses", parent: "" }],
+      ledgers: [{ name: "Site Expenses", parent: "Indirect Expenses" }],
+      vouchers: year,
+    };
+    const out = readDayBook(JSON.stringify(bundle), { ...opts, company: "example infra" });
+    expect(out.shape).toBe("bundle");
+    expect(out.ledgers).toEqual([{ name: "Site Expenses", parent: "Indirect Expenses" }]);
+  });
+
+  it("refuses a truncated file without mentioning its contents", () => {
+    const truncated = JSON.stringify(year).slice(0, 120);
+    expect(() => readDayBook(truncated, opts)).toThrow(/not valid JSON.*truncated/i);
+  });
+
+  it("refuses a file that is not an array, an envelope or a bundle", () => {
+    expect(() => readDayBook(JSON.stringify({ rows: year }), opts)).toThrow(/day-book file/i);
+  });
+
+  it("refuses a bundle naming a different company, without echoing either name", () => {
+    const bundle = { tallyAgentExport: 1, company: "Other Entity", vouchers: year };
+    try {
+      readDayBook(JSON.stringify(bundle), { ...opts, company: "Example Infra" });
+      throw new Error("expected a refusal");
+    } catch (e) {
+      const m = (e as Error).message;
+      expect(m).toMatch(/different company/i);
+      expect(m).not.toMatch(/Other Entity|Example Infra/);
+    }
+  });
+
+  it("refuses a bundle whose declared period does not cover the review", () => {
+    const bundle = { tallyAgentExport: 1, fromDate: "20250401", toDate: "20250930", vouchers: year };
+    expect(() => readDayBook(JSON.stringify(bundle), opts)).toThrow(/does not cover/i);
+  });
+
+  it("refuses a bundle holding vouchers outside its own declared period", () => {
+    const bundle = { tallyAgentExport: 1, fromDate: "20250401", toDate: "20260331", vouchers: [raw(20240510, "PU/9")] };
+    expect(() => readDayBook(JSON.stringify(bundle), opts)).toThrow(/misdescribes itself/i);
+  });
+
+  it("refuses a file with no voucher in any month of the review period", () => {
+    const wrongYear = [raw(20240510, "PU/1")];
+    expect(() => readDayBook(JSON.stringify(wrongYear), opts)).toThrow(/no voucher in any month/i);
+  });
+
+  it("reports interior empty months rather than refusing", () => {
+    const out = readDayBook(JSON.stringify(year), opts);
+    expect(out.emptyMonths).toContain("2025-07");
+    expect(out.emptyMonths).not.toContain("2025-05");
+  });
+
+  it("counts rows it could not turn into a voucher", () => {
+    const out = readDayBook(JSON.stringify([...year, { nonsense: true }]), opts);
+    expect(out.rejected).toBe(1);
+    expect(out.vouchers).toHaveLength(3);
+  });
+
+  it("records the observed span", () => {
+    const out = readDayBook(JSON.stringify(year), opts);
+    expect(out.observedFrom).toBe("20250510");
+    expect(out.observedTo).toBe("20260115");
+  });
+});
+
+describe("loadDayBookText", () => {
+  it("refuses a file over the ceiling and says what to do instead", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "daybook-"));
+    const path = join(dir, "big.json");
+    await writeFile(path, "x".repeat(2048), "utf8");
+    await expect(loadDayBookText(path, 1024)).rejects.toThrow(/too large.*quarter/i);
+  });
+
+  it("reads a file inside the ceiling", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "daybook-"));
+    const path = join(dir, "ok.json");
+    await writeFile(path, "[]", "utf8");
+    await expect(loadDayBookText(path, 1024)).resolves.toBe("[]");
+  });
+});
