@@ -198,10 +198,104 @@ describe("writeTdsReport", () => {
     const isched = readFileSync(paths.interestCsvPath, "utf8");
     expect(md).toContain("Sample Builders LLP");
     expect(csv).toContain("Sample Builders LLP");
-    expect(csv.split("\n")[0]).toBe("id,check,severity,deductee,group,section,amount,detail");
-    expect(isched.split("\n")[0]).toBe("id,check,deductee,section,kind,amount,from,to,basis");
+    expect(csv.split("\n")[0]).toBe("id,check,severity,deductee,group,section,amount,detail,books_source");
+    expect(isched.split("\n")[0]).toBe("id,check,deductee,section,kind,amount,from,to,basis,books_source");
     expect(isched).toContain("Sample Builders LLP");
     expect(isched).toContain("1% of 2 month(s)");
+  });
+
+  it("prepends the operator day-book provenance block ahead of the narrative", async () => {
+    const vault = createVault();
+    const dir = mkdtempSync(join(tmpdir(), "tally-agent-tds-"));
+    const paths = await writeTdsReport({
+      reportDir: dir,
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      markdown: "# Narrative\n\nbody text",
+      findings: [],
+      vault,
+      booksSource: "daybook-file",
+      books: {
+        vouchers: 14356,
+        ledgersProjected: 612,
+        fromObserved: "20250403",
+        toObserved: "20260330",
+        rejected: 0,
+        mastersSource: "live",
+        bytes: 27_400_000,
+        digest: "a".repeat(64),
+      },
+    });
+    const md = readFileSync(paths.markdownPath, "utf8");
+    expect(md).toContain("Books source: operator day-book file");
+    expect(md).toContain("14,356 vouchers");
+    expect(md).toContain("03-Apr-2025 to 30-Mar-2026");
+    expect(md).toContain("26.1 MB");
+    expect(md).toMatch(/a{64}/);
+    expect(md.indexOf("Books source")).toBeLessThan(md.indexOf("# Narrative"));
+  });
+
+  it("states the live books source when no day-book file was used", async () => {
+    const vault = createVault();
+    const dir = mkdtempSync(join(tmpdir(), "tally-agent-tds-"));
+    const paths = await writeTdsReport({
+      reportDir: dir,
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      markdown: "# Narrative",
+      findings: [],
+      vault,
+      booksSource: "live",
+    });
+    const md = readFileSync(paths.markdownPath, "utf8");
+    expect(md).toContain("Books source: live Tally");
+  });
+
+  it("carries the books source as a trailing column in both CSVs", async () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Sample Builders LLP", "creditor");
+    const findings: TdsMaskedFinding[] = [
+      {
+        id: "TDS-001-1",
+        check: "tds_not_deducted",
+        severity: "critical",
+        deductee: alias,
+        group: "Sundry Creditors",
+        section: "194C",
+        amount: 5000,
+        detail: "detail text",
+        schedule: [{ kind: "i", amount: 100, from: "20250510", to: "20250628", basis: "1% of 2 month(s)" }],
+      },
+    ];
+    const dir = mkdtempSync(join(tmpdir(), "tally-agent-tds-"));
+    const paths = await writeTdsReport({
+      reportDir: dir,
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      markdown: "# Narrative",
+      findings,
+      vault,
+      booksSource: "daybook-file",
+      books: {
+        vouchers: 10,
+        ledgersProjected: 2,
+        fromObserved: "20250403",
+        toObserved: "20250415",
+        rejected: 0,
+        mastersSource: "live",
+        bytes: 1_000_000,
+        digest: "b".repeat(64),
+      },
+    });
+    const csv = readFileSync(paths.csvPath, "utf8");
+    const isched = readFileSync(paths.interestCsvPath, "utf8");
+    expect(csv.split("\n")[0]).toBe("id,check,severity,deductee,group,section,amount,detail,books_source");
+    expect(csv.split("\n")[1]).toMatch(/,daybook-file$/);
+    expect(isched.split("\n")[0]).toBe("id,check,deductee,section,kind,amount,from,to,basis,books_source");
+    expect(isched.split("\n")[1]).toMatch(/,daybook-file$/);
   });
 });
 

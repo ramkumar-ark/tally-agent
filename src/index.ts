@@ -411,6 +411,7 @@ export function registerTools(
         markdown: args.markdown,
         findings: lastTds.findings,
         vault: session.vault,
+        booksSource: lastTds.booksSource,
       });
       await audit(
         "tb_write_tds_report",

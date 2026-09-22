@@ -2,7 +2,7 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
-import { money, displayDate } from "./format.js";
+import { count, money, displayDate } from "./format.js";
 import { round2, type BlockResult, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
 import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding } from "./review.js";
 import type { Vault } from "./vault.js";
@@ -149,6 +149,17 @@ export async function writeTdsReport(opts: {
   markdown: string;
   findings: TdsCsvFinding[];
   vault: Vault;
+  booksSource: "live" | "daybook-file";
+  books?: {
+    vouchers: number;
+    ledgersProjected: number;
+    fromObserved: string;
+    toObserved: string;
+    rejected: number;
+    mastersSource: string;
+    bytes: number;
+    digest: string;
+  };
 }): Promise<{ markdownPath: string; csvPath: string; interestCsvPath: string }> {
   await mkdir(opts.reportDir, { recursive: true });
   const stem = `${slug(opts.company)}-${opts.fromDate}-${opts.toDate}`;
@@ -156,7 +167,22 @@ export async function writeTdsReport(opts: {
   const csvPath = join(opts.reportDir, `tds-findings-${stem}.csv`);
   const interestCsvPath = join(opts.reportDir, `tds-interest-schedule-${stem}.csv`);
 
-  const header = "id,check,severity,deductee,group,section,amount,detail";
+  const provenance = () =>
+    opts.booksSource === "live" || !opts.books
+      ? "> **Books source: live Tally** — per-ledger Ledger-Vouchers reports read at review time.\n\n"
+      : [
+          "> **Books source: operator day-book file** — this review did not read the books from Tally.",
+          `> ${count(opts.books.vouchers)} vouchers over ${count(opts.books.ledgersProjected)} ledgers, ${displayDate(
+            opts.books.fromObserved,
+          )} to ${displayDate(opts.books.toObserved)}, ${
+            opts.books.rejected === 0 ? "no rows rejected" : `${count(opts.books.rejected)} rows rejected`
+          }.`,
+          `> Ledger masters: ${opts.books.mastersSource}. File: ${(opts.books.bytes / 1_048_576).toFixed(1)} MB, sha256 ${opts.books.digest}.`,
+          "",
+          "",
+        ].join("\n");
+
+  const header = "id,check,severity,deductee,group,section,amount,detail,books_source";
   const rows = opts.findings.map((f) =>
     [
       f.id,
@@ -167,6 +193,7 @@ export async function writeTdsReport(opts: {
       f.section ?? "",
       f.amount.toFixed(2),
       demaskText(f.detail, opts.vault),
+      opts.booksSource,
     ]
       .map(csvField)
       .join(","),
@@ -186,6 +213,7 @@ export async function writeTdsReport(opts: {
           s.from,
           s.to,
           demaskText(s.basis, opts.vault),
+          opts.booksSource,
         ]
           .map(csvField)
           .join(","),
@@ -193,11 +221,11 @@ export async function writeTdsReport(opts: {
     }
   }
 
-  await writeFile(markdownPath, demaskText(opts.markdown, opts.vault), "utf8");
+  await writeFile(markdownPath, provenance() + demaskText(opts.markdown, opts.vault), "utf8");
   await writeFile(csvPath, [header, ...rows].join("\n"), "utf8");
   await writeFile(
     interestCsvPath,
-    ["id,check,deductee,section,kind,amount,from,to,basis", ...schedule].join("\n"),
+    ["id,check,deductee,section,kind,amount,from,to,basis,books_source", ...schedule].join("\n"),
     "utf8",
   );
 
