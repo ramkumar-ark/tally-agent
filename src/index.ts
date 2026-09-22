@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { join, resolve } from "node:path";
@@ -30,6 +31,7 @@ import {
   type Session,
   type TdsReviewResult,
 } from "./review.js";
+import { loadDayBookText, readDayBook, type DayBookInput } from "./tds-daybook.js";
 
 export type ToolRegistrar = (
   name: string,
@@ -39,7 +41,8 @@ export type ToolRegistrar = (
 ) => void;
 
 export type ToolsConfig = Pick<GatewayConfig, "reportDir"> &
-  Partial<Pick<GatewayConfig, "defaultCompany" | "dumpVault">>;
+  Partial<Pick<GatewayConfig, "defaultCompany" | "dumpVault">> &
+  Pick<GatewayConfig, "dayBookMaxBytes">;
 
 /**
  * True when this module is the file node was asked to run.
@@ -91,6 +94,7 @@ export function registerTools(
   let last: ReviewResult | undefined;
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
+  let lastDayBookMeta: { bytes: number; digest: string } | undefined;
   let lastDep: DepReviewResult | undefined;
   let lastFa: FaReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
@@ -342,7 +346,8 @@ export function registerTools(
       "template from tb_write_tds_template (templatePath, recommended; optionally plus a Winman " +
       "TDS-summary export as winmanPath) or the legacy JSON (tdsFilePath). Never paste their " +
       "rows into chat, they carry tax identities. Deductees appear as pseudonyms" +
-      " ('Creditor 3', 'TaxId 2'); drill in with tb_ledger_activity using the finding id.",
+      " ('Creditor 3', 'TaxId 2'); drill in with tb_ledger_activity using the finding id." +
+      " Pass dayBookPath to run the books from an operator export instead of reading ~640 per-ledger reports from Tally; the result and the written report both say which was used.",
     {
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
@@ -350,6 +355,14 @@ export function registerTools(
       templatePath: z.string().optional().describe("Path to the filled tds-operator-template-*.xlsx; its contents are read inside the gateway"),
       tdsFilePath: z.string().optional().describe("Path to the legacy operator TDS JSON file; templatePath takes precedence, give exactly one"),
       winmanPath: z.string().optional().describe("Optional path to the Winman TDS-summary xlsx export (challans and deductee PANs)"),
+      dayBookPath: z
+        .string()
+        .optional()
+        .describe(
+          "Optional PATH to an operator day-book JSON export for the whole period. When given, the " +
+            "books are read from that file instead of from Tally (no per-ledger calls). Pass the path — " +
+            "never paste the file's rows into chat.",
+        ),
       company: z.string().optional(),
     },
     async (args) => {
@@ -363,6 +376,21 @@ export function registerTools(
         ? parseOperatorTemplate(await readFile(args.templatePath))
         : parseOperatorFile(await readFile(args.tdsFilePath!, "utf8"));
       const winman = args.winmanPath ? parseWinmanExport(await readFile(args.winmanPath)) : undefined;
+      let dayBook: DayBookInput | undefined;
+      let dayBookMeta: { bytes: number; digest: string } | undefined;
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        dayBook = readDayBook(text, {
+          company: args.company ?? cfg.defaultCompany,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        });
+        dayBookMeta = {
+          bytes: Buffer.byteLength(text, "utf8"),
+          digest: createHash("sha256").update(text).digest("hex"),
+        };
+      }
+      lastDayBookMeta = dayBookMeta;
       const result = await session.tdsReview(
         args.company ?? cfg.defaultCompany,
         args.fromDate,
@@ -371,6 +399,7 @@ export function registerTools(
         operator,
         args.templatePath ? "template" : "json",
         winman,
+        dayBook,
       );
       lastTds = result;
       // The files' PATHS are audited, never their contents (the M2 returnsPath contract).
@@ -383,6 +412,7 @@ export function registerTools(
           ...(args.templatePath ? { templatePath: args.templatePath } : {}),
           ...(args.tdsFilePath ? { tdsFilePath: args.tdsFilePath } : {}),
           ...(args.winmanPath ? { winmanPath: args.winmanPath } : {}),
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
         },
         result.findings.length,
         maskedCountTds(result.findings),
@@ -412,6 +442,9 @@ export function registerTools(
         findings: lastTds.findings,
         vault: session.vault,
         booksSource: lastTds.booksSource,
+        ...(lastTds.books && lastDayBookMeta
+          ? { books: { ...lastTds.books, ...lastDayBookMeta } }
+          : {}),
       });
       await audit(
         "tb_write_tds_report",

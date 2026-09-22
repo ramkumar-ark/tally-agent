@@ -6,6 +6,7 @@ import { registerTools, type ToolRegistrar } from "../src/index.js";
 import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
+import { EMPTY_TDS_OPERATOR } from "../src/tds-file.js";
 
 function harness() {
   const tools = new Map<string, (args: any) => Promise<string>>();
@@ -393,6 +394,55 @@ describe("tb_tds_review channel selection", () => {
   it("still accepts the legacy JSON channel path", async () => {
     await expect(call({ fromDate: "20250401", toDate: "20260331", asOnDate: "20260331", tdsFilePath: "/nonexistent.json" }))
       .rejects.not.toThrow(/templatePath or tdsFilePath/);
+  });
+});
+
+describe("tb_tds_review dayBookPath as a path-only channel", () => {
+  const masters = JSON.stringify([
+    { name: "Acme Contracting", parent: "Sundry Creditors" },
+    { name: "Site Expenses", parent: "Indirect Expenses" },
+  ]);
+  const buildHarness = () => {
+    const tools = new Map<string, (args: any) => Promise<string>>();
+    const registrar: ToolRegistrar = (name, _d, _s, handler) => tools.set(name, handler);
+    const cfg = { reportDir: mkdtempSync(join(tmpdir(), "tally-agent-")) };
+    registerTools(registrar, createSession(fakeDownstream({ tally_get_ledgers: masters }), EMPTY_OVERRIDES), cfg, "20260331T100000Z");
+    return { tools, cfg };
+  };
+
+  it("runs the books from the file and audits the path, never its contents", async () => {
+    const h = buildHarness();
+    const dir = mkdtempSync(join(tmpdir(), "daybook-"));
+    const operatorPath = join(dir, "operator.json");
+    const dayBookPath = join(dir, "daybook.json");
+    writeFileSync(operatorPath, JSON.stringify(EMPTY_TDS_OPERATOR), "utf8");
+    writeFileSync(
+      dayBookPath,
+      JSON.stringify([
+        {
+          date: "20250510", voucherType: "Purchase", voucherNumber: "PU/0012",
+          partyLedgerName: "Acme Contracting",
+          entries: [
+            { LEDGERNAME: "Site Expenses", AMOUNT: -25000 },
+            { LEDGERNAME: "Acme Contracting", AMOUNT: 25000 },
+          ],
+        },
+      ]),
+      "utf8",
+    );
+    const out = await h.tools.get("tb_tds_review")!({
+      fromDate: "20250401", toDate: "20260331", asOnDate: "20260331",
+      tdsFilePath: operatorPath, dayBookPath,
+    });
+    const result = JSON.parse(out) as { booksSource?: string; ledgerCalls?: number };
+    expect(result.booksSource).toBe("daybook-file");
+    expect(result.ledgerCalls).toBe(0);
+
+    const auditPath = join(h.cfg.reportDir, "session-20260331T100000Z.jsonl");
+    const auditText = readFileSync(auditPath, "utf8");
+    expect(auditText).toContain(dayBookPath);
+    expect(auditText).not.toContain("Acme Contracting");
+    expect(auditText).not.toContain("LEDGERNAME");
   });
 });
 
