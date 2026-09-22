@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import type { VoucherRow } from "../src/downstream.js";
 import { counterpartyOf, projectLedgerRows } from "../src/tds-daybook.js";
 
@@ -330,5 +333,167 @@ describe("tdsReview with a day book", () => {
       expect(f.deductee).toBe("(day-book file)");
       expect(f.detail).not.toMatch(/Acme|Site Repairs|Sample Builders/);
     }
+  });
+});
+
+/**
+ * Real operator export layout (structure verified against a genuine
+ * tallymessage export; all names, figures and numbers below are invented).
+ * Six facts the reader must handle: tallymessage envelope, string amounts,
+ * raw Tally sign (negative = debit, flipped once in parseVoucherRows),
+ * item-invoice lines reaching into allinventoryentries accounting
+ * allocations, custom voucher types passed through as named, and UTF-16 LE
+ * BOM encoding.
+ */
+describe("readDayBook: real operator export layout", () => {
+  const rawEntry = (ledgername: string, amount: number | string) => ({
+    ledgername,
+    amount: String(amount),
+    ispartyledger: false,
+  });
+
+  /** An accounting-entries voucher: every line in allledgerentries. */
+  const ledgerRaw = (over: Record<string, unknown>) => ({
+    date: "20250620",
+    vouchertypename: "Journal",
+    vouchernumber: "JV-0001",
+    partyledgername: "Ravi Steel Traders",
+    allledgerentries: [
+      { ...rawEntry("Steel Fabrication Charges", -23500), ispartyledger: false },
+      { ...rawEntry("Ravi Steel Traders", 23500), ispartyledger: true },
+    ],
+    ledgerentries: [],
+    allinventoryentries: [],
+    ...over,
+  });
+
+  /** An item-invoice voucher: expense lines live in the item allocations. */
+  const itemRaw = (over: Record<string, unknown>) => ({
+    date: "20250705",
+    vouchertypename: "Purchase",
+    vouchernumber: "P/L-0102",
+    partyledgername: "Ravi Steel Traders",
+    allledgerentries: [],
+    ledgerentries: [
+      { ...rawEntry("Ravi Steel Traders", 29500), ispartyledger: true },
+      { ...rawEntry("CGST", 1300), ispartyledger: false },
+      { ...rawEntry("SGST", 1300), ispartyledger: false },
+    ],
+    allinventoryentries: [
+      {
+        stockitemname: "TMT Bars",
+        accountingallocations: [
+          { ...rawEntry("Steel Fabrication Charges", -23500), ispartyledger: false },
+        ],
+      },
+      {
+        stockitemname: "Rounds",
+        accountingallocations: [{ ...rawEntry("Freight Inward", -1700), ispartyledger: false }],
+      },
+    ],
+    ...over,
+  });
+
+  it("reads the tallymessage envelope shape", () => {
+    const db = readDayBook(JSON.stringify({ tallymessage: [ledgerRaw({})] }), {
+      fromDate: "20250401",
+      toDate: "20260331",
+    });
+    expect(db.shape).toBe("tallymessage");
+    expect(db.vouchers.length).toBe(1);
+    expect(db.rejected).toBe(0);
+  });
+
+  it("counts rows it cannot make into vouchers as rejected", () => {
+    const db = readDayBook(
+      JSON.stringify({ tallymessage: [ledgerRaw({}), { junk: "row" }] }),
+      { fromDate: "20250401", toDate: "20260331" },
+    );
+    expect(db.vouchers.length).toBe(1);
+    expect(db.rejected).toBe(1);
+  });
+
+  it("reads string amounts on raw Tally sign (negative = debit, shown positive = debit downstream)", async () => {
+    const db = readDayBook(JSON.stringify({ tallymessage: [ledgerRaw({})] }), {
+      fromDate: "20250401",
+      toDate: "20260331",
+    });
+    const booking = db.vouchers[0].entries.find(
+      (e) => e.ledger === "Steel Fabrication Charges",
+    );
+    expect(booking?.amount).toBe(23500);
+    const out = projectLedgerRows(db.vouchers, ["Steel Fabrication Charges"]);
+    expect(out[0].rows[0]).toMatchObject({
+      counterparty: "Ravi Steel Traders",
+      amount: 23500,
+      matchStatus: "unknown",
+    });
+  });
+
+  it("collects expense lines from inventory accounting allocations on an item-invoice voucher", async () => {
+    const db = readDayBook(
+      JSON.stringify({ tallymessage: [ledgerRaw({}), itemRaw({})] }),
+      { fromDate: "20250401", toDate: "20260331" },
+    );
+    const out = projectLedgerRows(db.vouchers, ["Steel Fabrication Charges"]);
+    // both voucher shapes land a booking row on the expense ledger
+    expect(out[0].rows.map((r) => r.amount)).toEqual([23500, 23500]);
+    // and the party + tax lines from ledgerentries still project
+    const party = projectLedgerRows(db.vouchers, ["Ravi Steel Traders"]);
+    expect(party[0].rows.map((r) => r.amount)).toEqual([-23500, -29500]);
+  });
+
+  it("passes custom voucher types through as named", () => {
+    const db = readDayBook(
+      JSON.stringify({
+        tallymessage: [ledgerRaw({ vouchertypename: "RENTAL INVOICE", vouchernumber: "R-77" })],
+      }),
+      { fromDate: "20250401", toDate: "20260331" },
+    );
+    expect(db.vouchers[0].voucherType).toBe("RENTAL INVOICE");
+    expect(db.vouchers[0].voucherNumber).toBe("R-77");
+  });
+
+  it("deletes cancelled and deleted vouchers like the live day book does", () => {
+    const db = readDayBook(
+      JSON.stringify({
+        tallymessage: [ledgerRaw({}), ledgerRaw({ iscancelled: true }), ledgerRaw({ isdeleted: true })],
+      }),
+      { fromDate: "20250401", toDate: "20260331" },
+    );
+    const out = projectLedgerRows(db.vouchers, ["Steel Fabrication Charges"]);
+    expect(out[0].rows.length).toBe(1);
+  });
+});
+
+const invoiceRaw = () => ({
+  date: "20250620",
+  vouchertypename: "Purchase",
+  vouchernumber: "P/L-0001",
+  partyledgername: "Ravi Steel Traders",
+  allledgerentries: [
+    { ledgername: "Steel Fabrication Charges", amount: "-23500" },
+    { ledgername: "Ravi Steel Traders", amount: "23500" },
+  ],
+  ledgerentries: [],
+  allinventoryentries: [],
+});
+
+describe("loadDayBookText: encodings", () => {
+  it("decodes UTF-16 LE with BOM", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "db-"));
+    const file = join(dir, "daybook.json");
+    await writeFile(file, `\uFEFF${JSON.stringify({ tallymessage: [invoiceRaw()] })}`, "utf16le");
+    const text = await loadDayBookText(file, 1024 * 1024);
+    const db = readDayBook(text, { fromDate: "20250401", toDate: "20260331" });
+    expect(db.shape).toBe("tallymessage");
+  });
+
+  it("still reads plain UTF-8 without a BOM", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "db-"));
+    const file = join(dir, "daybook.json");
+    await writeFile(file, JSON.stringify({ tallymessage: [invoiceRaw()] }), "utf8");
+    const text = await loadDayBookText(file, 1024 * 1024);
+    expect(readDayBook(text, { fromDate: "20250401", toDate: "20260331" }).shape).toBe("tallymessage");
   });
 });

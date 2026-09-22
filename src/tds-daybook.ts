@@ -54,8 +54,11 @@ import { readFile, stat } from "node:fs/promises";
 import { parseVoucherRows } from "./downstream.js";
 import { displayDate } from "./format.js";
 
+const truthy = (v: unknown): boolean =>
+  v === true || /^(yes|true|1)$/i.test(String(v ?? "").trim());
+
 export interface DayBookInput {
-  shape: "array" | "envelope" | "bundle";
+  shape: "array" | "envelope" | "bundle" | "tallymessage";
   vouchers: VoucherRow[];
   /** Declared by a bundle; null for the shapes that cannot say. */
   company: string | null;
@@ -72,6 +75,43 @@ export interface DayBookInput {
 
 const monthKey = (yyyymmdd: string): string =>
   `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}`;
+
+/**
+ * Tally's own day-book export carries its lines across three containers:
+ * `allledgerentries` and `ledgerentries` (one OR the other per voucher) hold
+ * the accounting lines, but on item invoices the expense lines live only in
+ * `allinventoryentries[].accountingallocations[]` — reading the ledger lists
+ * alone drops the debit on most purchases, exactly the rows the TDS booking
+ * rule needs. Amounts are strings on raw Tally sign (negative = debit); the
+ * flip happens in parseVoucherRows, once, as at the gateway. The
+ * isdeemedpositive flag is NOT trusted: entries exist on which it disagrees
+ * with the amount's sign, and the sign is authoritative.
+ */
+function normalizeTallyRow(v: unknown): unknown {
+  if (typeof v !== "object" || v === null) return v;
+  const row = v as Record<string, unknown>;
+  const sweep = (list: unknown): unknown[] =>
+    Array.isArray(list) ? list : typeof list === "object" && list !== null ? [list] : [];
+  return {
+    date: row.date,
+    voucherType: row.vouchertypename,
+    voucherNumber: row.vouchernumber,
+    partyLedgerName: row.partyledgername,
+    isCancelled: truthy(row.iscancelled) || truthy(row.isdeleted),
+    entries: [
+      ...sweep(row.allledgerentries),
+      ...sweep(row.ledgerentries),
+      ...sweep(row.allinventoryentries).flatMap((item) =>
+        sweep((item as Record<string, unknown>)?.accountingallocations),
+      ),
+    ]
+      .filter((e) => e && typeof e === "object")
+      .map((e) => {
+        const er = e as Record<string, unknown>;
+        return { LEDGERNAME: er.ledgername, AMOUNT: er.amount };
+      }),
+  };
+}
 
 function monthsBetween(from: string, to: string): string[] {
   const out: string[] = [];
@@ -118,6 +158,15 @@ export function readDayBook(
   } else if (
     parsed &&
     typeof parsed === "object" &&
+    Array.isArray((parsed as Record<string, unknown>).tallymessage)
+  ) {
+    envelope = parsed as Record<string, unknown>;
+    shape = "tallymessage";
+    const raw = envelope.tallymessage as unknown[];
+    rawRows = raw.map(normalizeTallyRow);
+  } else if (
+    parsed &&
+    typeof parsed === "object" &&
     Array.isArray((parsed as Record<string, unknown>).vouchers)
   ) {
     envelope = parsed as Record<string, unknown>;
@@ -128,7 +177,7 @@ export function readDayBook(
     rawRows = envelope.vouchers as unknown[];
   } else {
     throw new Error(
-      "the day-book file must be a JSON array of vouchers, an object with a `vouchers` array, or a tally-agent export bundle",
+      "the day-book file must be a JSON array of vouchers, an object with a `vouchers` array, a tallymessage export, or a tally-agent export bundle",
     );
   }
 
@@ -200,7 +249,8 @@ export function readDayBook(
   };
 }
 
-/** Read the file, refusing anything over the configured ceiling before it is read into memory. */
+/** Read the file, refusing anything over the configured ceiling before it is read into memory.
+ *  A real Tally export can arrive UTF-16 LE with a BOM; decode by what the bytes say. */
 export async function loadDayBookText(path: string, maxBytes: number): Promise<string> {
   const info = await stat(path);
   if (info.size > maxBytes) {
@@ -208,5 +258,12 @@ export async function loadDayBookText(path: string, maxBytes: number): Promise<s
       `the day-book file is too large for this gateway (limit ${Math.round(maxBytes / (1024 * 1024))} MB); export it one quarter at a time, or raise TALLY_AGENT_DAYBOOK_MAX_MB`,
     );
   }
-  return readFile(path, "utf8");
+  const buf = await readFile(path);
+  if (buf[0] === 0xff && buf[1] === 0xfe) {
+    return buf.subarray(2).toString("utf16le");
+  }
+  if (buf[0] === 0xfe && buf[1] === 0xff) {
+    return Buffer.from(buf.subarray(2)).swap16().toString("utf16le");
+  }
+  return buf.toString("utf8");
 }
