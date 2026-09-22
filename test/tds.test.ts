@@ -77,8 +77,21 @@ const run = (
 const ofCheck = (out: Run, check: string) => out.findings.filter((f) => f.check === check);
 
 describe("TDS event model", () => {
-  it("recognizes a credit booking on an expense ledger to a TDS party", () => {
-    const out = run(tdsCtx(), [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+  it("recognizes a booking from a normal Dr Expense / Cr Party voucher (expense debit, party credit)", () => {
+    const out = run(
+      tdsCtx(),
+      [],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
+      [{ ledger: partyA, rows: [{ ...row("20250510", "P/12", -250000, expenseLedger), voucherType: "Purchase" }] }],
+    );
+    expect(out.events.bookings).toEqual([
+      expect.objectContaining({ date: "20250510", party: partyA, gross: 250000, ledger: expenseLedger }),
+    ]);
+    expect(out.events.payments).toEqual([]);
+  });
+
+  it("recognizes a debit booking on an expense ledger to a TDS party", () => {
+    const out = run(tdsCtx(), [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.bookings).toEqual([
       expect.objectContaining({ date: "20250510", party: partyA, gross: 250000, ledger: expenseLedger }),
     ]);
@@ -96,7 +109,7 @@ describe("TDS event model", () => {
   it("recognizes a deduction: a duty-ledger credit with the deductee counterparty", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.deductions).toEqual([
       expect.objectContaining({ date: "20250628", party: partyA, tax: 5000, section: "194C" }),
     ]);
@@ -105,7 +118,7 @@ describe("TDS event model", () => {
   it("recognizes a deposit: a duty-ledger debit matched to the deduction by date and amount", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.deposits).toEqual([
       expect.objectContaining({ date: "20250815", tax: 5000, section: "194C" }),
     ]);
@@ -116,21 +129,21 @@ describe("TDS event model", () => {
     // Named voucher on both sides: joined despite the date gap.
     const joined = run(ctx, [
       { ledger: dutyLedger, rows: [row("20250731", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(joined.events.deductions).toEqual([
       expect.objectContaining({ joinedTo: "P/12", date: "20250731" }),
     ]);
     // Unnamed on one side: same month and counterparty, within 30 days.
     const fallback = run(ctx, [
       { ledger: dutyLedger, rows: [row("20250528", "ADV-9", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(fallback.events.deductions).toEqual([
       expect.objectContaining({ joinedTo: "P/12", date: "20250528" }),
     ]);
     // Counterparty mismatch never joins.
     const noGuess = run(ctx, [
       { ledger: dutyLedger, rows: [row("20250528", "ADV-9", -5000, partyB)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     // The duty credit itself exists unjoined; it is the JOIN that never happens.
     expect(noGuess.events.deductions.every((d) => !d.booking)).toBe(true);
   });
@@ -141,7 +154,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     const out = run(
       tdsCtx(),
       [],
-      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
     );
     const found = ofCheck(out, "tds_not_deducted");
     expect(found).toEqual([
@@ -160,7 +173,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     const out = run(
       tdsCtx(),
       [],
-      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -20000, partyA)] }],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 20000, partyA)] }],
     );
     expect(out.findings).toEqual([]);
   });
@@ -172,7 +185,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
       tdsCtx(),
       [],
       [{ ledger: expenseLedger, rows: [1, 2, 3, 4, 5, 6].map((i) =>
-        row(`2025051${i}`, `P/${i}`, -20000, partyA)) }],
+        row(`2025051${i}`, `P/${i}`, 20000, partyA)) }],
     );
     const found = ofCheck(out, "tds_not_deducted");
     expect(found).toHaveLength(6);
@@ -192,7 +205,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     const out = run(
       cfg,
       [],
-      [{ ledger: "Purchase - Domestic", rows: [row("20250510", "G/1", -goods, partyA)] }],
+      [{ ledger: "Purchase - Domestic", rows: [row("20250510", "G/1", goods, partyA)] }],
     );
     const found = ofCheck(out, "tds_not_deducted");
     // 0.1% of only the 10,00,000 beyond the crossing = 1,000.
@@ -203,7 +216,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     const pan = tdsCtx(stdOperator, {
       entityOf: (p) => (p === partyA ? "P" : "F"),
     });
-    const rows = row("20250510", "P/12", -250000, partyA);
+    const rows = row("20250510", "P/12", 250000, partyA);
     const out = run(pan, [], [{ ledger: expenseLedger, rows: [rows] }]);
     expect(ofCheck(out, "tds_not_deducted")[0].amount).toBe(2500); // 1%
   });
@@ -213,7 +226,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
       panKeyOf: () => null,
       entityOf: () => null,
     });
-    const out = run(pan, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const out = run(pan, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_not_deducted")[0];
     expect(found.amount).toBe(50000); // 20%
     expect(found.detail.toUpperCase()).toContain("206AA");
@@ -223,7 +236,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     const pan = tdsCtx(stdOperator, {
       certificateRateOf: () => 0.015, // the s.197 certificate rate
     });
-    const out = run(pan, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const out = run(pan, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_not_deducted")[0].amount).toBe(3750); // 1.5% (the operator rate)
   });
 });
@@ -233,7 +246,7 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
     // The worked example: booked 10-May (deductible), deducted 28-Jun (deduction).
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_late_deducted");
     expect(found).toEqual([
       expect.objectContaining({ amount: 5000, severity: "warning" }),
@@ -247,7 +260,7 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
   it("the deductible date pulls earlier when an advance precedes the booking", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }], [
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }], [
       { ledger: partyA, rows: [{ ...row("20250420", "P/03", 250000, "Bank Alpha"), voucherType: "Advance" }] },
     ]);
     const found = ofCheck(out, "tds_late_deducted");
@@ -257,14 +270,14 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
   it("a deduction on time emits no tds_late_deducted", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250510", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_late_deducted")).toEqual([]);
   });
 
   it("flags a short deduction below the law figure, tolerance of one rupee", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250510", "P/12", -4998, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_short_deducted");
     expect(found).toEqual([
       expect.objectContaining({ amount: 2, severity: "critical" }),
@@ -274,15 +287,15 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
   it("keeps a joined deduction within the one-rupee tolerance out of the findings", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250510", "P/12", -4999.5, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_short_deducted")).toEqual([]);
   });
 
   it("orders findings by date, then deductee, then section ", () => {
     const out = run(tdsCtx(), [],
       [{ ledger: expenseLedger, rows: [
-        row("20250610", "PB/1", -250000, partyB),
-        row("20250510", "P/12", -250000, partyA),
+        row("20250610", "PB/1", 250000, partyB),
+        row("20250510", "P/12", 250000, partyA),
       ] }]);
     const ids = out.findings.filter((f) => f.check === "tds_not_deducted");
     expect(ids[0].deductee).toBe(partyA);
@@ -301,7 +314,7 @@ describe("TDS deposit checks", () => {
   it("flags a deduction with no deposit debit by asOnDate as tds_not_deposited", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_not_deposited");
     expect(found).toEqual([
       expect.objectContaining({ amount: 5000, severity: "critical", section: "194C" }),
@@ -312,7 +325,7 @@ describe("TDS deposit checks", () => {
     // Worked example: deducted 28-Jun, deposited 15-Aug: 1.5% x 3 = 225.
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_late_deposit");
     expect(found).toEqual([
       expect.objectContaining({ amount: 5000, severity: "warning" }),
@@ -325,7 +338,7 @@ describe("TDS deposit checks", () => {
   it("keeps a deposit on time (7th next month) out of the findings", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250707", "P/12", 5000, "Bank Alpha")] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_late_deposit")).toEqual([]);
     expect(ofCheck(out, "tds_not_deposited")).toEqual([]);
   });
@@ -337,7 +350,7 @@ describe("TDS deposit checks", () => {
     };
     const out = run(tdsCtx(op), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250702", "P/12", 5000, "Bank Alpha")] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_deposit_mismatch").length).toBe(1);
   });
 });
@@ -350,7 +363,7 @@ describe("TDS statement checks (234E, 271H)", () => {
     };
     const out = run(tdsCtx(op), [
       { ledger: dutyLedger, rows: [row("20250510", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_statement_late");
     expect(found).toHaveLength(1);
     // Q1 due 31-Jul; filed 20-Aug = 20 days; 200 x 20 = 4,000, under the 5,000 cap.
@@ -362,7 +375,7 @@ describe("TDS statement checks (234E, 271H)", () => {
   it("flags a past quarter with no statement row at all", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250510", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_statement_missing")).toHaveLength(1);
   });
 
@@ -373,7 +386,7 @@ describe("TDS statement checks (234E, 271H)", () => {
     };
     const out = run(tdsCtx(op), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_statement_late")).toEqual([]);
     expect(ofCheck(out, "tds_statement_late")).toEqual([]);
   });
@@ -382,7 +395,7 @@ describe("TDS statement checks (234E, 271H)", () => {
 describe("TDS exposure findings and the s.201(1) proviso", () => {
   it("states the s.40(a)(ia) exposure at 30% of the tax not deducted, review-only", () => {
     const out = run(tdsCtx(), [],
-      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_exposure_40a_ia");
     expect(found).toEqual([
       expect.objectContaining({ amount: 1500, severity: "review" }), // 30% of 5,000
@@ -391,7 +404,7 @@ describe("TDS exposure findings and the s.201(1) proviso", () => {
 
   it("states the s.271C exposure equal to the tax not deducted, review-only", () => {
     const out = run(tdsCtx(), [],
-      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_exposure_271c")[0].amount).toBe(5000);
   });
 
@@ -403,7 +416,7 @@ describe("TDS exposure findings and the s.201(1) proviso", () => {
     const ctx = tdsCtx(op, { deducteeFiledReturn: (p) => p === partyA });
     const out = run(ctx, [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const late = ofCheck(out, "tds_late_deducted");
     expect(late).toHaveLength(1);
     expect(late[0].schedule).toBeUndefined();
@@ -416,7 +429,7 @@ describe("TDS master-gap findings", () => {
     const ctx = tdsCtx(stdOperator, { panKeyOf: () => null, entityOf: () => null });
     const out = run(ctx, [], [{
       ledger: expenseLedger,
-      rows: [row("20250510", "P/12", -250000, partyA), row("20250610", "P/13", -100000, partyA)],
+      rows: [row("20250510", "P/12", 250000, partyA), row("20250610", "P/13", 100000, partyA)],
     }]);
     const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.deductee === partyA);
     expect(gaps).toEqual([expect.objectContaining({ severity: "review", section: "194C" })]);
@@ -427,7 +440,7 @@ describe("TDS master-gap findings", () => {
     const ctx = tdsCtx(stdOperator, {
       deducteeTypeOf: (p) => (p === partyA ? "Unknown" : ""),
     });
-    const out = run(ctx, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const out = run(ctx, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.deductee === partyA && f.detail.includes("deductee type"));
     expect(gaps).toEqual([expect.objectContaining({ severity: "review" })]);
   });
@@ -447,7 +460,7 @@ describe("TDS master-gap findings", () => {
   it("names the cross month and the whole-year or 194Q-only rule as tds_threshold_crossed", () => {
     const out = run(tdsCtx(), [], [{
       ledger: expenseLedger,
-      rows: [1, 2, 3, 4, 5, 6].map((i) => row(`2025051${i}`, `P/${i}`, -20000, partyA)),
+      rows: [1, 2, 3, 4, 5, 6].map((i) => row(`2025051${i}`, `P/${i}`, 20000, partyA)),
     }]);
     const found = ofCheck(out, "tds_threshold_crossed");
     expect(found).toHaveLength(1);
@@ -459,14 +472,14 @@ describe("TDS master-gap findings", () => {
 describe("section attribution from the expense ledger (revision 2)", () => {
   it("(a) exactly one mapped section wins", () => {
     const out = run(tdsCtx(), [],
-      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.bookings[0]).toMatchObject({ section: "194C", candidates: [] });
   });
 
   it("(b) zero mappings: no liability, no interest, no section total, one tds_section_unknown", () => {
     const op: OperatorFile = { ...EMPTY_TDS_OPERATOR };
     const out = run(tdsCtx(op), [], [
-      { ledger: "Unmapped Ledger", rows: [row("20250510", "P/12", -250000, partyA)] },
+      { ledger: "Unmapped Ledger", rows: [row("20250510", "P/12", 250000, partyA)] },
     ]);
     expect(out.events.bookings[0]).toMatchObject({ section: null, candidates: [] });
     const unknown = ofCheck(out, "tds_section_unknown");
@@ -487,7 +500,7 @@ describe("section attribution from the expense ledger (revision 2)", () => {
       ],
     };
     const out = run(tdsCtx(op), [], [
-      { ledger: "Rent - Mixed", rows: [row("20250510", "P/12", -250000, partyA)] }],
+      { ledger: "Rent - Mixed", rows: [row("20250510", "P/12", 250000, partyA)] }],
     []);
     expect(out.events.bookings[0]).toMatchObject({ section: null, candidates: ["194-I(a)", "194-I(b)"] });
     const unknown = ofCheck(out, "tds_section_unknown");
@@ -503,14 +516,14 @@ describe("section attribution from the expense ledger (revision 2)", () => {
       sections: [{ ledger: expenseLedger, section: "194C" }],
     };
     // Compile-level guarantee: ctx.resolveSection takes one argument.
-    const out = run(tdsCtx(op), [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const out = run(tdsCtx(op), [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.bookings[0].section).toBe("194C");
   });
 
   it("(e) payments carry no section and still feed the earlier-of timing rule", () => {
     const out = run(tdsCtx(), [
       { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
-    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }], [
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }], [
       { ledger: partyA, rows: [{ ...row("20250420", "P/03", 250000, "Bank Alpha") }] },
     ]);
     const late = ofCheck(out, "tds_late_deducted");
@@ -534,7 +547,7 @@ describe("section attribution from the expense ledger (revision 2)", () => {
   });
 
   it("(g) a party marked N produces no events and no findings where Y would", () => {
-    const rows = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }];
+    const rows = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
     const duty = [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] }];
     // Session-level filters model tdsParties; at the engine the party is
     // simply absent from tdsParties when the operator says N.
@@ -550,7 +563,7 @@ describe("section attribution from the expense ledger (revision 2)", () => {
 
   it("(i) 194C(6) suppresses on a 194C booking with no section on the party row", () => {
     const ctx = tdsCtx(stdOperator, { transporterDeclared: (p) => p === partyA });
-    const out = run(ctx, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", -250000, partyA)] }]);
+    const out = run(ctx, [], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.totals.notDeducted).toBe(0);
     const found = ofCheck(out, "tds_not_deducted");
     expect(found).toHaveLength(1);
@@ -568,8 +581,8 @@ describe("section attribution from the expense ledger (revision 2)", () => {
       ],
     };
     const out = run(tdsCtx(op), [], [
-      { ledger: "Site Repairs Contract", rows: [row("20250510", "P/12", -250000, partyA)] },
-      { ledger: "Rent - Office", rows: [row("20250610", "P/13", -100000, partyA)] },
+      { ledger: "Site Repairs Contract", rows: [row("20250510", "P/12", 250000, partyA)] },
+      { ledger: "Rent - Office", rows: [row("20250610", "P/13", 100000, partyA)] },
     ]);
     const bySection = out.totals.bySection;
     expect(bySection.find((t) => t.section === "194C")?.gross).toBe(250000);

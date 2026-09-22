@@ -303,7 +303,7 @@ describe("tdsReview", () => {
     const s = mkSession({
       "site repairs contract": {
         source: "ledger-vouchers-report",
-        vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/12", amount: "-250000.00", partyLedgerName: "Sample Builders LLP" }],
+        vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/12", amount: "250000.00", partyLedgerName: "Sample Builders LLP" }],
       },
       "sample builders llp": { source: "ledger-vouchers-report", vouchers: [] },
       "tds contractors": { source: "ledger-vouchers-report", vouchers: [] },

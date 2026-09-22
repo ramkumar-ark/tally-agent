@@ -158,6 +158,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   Day Book; the operator TDS file is the TDS `returnsPath` channel (path only,
   TANs never echoed); the FY-25-26-only law table lives in `src/tds-law.ts`
   with its C1–C8 confirm flags.
+- **Booking-side sign (fixed 2026-09-22):** a TDS booking is a **debit** row
+  on an expense/purchase ledger (a normal `Dr Expense / Cr Party` voucher);
+  downstream of the gateway positive = debit, so `extractEvents`
+  (`src/tds.ts`) tests `r.amount > 0` and takes `gross: r.amount`. The
+  predicate previously tested a **credit** (`r.amount < -ZERO`), which never
+  fires for a normal booking, so every real booking was invisible (0 findings);
+  the unit fixtures encoded the same inversion until corrected with the fix.
+  Never re-flip the sign: the gateway flip is `src/downstream.ts`'s `ledgers()`
+  and `ledgerVoucherRows`' `sideSign`, once, at the boundary (R-MCP-5). The
+  payment (party-ledger debit) and duty (credit = deduction, debit = deposit)
+  predicates were already correct and are unchanged.
 
 ## Sharp edges found implementing depreciation (2026-09-16)
 

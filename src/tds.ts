@@ -149,10 +149,11 @@ export function rateFor(
 /**
  * Extract the raw event streams. Duty-ledger sections come from the operator
  * map (`dutySectionOf`); a duty ledger with no mapped section is skipped —
- * never guessed. A booking is a credit row on an expense/purchase ledger
- * whose counterparty is a TDS party; a payment or advance is a debit row on
- * the TDS party's own ledger; a duty credit names the deduction, a duty
- * debit the deposit.
+ * never guessed. A booking is a **debit** row on an expense/purchase ledger
+ * whose counterparty is a TDS party (a normal `Dr Expense / Cr Party`
+ * voucher; downstream of the gateway positive = debit, R-MCP-5);
+ * a payment or advance is a debit row on the TDS party's own ledger; a duty
+ * credit names the deduction, a duty debit the deposit.
  */
 export function extractEvents(
   dutyLedgers: TdsLedgerRows[],
@@ -168,13 +169,13 @@ export function extractEvents(
 
   for (const { ledger, rows } of expenseLedgers) {
     for (const r of byDate(rows)) {
-      if (r.amount < -ZERO && tdsParties.has(r.counterparty)) {
+      if (isDebit(r) && tdsParties.has(r.counterparty)) {
         const res = ctx.resolveSection(ledger);
         bookings.push({
           date: r.date,
           voucherNumber: r.voucherNumber,
           party: r.counterparty,
-          gross: -r.amount,
+          gross: r.amount,
           ledger,
           section: res.section,
           candidates: res.candidates,

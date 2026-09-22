@@ -79,7 +79,7 @@ describe("no secret leaves the gateway", () => {
             date: "2025-05-10",
             voucherType: "Purchase",
             voucherNumber: "P/12",
-            amount: "-250000.00",
+            amount: "250000.00",
             partyLedgerName: "Sample Builders LLP",
           },
         ],

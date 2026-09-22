@@ -160,8 +160,13 @@ interest (i), not the finding.
 
 ## 7. Engine semantics (`src/tds.ts`, pure)
 
-- **Event model:** an *expense booking* = a Cr row on a flagged
-  expense/purchase ledger whose counterparty is a TDS-flagged party; a
+- **Event model:** an *expense booking* = a **Dr** row on a flagged
+  expense/purchase ledger whose counterparty is a TDS-flagged party — the
+  expense side of a normal `Dr Expense / Cr Party` voucher; downstream of the
+  gateway positive = debit (R-MCP-5), so the engine's predicate is
+  `amount > 0` *(amended 2026-09-22: the predicate matched a **Cr** row,
+  which never fires for a normal booking and made every real booking
+  invisible — see `AGENTS.md`)*; a
   *payment/advance* = a Dr row on that party ledger; a *deduction* = a Cr row
   to a duty ledger joined to the booking by `voucherNumber` when both
   periodic reports name it, else date+counterparty in the same month (±30
