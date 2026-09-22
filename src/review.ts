@@ -13,11 +13,15 @@ import {
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
-import { dayBefore } from "./format.js";
+import { count, dayBefore, displayMonth } from "./format.js";
 import { canonicalKey } from "./key.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
-import { parseDayBook, type OperatorFile, type WinmanFacts } from "./tds-file.js";
+import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
+import { projectLedgerRows, type DayBookInput } from "./tds-daybook.js";
+
+/** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
+const DAY_BOOK_FINDING = "(day-book file)";
 import { analyzeTds, type TdsCtx, type TdsEvents, type TdsLedgerRows } from "./tds.js";
 import { createVault, type Vault } from "./vault.js";
 import {
@@ -30,6 +34,7 @@ import {
   type Severity,
   type Side,
   type TbRow,
+  type TdsCheckId,
   type TdsFinding,
   tdsFindingId,
   type WrongGroupConfig,
@@ -312,7 +317,7 @@ export interface Session {
     operator: OperatorFile,
     operatorSource: "json" | "template",
     winman?: WinmanFacts,
-    fullCheckText?: string,
+    dayBook?: DayBookInput,
   ): Promise<TdsReviewResult>;
   /**
    * Income Tax Act depreciation per block of assets (design of record:
@@ -621,7 +626,7 @@ export function createSession(
     operatorIn: OperatorFile,
     operatorSource: "json" | "template",
     winman?: WinmanFacts,
-    fullCheckText?: string,
+    dayBook?: DayBookInput,
   ): Promise<TdsReviewResult> {
     if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || !/^\d{8}$/.test(asOnDate) || fromDate > toDate) {
       throw new Error("fromDate, toDate and asOnDate must be YYYYMMDD, with fromDate on or before toDate");
@@ -666,7 +671,12 @@ export function createSession(
         return [] as Awaited<ReturnType<Downstream["ledgersTax"]>>;
       }),
     ]);
-    const c = buildClassifier(groups, overrides);
+    const c = buildClassifier(groups, {
+      ...overrides,
+      // A day-book finding's deductee is the provenance literal, never a
+      // ledger: force it clear so maskLedgerName returns it unchanged.
+      forceClearLedgers: [...overrides.forceClearLedgers, DAY_BOOK_FINDING],
+    });
     classifier = c;
     for (const l of masters) groupOfLedger.set(canonicalKey(l.name), l.parent);
 
@@ -739,7 +749,24 @@ export function createSession(
       return names.filter((n) => (seen.has(canonicalKey(n)) ? false : (seen.add(canonicalKey(n)), true)));
     };
     const fetchSet = unique([...dutyLedgerNames, ...operatorDutyLedgers, ...expenseLedgerNames, ...partyLedgerNames]);
-    const fetched = await fetchLedgerRows(company, fetchSet, fromDate, toDate);
+    // Books come either from ~640 sequential Ledger-Vouchers calls or from one
+    // operator day-book export. The projector reproduces the live path's signs
+    // and carries only the five fields the engine reads, so nothing else in
+    // this function changes.
+    const fetched = dayBook
+      ? {
+          rows: new Map(
+            projectLedgerRows(
+              dayBook.vouchers.filter((v) => {
+                const d = String(v.date);
+                return d >= fromDate && d <= toDate;
+              }),
+              fetchSet,
+            ).map((p) => [canonicalKey(p.ledger), p.rows] as const),
+          ),
+          calls: 0,
+        }
+      : await fetchLedgerRows(company, fetchSet, fromDate, toDate);
 
     // Section resolution (revision 2 of the spreadsheet-input design): the
     // duty ledger's mapped section for deductions and deposits; the booked
@@ -833,6 +860,46 @@ export function createSession(
         detail:
           "the Tally master flags this ledger TDS-applicable, but the operator file marks it not applicable; the operator's declaration suppresses it — no bookings, payments or findings are produced for it.",
       });
+    }
+
+    // Input weaknesses are findings, not silence: a file that parsed is not a
+    // file that covers the period. Severity is critical wherever the review
+    // would otherwise understate the books.
+    if (dayBook) {
+      const pushDayBook = (check: TdsCheckId, severity: Severity, detail: string): void => {
+        const n = analysis.findings.filter((f) => f.check === check).length + 1;
+        analysis.findings.push({
+          id: tdsFindingId(check, n),
+          check,
+          severity,
+          deductee: DAY_BOOK_FINDING,
+          group: "",
+          section: null,
+          amount: 0,
+          detail,
+        });
+      };
+      for (const m of dayBook.emptyMonths) {
+        pushDayBook(
+          "tds_daybook_month_empty",
+          "critical",
+          `the operator day-book file holds no voucher at all for ${displayMonth(m)}. If that month has entries in Tally, the export is incomplete and every check below understates the period.`,
+        );
+      }
+      if (dayBook.rejected > 0) {
+        pushDayBook(
+          "tds_daybook_rows_rejected",
+          "critical",
+          `${count(dayBook.rejected)} entries in the operator day-book file could not be read as vouchers and were excluded. The review is incomplete by that much.`,
+        );
+      }
+      if (dayBook.company === null) {
+        pushDayBook(
+          "tds_daybook_unverified",
+          "review",
+          "the operator day-book file is a bare voucher list: it names neither a company nor a period, so neither could be checked against this review. Re-export it in the tally-agent bundle shape to have both verified.",
+        );
+      }
     }
 
     const maskTdsFinding = (f: TdsFinding): TdsMaskedFinding => {

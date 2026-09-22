@@ -12,6 +12,10 @@ export const money = (n: number): string =>
     maximumFractionDigits: 2,
   }).format(n);
 
+/** Indian digit grouping for a whole-number count (14,356): scrubDigits eats a bare one. */
+export const count = (n: number): string =>
+  new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(n);
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** "20260116" -> "16-Jan-2026". A bare YYYYMMDD is an 8-digit run. */

@@ -226,3 +226,109 @@ describe("loadDayBookText", () => {
     await expect(loadDayBookText(path, 1024)).resolves.toBe("[]");
   });
 });
+
+import { createSession } from "../src/review.js";
+import { EMPTY_OVERRIDES } from "../src/classify.js";
+import { EMPTY_WRONG_GROUP } from "../src/types.js";
+import { fakeDownstream } from "./fixtures/downstream-fake.js";
+import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
+
+const REVIEW_MASTERS = JSON.stringify([
+  { name: "Sample Builders LLP", parent: "Sundry Creditors", state: "Karnataka", IncomeTaxNumber: "ABCC1234A", IsTDSApplicable: "Yes", TDSDeducteeType: "Firm" },
+  { name: "Site Repairs Contract", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+  { name: "TDS Contractors", parent: "Duties & Taxes", IsTDSApplicable: "Yes" },
+]);
+
+// Same three-ledger operator file the live-path review tests use.
+const REVIEW_OPERATOR: OperatorFile = {
+  ...EMPTY_TDS_OPERATOR,
+  sections: [
+    { ledger: "Site Repairs Contract", section: "194C" },
+    { ledger: "TDS Contractors", section: "194C" },
+  ],
+  parties: [
+    { ledger: "Sample Builders LLP", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false },
+  ],
+};
+
+// A 194C booking on the expense side (positive = debit after the gateway flip).
+const revRaw = (date: number, gross: number) => ({
+  date: String(date),
+  voucherType: "Purchase",
+  voucherNumber: `PU/${date}`,
+  partyLedgerName: "Sample Builders LLP",
+  entries: [
+    { LEDGERNAME: "Site Repairs Contract", AMOUNT: -gross },
+    { LEDGERNAME: "Sample Builders LLP", AMOUNT: gross },
+  ],
+});
+
+const revYear = [revRaw(20250510, 25000), revRaw(20250612, 25000), revRaw(20260115, 25000)];
+
+/**
+ * Day-book review harness: a session whose Ledger-Vouchers fetch would fail
+ * the test if ever called (the day book must replace it entirely).
+ */
+const runTdsReviewWithDayBook = async (
+  vouchers: unknown[],
+  o: { fromDate: string; toDate: string },
+) => {
+  const calls: string[] = [];
+  const s = createSession(
+    Object.assign(fakeDownstream({ tally_get_ledgers: REVIEW_MASTERS }), {
+      ledgerVoucherRows: async (_c: unknown, ledger: string) => {
+        calls.push(ledger);
+        return { rows: [], dropped: 0 } as never;
+      },
+    } as never),
+    EMPTY_OVERRIDES,
+    EMPTY_WRONG_GROUP,
+  );
+  const dayBook = readDayBook(JSON.stringify(vouchers), o);
+  const result = await s.tdsReview(
+    undefined, o.fromDate, o.toDate, o.toDate, REVIEW_OPERATOR, "json", undefined, dayBook,
+  );
+  return { result, calls };
+};
+
+describe("tdsReview with a day book", () => {
+  it("makes no ledger-voucher call and reports zero", async () => {
+    const { result, calls } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
+    expect(result.ledgerCalls).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it("ignores vouchers outside the review period", async () => {
+    const { result } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20250531" });
+    expect(result.findings.every((f) => f.check !== "tds_daybook_rows_rejected")).toBe(true);
+    // the June and January vouchers must not reach the engine
+    expect(result.totals.bySection.reduce((a, t) => a + t.gross, 0)).toBe(25000);
+  });
+
+  it("raises a critical finding for each empty month, naming the month", async () => {
+    const { result } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
+    const gaps = result.findings.filter((f) => f.check === "tds_daybook_month_empty");
+    expect(gaps.length).toBeGreaterThan(0);
+    expect(gaps.every((f) => f.severity === "critical")).toBe(true);
+    expect(gaps.some((f) => f.detail.includes("Jul-2025"))).toBe(true);
+  });
+
+  it("raises a critical finding when rows were rejected", async () => {
+    const { result } = await runTdsReviewWithDayBook([...revYear, { nonsense: true }], { fromDate: "20250401", toDate: "20260331" });
+    const f = result.findings.find((x) => x.check === "tds_daybook_rows_rejected");
+    expect(f?.severity).toBe("critical");
+  });
+
+  it("raises a review finding when the file could not be checked against company or period", async () => {
+    const { result } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
+    expect(result.findings.some((f) => f.check === "tds_daybook_unverified")).toBe(true);
+  });
+
+  it("leaves no ledger name in a day-book finding", async () => {
+    const { result } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
+    for (const f of result.findings.filter((x) => x.check.startsWith("tds_daybook_"))) {
+      expect(f.deductee).toBe("(day-book file)");
+      expect(f.detail).not.toMatch(/Acme|Site Repairs|Sample Builders/);
+    }
+  });
+});

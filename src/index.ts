@@ -351,7 +351,6 @@ export function registerTools(
       tdsFilePath: z.string().optional().describe("Path to the legacy operator TDS JSON file; templatePath takes precedence, give exactly one"),
       winmanPath: z.string().optional().describe("Optional path to the Winman TDS-summary xlsx export (challans and deductee PANs)"),
       company: z.string().optional(),
-      fullCheckPath: z.string().optional().describe("Optional path to an operator day-book JSON export for the coverage reconciliation"),
     },
     async (args) => {
       if (args.templatePath && args.tdsFilePath) {
@@ -364,7 +363,6 @@ export function registerTools(
         ? parseOperatorTemplate(await readFile(args.templatePath))
         : parseOperatorFile(await readFile(args.tdsFilePath!, "utf8"));
       const winman = args.winmanPath ? parseWinmanExport(await readFile(args.winmanPath)) : undefined;
-      const fullCheckText = args.fullCheckPath ? await readFile(args.fullCheckPath, "utf8") : undefined;
       const result = await session.tdsReview(
         args.company ?? cfg.defaultCompany,
         args.fromDate,
@@ -373,7 +371,6 @@ export function registerTools(
         operator,
         args.templatePath ? "template" : "json",
         winman,
-        fullCheckText,
       );
       lastTds = result;
       // The files' PATHS are audited, never their contents (the M2 returnsPath contract).
@@ -386,7 +383,6 @@ export function registerTools(
           ...(args.templatePath ? { templatePath: args.templatePath } : {}),
           ...(args.tdsFilePath ? { tdsFilePath: args.tdsFilePath } : {}),
           ...(args.winmanPath ? { winmanPath: args.winmanPath } : {}),
-          ...(args.fullCheckPath ? { fullCheckPath: args.fullCheckPath } : {}),
         },
         result.findings.length,
         maskedCountTds(result.findings),
