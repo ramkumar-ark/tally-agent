@@ -294,8 +294,7 @@ const runTdsReviewWithDayBook = async (
   return { result, calls };
 };
 
-describe("tdsReview with a day book", () => {
-  it("makes no ledger-voucher call and reports zero", async () => {
+describe("tdsReview with a day book", () => {  it("makes no ledger-voucher call and reports zero", async () => {
     const { result, calls } = await runTdsReviewWithDayBook(revYear, { fromDate: "20250401", toDate: "20260331" });
     expect(result.ledgerCalls).toBe(0);
     expect(calls).toEqual([]);
@@ -546,5 +545,80 @@ describe("loadDayBookText: encodings", () => {
     await writeFile(file, JSON.stringify({ tallymessage: [invoiceRaw()] }), "utf8");
     const text = await loadDayBookText(file, 1024 * 1024);
     expect(readDayBook(text, { fromDate: "20250401", toDate: "20260331" }).shape).toBe("tallymessage");
+  });
+});
+
+/**
+ * Tally-free harness: the downstream's groups tree (and any live book read)
+ * fails the test if the review ever reaches for Tally.
+ */
+const runTdsReviewOffline = async (bundle: unknown, o: { fromDate: string; toDate: string }) => {
+  const s = createSession(
+    Object.assign(fakeDownstream({}), {
+      groups: async () => {
+        throw new Error("tally unreachable");
+      },
+      ledgersTax: async () => {
+        throw new Error("tally unreachable");
+      },
+      ledgerVoucherRows: async () => {
+        throw new Error("live books must not be read when a day book is given");
+      },
+    } as never),
+    EMPTY_OVERRIDES,
+    EMPTY_WRONG_GROUP,
+  );
+  const dayBook = readDayBook(JSON.stringify(bundle), o);
+  return {
+    result: await s.tdsReview(
+      undefined, o.fromDate, o.toDate, o.toDate, REVIEW_OPERATOR, "json", undefined, dayBook,
+    ),
+  };
+};
+
+// An offline bundle whose masters cover a different ledger set than reviewYard's
+// fixtures exercise: Site Expenses (expense side) and Acme Contracting (party).
+const offlineBundle = {
+  tallyAgentExport: 1,
+  company: "Example Infra",
+  fromDate: "20250401",
+  toDate: "20260331",
+  groups: [
+    { name: "Indirect Expenses", parent: "" },
+    { name: "Sundry Creditors", parent: "Current Liabilities" },
+  ],
+  ledgers: [
+    { name: "Site Expenses", parent: "Indirect Expenses" },
+    { name: "Acme Contracting", parent: "Sundry Creditors" },
+  ],
+  vouchers: revYear,
+};
+
+describe("Tally-free run", () => {
+  it("completes when groups and masters both fail, using the bundle's masters", async () => {
+    const { result } = await runTdsReviewOffline(offlineBundle, { fromDate: "20250401", toDate: "20260331" });
+    expect(result.mastersAvailable).toBe(false);
+    expect(result.books?.mastersSource).toBe("bundle");
+    expect(result.ledgerCalls).toBe(0);
+  });
+
+  it("completes when the bundle carries no masters either, and says so", async () => {
+    const { result } = await runTdsReviewOffline(
+      { tallyAgentExport: 1, vouchers: revYear },
+      { fromDate: "20250401", toDate: "20260331" },
+    );
+    expect(result.books?.mastersSource).toBe("absent");
+  });
+
+  it("default-masks a ledger whose group is unknown and raises a review finding", async () => {
+    const { result } = await runTdsReviewOffline(
+      { tallyAgentExport: 1, vouchers: revYear },
+      { fromDate: "20250401", toDate: "20260331" },
+    );
+    const unmastered = result.findings.filter((f) => f.check === "tds_daybook_ledger_unmastered");
+    expect(unmastered.length).toBeGreaterThan(0);
+    expect(unmastered.every((f) => f.severity === "review")).toBe(true);
+    // the real names must not survive anywhere in the output
+    expect(JSON.stringify(result)).not.toMatch(/Acme Contracting|Sample Builders LLP|Site Repairs Contract|TDS Contractors/);
   });
 });

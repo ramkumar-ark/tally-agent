@@ -677,8 +677,20 @@ export function createSession(
     // the live server unreachable), the session degrades to operator-file-only
     // facts: flags/PANs read as absent, never guessed, and the run records it.
     const mastersUnavailable = { value: false } as { value: boolean };
-    const [groups, masters] = await Promise.all([
-      d.groups(company),
+    // groups() sat outside the degradation described below: an unreachable
+    // Tally rejected the whole review before ledgersTax()'s catch could do its
+    // job. With a day book in hand the run is meant to survive exactly that,
+    // so the group tree degrades the same way — bundle first, then empty,
+    // which makes every ledger default-mask.
+    const groupsUnavailable = { value: false } as { value: boolean };
+    const [groupsLive, masters] = await Promise.all([
+      d.groups(company).catch((e: unknown) => {
+        groupsUnavailable.value = true;
+        console.error(
+          `tally-agent: group tree unavailable (${e instanceof Error ? e.message : e}); running without it`,
+        );
+        return [] as Awaited<ReturnType<Downstream["groups"]>>;
+      }),
       d.ledgersTax(company).catch((e: unknown) => {
         mastersUnavailable.value = true;
         console.error(
@@ -687,6 +699,7 @@ export function createSession(
         return [] as Awaited<ReturnType<Downstream["ledgersTax"]>>;
       }),
     ]);
+    const groups = groupsUnavailable.value && dayBook?.groups ? dayBook.groups : groupsLive;
     const c = buildClassifier(groups, {
       ...overrides,
       // A day-book finding's deductee is the provenance literal, never a
@@ -695,6 +708,13 @@ export function createSession(
     });
     classifier = c;
     for (const l of masters) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    // The bundle's ledger→group edges fill in only what the live masters did
+    // not supply; a live master always wins.
+    if (mastersUnavailable.value) {
+      for (const l of dayBook?.ledgers ?? []) {
+        if (!groupOfLedger.has(canonicalKey(l.name))) groupOfLedger.set(canonicalKey(l.name), l.parent);
+      }
+    }
 
     // PAN channel: a real PAN travels only as its TaxId N pseudonym (M2
     // pattern). The PAN's 4th character feeds the statutory rate.
@@ -915,6 +935,24 @@ export function createSession(
           "review",
           "the operator day-book file is a bare voucher list: it names neither a company nor a period, so neither could be checked against this review. Re-export it in the tally-agent bundle shape to have both verified.",
         );
+      }
+      // A ledger the review touched but has no group for cannot be classified
+      // or masked by ancestry, so it default-masks. That is the safe branch,
+      // but it is never silent.
+      const unmastered = fetchSet.filter((n) => !groupOfLedger.has(canonicalKey(n)));
+      for (const name of unmastered) {
+        const n = analysis.findings.filter((f) => f.check === "tds_daybook_ledger_unmastered").length + 1;
+        analysis.findings.push({
+          id: tdsFindingId("tds_daybook_ledger_unmastered", n),
+          check: "tds_daybook_ledger_unmastered",
+          severity: "review",
+          deductee: name,
+          group: "",
+          section: null,
+          amount: 0,
+          detail:
+            "no group is known for this ledger, so it could not be classified by ancestry and is masked by default. Export the tally-agent bundle shape (which carries groups and ledgers) or run with Tally reachable to classify it.",
+        });
       }
     }
 

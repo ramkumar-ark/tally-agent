@@ -45,7 +45,7 @@ describe("TDS finding space", () => {
     expect(tdsFindingId("tds_not_deducted", 1)).toBe("TDS-001-1");
     expect(tdsFindingId("tds_master_gap", 3)).toBe("TDS-012-3");
   });
-  it("keeps 16 checks without touching the TB/GST/LS tables", () => {
+  it("keeps 17 checks without touching the TB/GST/LS tables", () => {
     expect(Object.keys(TDS_CHECK_ORDINAL)).toEqual([
       "tds_not_deducted", "tds_short_deducted", "tds_late_deducted",
       "tds_not_deposited", "tds_late_deposit", "tds_statement_late",
@@ -53,12 +53,14 @@ describe("TDS finding space", () => {
       "tds_exposure_271c", "tds_section_unknown", "tds_master_gap",
       "tds_threshold_crossed",
       "tds_daybook_month_empty", "tds_daybook_rows_rejected", "tds_daybook_unverified",
+      "tds_daybook_ledger_unmastered",
     ]);
   });
   it("assigns the day-book findings the next three ordinals", () => {
     expect(tdsFindingId("tds_daybook_month_empty", 1)).toBe("TDS-014-1");
     expect(tdsFindingId("tds_daybook_rows_rejected", 1)).toBe("TDS-015-1");
     expect(tdsFindingId("tds_daybook_unverified", 1)).toBe("TDS-016-1");
+    expect(tdsFindingId("tds_daybook_ledger_unmastered", 1)).toBe("TDS-017-1");
   });
   it("a TdsFinding carries deductee, section, amount, detail and schedule rows", () => {
     const f: TdsFinding = {
