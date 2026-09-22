@@ -231,6 +231,42 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   cells positionally against `columns` — a row cell past the column list is
   silently dropped (the winman fixture caught this).
 
+## Sharp edges found adding the offline day-book input (2026-09-22)
+
+- The gateway's `StdioClientTransport` cannot receive a whole-FY day book —
+  three of three attempts ended `McpError -32000: Connection closed` with the
+  upstream exiting `code=0` mid-response, while a raw newline-delimited stdio
+  client took the same export without trouble. This is why the day book is a
+  file channel and why `scripts/export-daybook.mjs` eschews the SDK.
+  Live-verified: whole-FY 14,356 vouchers = 16.0 MB written in 126 s.
+- A Ledger-Vouchers call costs a near-fixed ~5.7 s whatever its row count,
+  and `fetchLedgerRows` is sequential, so cost scales with *call count*
+  (~600 active ledger-months ≈ 57 min). Optimise call count, never payload
+  size — passing `dayBookPath` removes the calls entirely (measured month
+  comparison: live 39 s vs file 12 s).
+- The live day book returns `date` and sometimes `voucherNumber` as JSON
+  **numbers**. `normDate` and the projector coerce with `String(...)`; any
+  new comparison must too. A `===` between a string date and a numeric one
+  fails silently and looks like "no data" — the Task 9 join probe hit
+  exactly that before switching to `String(...)` on both sides.
+- `readFile` + `JSON.parse` on a 67 MB day book measured **483 MB peak RSS
+  in 3.0 s** (300k synthetic vouchers; scales roughly linearly, so the 64 MB
+  `TALLY_AGENT_DAYBOOK_MAX_MB` default is safe on any machine with ≥4 GB
+  free). Streaming is not needed below the ceiling.
+- The verbose ledger master export carries no PAN and no TDS flags (the
+  upstream never requests those fields) — those facts come only from the
+  operator TDS file. What the masters really supply is `parent`, which
+  drives classification and masking; a bundle's `ledgers`/`groups` arrays
+  substitute for it (`mastersSource: "bundle"`), and with neither every
+  ledger default-masks and raises `tds_daybook_ledger_unmastered`.
+- The live Ledger-Vouchers report **dedupes its display rows**: entries
+  repeating the same date, voucher type and amount collapse to one row, so
+  a day-book projection legitimately yields 2,399-FY findings where live
+  yields ~10 fewer `tds_not_deducted` per matching month window (whole-FY
+  detection). The projector is per accounting entry — do not imitate the
+  display dedupe to make the paths "match" (same D5 reasoning; recorded in
+  design §10, 2026-09-22).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

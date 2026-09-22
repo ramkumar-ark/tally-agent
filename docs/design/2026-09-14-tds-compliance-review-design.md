@@ -104,17 +104,48 @@ every outbound string already passes `scrubDigits`, so bare `100000.00` or a
 raw `YYYYMMDD` would be mangled), and an optional `schedule: TdsScheduleRow[]`
 for the interest-schedule CSV.
 
-## 5. Data path: hybrid (captain Q8: A)
+## 5. Data path: hybrid (captain Q8: A; revised 2026-09-22, offline day-book plan)
 
 Default in-tool path: **monthly Ledger-Vouchers reports** per ledger — 5 duty
 ledgers (194C contractors, 194A interest other than on securities, 194-I
 plant & machinery rent, 194J professional fees; the salary duty ledger is
 out of scope) plus the flagged expense/purchase ledgers and every operator-file
-ledger, ~640 small calls per FY. Never the Day Book. `fullCheckPath` (an
-optional operator day-book JSON export in the upstream `tally_get_vouchers`
-row shape) runs the same engine over operator-supplied vouchers to reconcile
-and cover payments made through unflagged ledgers; a voucher-ledger pair only
-in the operator file raises a review-only coverage finding.
+ledger, ~640 small calls per FY.
+
+**In-tool, the path is still never the Day Book**: the gateway's transport
+cannot carry a whole-FY voucher export (three of three attempts died with
+`McpError -32000: Connection closed`, the upstream child exiting 0
+mid-response). What changed is the accepted alternative source: an
+**operator-exported day book supplied by path** (`tb_tds_review`'s
+`dayBookPath`, read by `loadDayBookText` + `readDayBook` in
+`src/tds-daybook.ts`) is now a first-class books source. The gateway makes
+zero Ledger-Vouchers calls for the books when it is given.
+
+The file may come in three shapes, each mapped to `DayBookInput`:
+- a bare array of voucher rows (`parseVoucherRows`-compatible);
+- a `{ tallymessage: [...] }` envelope (raw Tally export keys, item-invoice
+  allocations swept from inventory allocations, UTF-16 LE/BE BOMs detected);
+- a tally-agent **bundle** `{ tallyAgentExport, company, fromDate, toDate,
+  groups, ledgers, vouchers }` produced by `scripts/export-daybook.mjs`.
+
+Four validation layers, in `readDayBook`/`loadDayBookText`: size ceiling
+(`TALLY_AGENT_DAYBOOK_MAX_MB`, default 64 MB); JSON well-formedness;
+company agreement (verified by `canonicalKey`, never echoing names) and
+coverage (declared period must cover the review period; vouchers outside the
+declared period reject the file as self-misdescribing); coverage reporting —
+months with no voucher at all raise `tds_daybook_month_empty` findings
+instead of silence.
+
+The `tds_daybook_*` checks sit at ordinals 14–17 of the TDS ordinal space:
+`tds_daybook_month_empty` (14, critical), `tds_daybook_rows_rejected` (15,
+critical), `tds_daybook_unverified` (16, review — bare lists that name no
+company), `tds_daybook_ledger_unmastered` (17, review — a fetched ledger no
+group is known for; it default-masks and says so). The result and both
+written CSVs carry `booksSource` ("live"/"daybook-file") and a provenance
+block names the file's voucher count, observed span, rejected-row count,
+masters source, size and sha256. `fullCheckPath` was declared-but-dead in
+every prior build; it is removed rather than wired (captain D3, 2026-09-22)
+— coverage reconciliation is reopened if ever needed.
 
 ## 6. The law table (FY 2025-26) — `src/tds-law.ts`
 
@@ -241,3 +272,36 @@ end-to-end on live data with graceful degradation; it cannot confirm any
 legal check. Once a company masters its TDS flags — or the operator file
 lands — the same tool narrows to the ~640 small per-ledger month calls the
 plan priced and produces real findings.
+
+### Live validation of the offline day-book path (2026-09-22)
+
+Ran against the same live company (nameless again), Tally reachable at
+127.0.0.1:9000, upstream `tally_prime_mcp_server/dist` driven by the raw
+newline-delimited stdio client (the same transport `scripts/export-daybook.mjs`
+uses). Operator facts for the booking predicate were declared for validation
+only: the month's busiest purchase ledger to 194C and its most frequent
+counterparty TDS-applicable — temp files, nothing real persisted.
+
+- **Counterparty rule (D5):** one month (Aug 2025), the three busiest
+  ledgers (286/204/198 day-book lines), 651 voucher rows joined,
+  **630 agree — 96.8% ≥ the 95% bar**; the rule was not tuned. The 21
+  disagreements are multi-line vouchers (2–7 entries) where the live
+  report's counterparty is often not the party ledger either; shapes
+  recorded, names never printed.
+- **Live vs file, same month:** `counts` and `totals` agree except
+  `tds_not_deducted` — 191 findings live vs 201 from the file (gross
+  ₹2,774,329.64 live vs ₹2,775,829.64 file). A row-for-row reconcile shows
+  268 distinct (date, type, amount) rows identical on both paths; the day
+  book holds 17 more repeat rows that the live Ledger-Vouchers report does
+  not emit — its display row set collapses entries repeating the same date,
+  voucher type and amount — plus one probe-side sign-coercion artifact.
+  The residual variance is therefore the upstream report's display dedupe,
+  not the projector (the projector is per accounting entry). Recorded for
+  the captain rather than tuned away (same D5 reasoning: the live report's
+  counterparty comes from a display field).
+- **Full-FY file run:** `scripts/export-daybook.mjs` wrote **14,356
+  vouchers for the whole FY in 126 s (16.0 MB, far under the 64 MB
+  ceiling)**; the engine on that bundle ran **2,399 findings, ledgerCalls
+  0, peak RSS 242 MB, wall clock 147 s** — the 900 s timeout chain is not
+  needed for the review itself. Bundle fully verified: 0 rejected rows, 0
+  empty months, masters from live Tally.
