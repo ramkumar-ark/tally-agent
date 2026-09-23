@@ -83,6 +83,15 @@ export interface OperatorFile {
   certificates: OperatorCertificate[];
   challans: OperatorChallan[];
   statements: OperatorStatement[];
+  /**
+   * Whether s.194Q applies at all. The captain's default: 194Q is checked
+   * unless the operator expressly says the buyer did not meet the previous
+   * year's ₹10 crore turnover condition. Absent in the JSON channel and blank
+   * in the template both mean **applicable** (true). This is the whole-review
+   * fact the books cannot carry (design §2.3); it suppresses every 194Q
+   * booking, never one party's.
+   */
+  section194QApplicable: boolean;
 }
 
 const SECTIONS = new Set(TDS_SECTIONS.map((s) => s.section));
@@ -215,7 +224,16 @@ export function parseOperatorFile(text: string): OperatorFile {
     };
   });
 
-  return { sections, parties, certificates, challans, statements };
+  return {
+    sections,
+    parties,
+    certificates,
+    challans,
+    statements,
+    // Absent means applicable: the JSON channel's default is the captain's
+    // "check 194Q unless told otherwise" (design §6).
+    section194QApplicable: d.section194QApplicable === undefined ? true : truthy(d.section194QApplicable),
+  };
 }
 
 /**
@@ -241,6 +259,7 @@ export const EMPTY_TDS_OPERATOR: OperatorFile = {
   certificates: [],
   challans: [],
   statements: [],
+  section194QApplicable: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -341,6 +360,34 @@ function flag(ref: CellRef, cell: GridCell | undefined): boolean {
   if (s === "" || s === "n" || s === "no" || s === "off" || s === "false" || s === "0") return false;
   if (s === "y" || s === "yes" || s === "on" || s === "true" || s === "1") return true;
   throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): enter Y or N`);
+}
+
+/**
+ * The optional Settings sheet: `Setting` / `Value` rows, one per whole-review
+ * flag. Currently it carries only "194Q Applicable" (the captain's default
+ * 194Q check, suppressible when the buyer did not meet the previous-year ₹10
+ * crore turnover condition). A blank value means the default (applicable), so
+ * a template with the row but an empty cell behaves like one without the
+ * sheet. An unknown Setting label is rejected wholesale (never guessed), and
+ * the error cites sheet/row/column, never a cell value.
+ */
+function settings194QApplicable(sheet: GridSheet): boolean {
+  const cols = accessors(bindColumns(sheet, [{ header: "Setting" }, { header: "Value" }]));
+  const label = "194q applicable";
+  let value = true;
+  for (const r of dataRows(sheet)) {
+    const at = (col: number, header: string): CellRef => ({ sheet, row: r, col, header });
+    const key = textCell(at(cols.get("Setting")!, "Setting"), r.cells.get(cols.get("Setting")!));
+    if (key === undefined) {
+      throw new Error(`template Settings row ${r.row}, column A (Setting): required cell is blank`);
+    }
+    if (normHeader(key) !== label) {
+      throw new Error(`template Settings row ${r.row}, column A (Setting): not a known setting — the only setting is "194Q Applicable"`);
+    }
+    const v = textCell(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+    if (v !== undefined) value = flag(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+  }
+  return value;
 }
 
 const PAN_SHAPE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
@@ -639,7 +686,15 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
     };
   });
 
-  return { sections, parties, certificates, challans, statements };
+  // The Settings sheet carries the whole-review flags. It is OPTIONAL: a
+  // template filled before it existed (or one an operator deleted) defaults
+  // every setting to its captain-approved value, here "194Q applicable".
+  const settingsSheet = sheets.find((x) => normHeader(x.name) === normHeader("Settings"));
+  const section194QApplicable = settingsSheet === undefined
+    ? true
+    : settings194QApplicable(settingsSheet);
+
+  return { sections, parties, certificates, challans, statements, section194QApplicable };
 }
 
 // ---------------------------------------------------------------------------

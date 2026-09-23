@@ -93,10 +93,20 @@ function fullWorkbook(
   return buildWorkbook(sheets);
 }
 
+/** The five required sheets plus a Settings sheet with the given rows. */
+function settingsWorkbook(rows: CellRow[]): Buffer {
+  return buildWorkbook([
+    { name: "Instructions", columns: [{ header: "How to fill this template" }], rows: [["fill me"]] },
+    { name: "Settings", columns: [{ header: "Setting" }, { header: "Value" }], rows },
+    ...Object.values(baseSheets),
+  ]);
+}
+
 describe("parseOperatorTemplate — happy path", () => {
   it("parses the blank generated template to EMPTY_TDS_OPERATOR", () => {
     expect(parseOperatorTemplate(buildTemplateWorkbook())).toEqual({
       sections: [], parties: [], certificates: [], challans: [], statements: [],
+      section194QApplicable: true,
     });
   });
 
@@ -141,6 +151,31 @@ describe("parseOperatorTemplate — happy path", () => {
     ]);
     expect(op.challans).toEqual([{ section: "194C", forMonth: "2025-05", depositDate: "20250616" }]);
     expect(op.statements).toEqual([{ form: "26Q", quarter: "Q1", filedDate: "20250820", tdsAmount: 5000 }]);
+  });
+});
+
+describe("parseOperatorTemplate — the optional Settings sheet (s.194Q)", () => {
+  it("defaults to applicable when the Settings sheet is absent (an old template)", () => {
+    expect(parseOperatorTemplate(fullWorkbook([])).section194QApplicable).toBe(true);
+  });
+
+  it("defaults to applicable when the Settings sheet is present but blank", () => {
+    expect(parseOperatorTemplate(settingsWorkbook([])).section194QApplicable).toBe(true);
+    expect(parseOperatorTemplate(settingsWorkbook([["194Q Applicable", null]])).section194QApplicable).toBe(true);
+  });
+
+  it("reads an explicit N as the opt-out and Y as applicable", () => {
+    expect(parseOperatorTemplate(settingsWorkbook([["194Q Applicable", "N"]])).section194QApplicable).toBe(false);
+    expect(parseOperatorTemplate(settingsWorkbook([["194Q Applicable", "Y"]])).section194QApplicable).toBe(true);
+  });
+
+  it("errors on an unknown setting label and on a blank label, citing the cell not a value", () => {
+    const unknown = message(() => parseOperatorTemplate(settingsWorkbook([["Nonsense Setting", "N"]])));
+    expect(unknown).toMatch(/template Settings row 2, column A \(Setting\)/);
+    expect(unknown).not.toContain("Nonsense Setting");
+
+    const blank = message(() => parseOperatorTemplate(settingsWorkbook([[null, "N"]])));
+    expect(blank).toMatch(/template Settings row 2, column A \(Setting\)/);
   });
 });
 

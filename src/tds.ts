@@ -297,6 +297,11 @@ export function analyzeTds(
   const aggs = new Map<string, Agg>();
   for (const b of [...events.bookings].sort((a, b) => a.date.localeCompare(b.date))) {
     if (b.section === null) continue; // unknown sections surface as their own finding
+    // s.194Q is applicable by default; the operator suppresses it for the
+    // whole review when the buyer did not meet the previous-year ₹10 crore
+    // turnover condition. A suppressed section produces no aggregation, no
+    // findings, no totals — the whole section is out, not one party's.
+    if (b.section === "194Q" && ctx.operator?.section194QApplicable === false) continue;
     const key = `${ctx.panKeyOf(b.party) ?? `ledger:${b.party}`}|${b.section}`;
     const agg = aggs.get(key) ?? {
       party: b.party,
@@ -393,8 +398,12 @@ export function analyzeTds(
     const wholeYear = law.wholeYearOnCross;
     const threshold = law.threshold;
 
+    // Aggregation preserves date order (built from a date-sorted walk), but
+    // the running cumulative is correctness-critical, so pin it here.
+    const bookings = [...agg.bookings].sort((a, b) => a.date.localeCompare(b.date));
+
     let before = 0;
-    for (const b of agg.bookings) {
+    for (const b of bookings) {
       const after = before + b.gross;
       if (!agg.crossed && threshold.aggregate !== undefined && after > threshold.aggregate) {
         agg.crossed = true;
@@ -403,14 +412,19 @@ export function analyzeTds(
       before = after;
     }
 
-    for (const b of agg.bookings) {
+    let cumulative = 0;
+    for (const b of bookings) {
+      cumulative += b.gross;
       const singleLiable = threshold.single !== undefined && b.gross > threshold.single;
       let liableBase = 0;
       if (wholeYear) {
         if (agg.crossed || singleLiable) liableBase = b.gross;
       } else if (agg.crossed) {
-        // Section 194Q: only the amount beyond the crossing (C8).
-        liableBase = Math.max(0, Math.min(b.gross, before - (threshold.aggregate ?? 0)));
+        // Section 194Q: only the amount beyond the crossing (C8) — measured
+        // against the running cumulative through this booking, so bookings
+        // before the crossing are never liable (only the excess on the
+        // crossing booking, the full gross after).
+        liableBase = Math.max(0, Math.min(b.gross, cumulative - (threshold.aggregate ?? 0)));
       }
       const rate = rateFor(ctx, b.party, section, b.date);
       const liability = round2(rate.rate * liableBase);

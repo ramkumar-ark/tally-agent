@@ -59,6 +59,13 @@ describe("parseOperatorFile", () => {
     }
   });
 
+  it("defaults the 194Q opt-out to applicable when the key is absent, honours an explicit false", async () => {
+    const doc = JSON.parse(await load()) as Record<string, unknown>;
+    expect(parseOperatorFile(JSON.stringify(doc)).section194QApplicable).toBe(true);
+    expect(parseOperatorFile(JSON.stringify({ ...doc, section194QApplicable: false })).section194QApplicable).toBe(false);
+    expect(parseOperatorFile(JSON.stringify({ ...doc, section194QApplicable: true })).section194QApplicable).toBe(true);
+  });
+
   it("ignores a legacy parties[].section key: existing files still parse unchanged", async () => {
     const text = await load();
     const doc = JSON.parse(text) as Record<string, unknown>;

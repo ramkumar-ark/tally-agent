@@ -16,9 +16,9 @@ const headerCells = (sheet: ReturnType<typeof build>[number]): string[] => {
 };
 
 describe("the generated TDS template", () => {
-  it("carries exactly six sheets by name", () => {
+  it("carries exactly seven sheets by name", () => {
     expect(build().map((s) => s.name)).toEqual([
-      "Instructions", "Sections", "Parties", "Certificates", "Challans", "Statements",
+      "Instructions", "Settings", "Sections", "Parties", "Certificates", "Challans", "Statements",
     ]);
   });
 
@@ -47,6 +47,13 @@ describe("the generated TDS template", () => {
     }
   });
 
+  it("pre-fills the Settings sheet with 194Q Applicable = Y", () => {
+    const settings = build().find((s) => s.name === "Settings")!;
+    expect(headerCells(settings)).toEqual(["Setting", "Value"]);
+    expect(settings.rows).toHaveLength(2);
+    expect([...settings.rows[1].cells.values()].map((c) => c.value)).toEqual(["194Q Applicable", "Y"]);
+  });
+
   it("states the seven tasks the instructions must name, Sections first", () => {
     const instructions = build().find((s) => s.name === "Instructions")!;
     const text = [...instructions.rows.flatMap((r) => [...r.cells.values()].map((c) => c.value))].join("\n");
@@ -62,7 +69,7 @@ describe("the generated TDS template", () => {
   it("is a spreadsheet the project's own reader can round-trip (dropdowns ride the workbook, not the parser)", () => {
     const buf = buildTemplateWorkbook();
     const sheets = readWorkbook(buf);
-    expect(sheets).toHaveLength(6);
+    expect(sheets).toHaveLength(7);
     expect(sheets.every((s) => s.state === "visible")).toBe(true);
   });
 

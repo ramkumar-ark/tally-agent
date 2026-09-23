@@ -19,6 +19,7 @@ const KINDS = ["Expense", "TDS Duty"];
 const YN = ["Y", "N"];
 const FORMS = ["24Q", "26Q", "27Q"];
 const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
+const SETTING_194Q = "194Q Applicable";
 
 const instructions = (company?: string): Sheet => ({
   name: "Instructions",
@@ -34,6 +35,7 @@ const instructions = (company?: string): Sheet => ({
     ["Type dates as 2026-01-15, or pick from the calendar picker in the date columns."],
     ["Ledger Kind on the Sections sheet: leave blank for an expense/purchase ledger; use \"TDS Duty\" for the TDS duty ledger (its row then never counts as a booking)."],
     ["Parties sheet: one row per deductee party ledger. TDS Applicable is required — Y or N, exactly as the party is configured in Tally."],
+    ["Settings sheet: s.194Q is checked by default. Enter N against \"194Q Applicable\" only when the buyer did not meet the previous-year turnover condition (above ₹10 crore), which takes 194Q out of the review. Leave it blank for the default (applicable)."],
     ["One expense ledger may be mapped to more than one section, but nothing is computed for it until the mapping is one-to-one. Fix: split the Tally ledger per section (Rent - Plant & Machinery / Rent - Building) — which is what filing under 194-I(a) vs 194-I(b) requires anyway."],
     ["Worked example (invented names and figures only):"],
     ["Sections     | Site Repairs Contract  | 194C     | Expense"],
@@ -46,6 +48,17 @@ const instructions = (company?: string): Sheet => ({
     ["Challans     | 194C                   | 2025-05  | 2025-06-16"],
     ["Statements   | 26Q                    | Q1       | 2025-08-20 | 5000"],
   ],
+});
+
+const settingsSheet = (): Sheet => ({
+  name: "Settings",
+  columns: [
+    { header: "Setting", width: 24, format: "text" },
+    { header: "Value", width: 12, format: "text", validation: { list: YN } },
+  ],
+  // Pre-filled with the captain's default: 194Q is checked. N suppresses it
+  // when the buyer did not meet the previous-year ₹10 crore turnover condition.
+  rows: [[SETTING_194Q, "Y"]],
 });
 
 const sectionsSheet = (): Sheet => ({
@@ -105,9 +118,9 @@ const statementsSheet = (): Sheet => ({
   rows: [],
 });
 
-/** The workbook: Instructions plus the five data sheets, data rows empty. */
+/** The workbook: Instructions plus the Settings sheet and the five data sheets. */
 export function buildTemplateWorkbook(company?: string): Buffer {
-  return buildWorkbook([instructions(company), sectionsSheet(), partiesSheet(), certificatesSheet(), challansSheet(), statementsSheet()]);
+  return buildWorkbook([instructions(company), settingsSheet(), sectionsSheet(), partiesSheet(), certificatesSheet(), challansSheet(), statementsSheet()]);
 }
 
 /** The file name the generator tool writes; blank company means "all". */

@@ -60,7 +60,8 @@ figures, all read-only, all masked.
    pattern; contents never transit the model). Supplies the books-unavailable
    facts: ledger→section and party→section mapping, s.197 certificates,
    194C(6) transporter declarations, challan dates, statement filing dates,
-   and the s.201(1) proviso fact (`deducteeFiledReturn`).
+   the s.201(1) proviso fact (`deducteeFiledReturn`), and the wholesale
+   `section194QApplicable` opt-out (absent → applicable; §6).
 
 ## 3. Privacy
 
@@ -162,6 +163,14 @@ Recorded verbatim; **C# = confirm markers from the captain's list**.
 | 194T | Firm → partner remuneration/interest | 10% | > ₹20,000 aggregate | timing-only | — |
 | 206AA | Deductee without PAN | higher of section rate or 20% | — | — | — |
 
+**194Q is checked by default** (captain, 2026-09-23: "assume that 194 q is
+applicable by default; unless specified expressly by the user, the tool should
+check for 194Q"). The buyer-turnover condition (previous-year turnover above
+₹10 crore) is not something the books evidence, so it is an operator fact: the
+optional `Settings` sheet's `194Q Applicable` row, or the JSON
+`section194QApplicable` key, suppresses the whole section. Absent or blank
+means applicable. See §7's threshold semantics and the operator walkthrough.
+
 Sources: s.194C/J/A text (Indian Kanoon, morphology-consolidated), FB 2025
 memo Cl.51–62, F(No.2)B 2024 memo Cl.57/62, s.206AA text, s.194Q text. The
 table is date-indexed (`TdsLawEntry`) so TY 2026-27 rows can be added later
@@ -221,9 +230,16 @@ interest (i), not the finding.
   declaration excludes that party's contract payments (review-only variant
   citing the declaration, zero interest).
 - **Thresholds:** aggregate gross base per PAN-else-ledger per section; on
-  crossing, `wholeYearOnCross(section)` decides whole-year liability; 194Q
-  adds only the amount beyond the crossing (C8). Threshold crossings also
-  surface an advisory naming the cross month and the applicable rule.
+  crossing, `wholeYearOnCross(section)` decides whole-year liability. For a
+  non-whole-year section the liable base is measured against the **running
+  cumulative through each booking**, so 194Q adds only the amount beyond the
+  crossing — zero before it, only the excess on the crossing booking, the
+  full gross after (C8; the pre-2026-09-22 code measured against the
+  year-end total and made pre-crossing bookings liable). A suppressed 194Q
+  (`Settings`/`section194QApplicable` false) is skipped at aggregation, so
+  the section contributes no findings, no totals and no crossing advisory.
+  Threshold crossings also surface an advisory naming the cross month and
+  the applicable rule.
 - **Determinism:** findings ordered by dated-earliest event, then deductee,
   then section (the M2 stable-order pattern).
 

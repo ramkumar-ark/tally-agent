@@ -172,6 +172,13 @@ export interface TdsReviewResult {
   /** Where the per-ledger rows came from. "live" is ~640 Ledger-Vouchers calls. */
   booksSource: "live" | "daybook-file";
   /**
+   * Whether s.194Q was checked. True by default; false only when the operator
+   * expressly suppressed it (Settings sheet / JSON `section194QApplicable`),
+   * i.e. the buyer did not meet the previous year's ₹10 crore turnover
+   * condition. The run never computes 194Q figures in the false case.
+   */
+  section194QApplicable: boolean;
+  /**
    * Present only for "daybook-file". Counts and dates only: the file's SHA-256
    * digest and byte size go to the audit log and the written report, never
    * here — a 64-character hex digest can hold a 6-digit run and scrubDigits
@@ -1329,6 +1336,7 @@ export function createSession(
       },
       ledgerCalls: fetched.calls,
       booksSource: dayBook ? "daybook-file" : "live",
+      section194QApplicable: operator.section194QApplicable,
       ...(dayBook
         ? {
             books: {

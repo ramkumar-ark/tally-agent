@@ -187,7 +187,30 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   the duty side is necessary but not sufficient: if the books genuinely contain
   few duty credits against many bookings, the bulk of `tds_not_deducted` is
   **substantive**, not a wiring artifact — read that total as an upper bound.
-  The 194Q threshold logic is deliberately out of scope.
+
+## Sharp edges found fixing the s.194Q threshold (2026-09-23)
+
+- **A non-wholeYear section's liable base is the running cumulative through
+  each booking, never the year total.** The pre-fix code measured against the
+  year-end aggregate, so every pre-crossing booking was liable whenever the
+  year's excess covered it (on a real FY 25-26 run: 3,433 194Q findings, median
+  ~₹888). `analyzeTds`'s per-aggregate loop now sorts a copy by date, computes
+  the crossing with a running `before`, then a second pass tracks `cumulative`
+  and takes `max(0, min(gross, cumulative - threshold.aggregate))`. Never
+  re-measure against `agg.gross` here; `wholeYear` sections keep the old
+  whole-year rule.
+- **194Q is applicable by default** (captain, 2026-09-23). The
+  buyer-turnover condition is an operator fact, not book evidence: the
+  template's **optional `Settings` sheet** (`194Q Applicable`, pre-filled `Y`)
+  and the JSON `section194QApplicable` key suppress the whole section when
+  false; absent or blank means applicable. `parseOperatorTemplate` tolerates a
+  missing Settings sheet (`settings194QApplicable`), `EMPTY_TDS_OPERATOR`
+  carries `true`, `analyzeTds` skips 194Q aggregation when suppressed, and
+  `TdsReviewResult.section194QApplicable` reports the state. Operator
+  walkthrough: `docs/operator/tds-operator-template.md`.
+- Measuring offline: a stub downstream whose `groups`/`ledgersTax` reject plus
+  a day-book bundle runs `Session.tdsReview` with no live Tally (the session
+  degrades by design and reads the bundle's groups/ledgers).
 
 ## Sharp edges found implementing depreciation (2026-09-16)
 

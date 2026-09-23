@@ -212,6 +212,91 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     expect(found.map((f) => f.amount)).toEqual([expect.closeTo(1000, 0)]);
   });
 
+  it("194Q measures the excess against the running cumulative, not the year total", () => {
+    // One seller: 30L, 25L, 10L. The 50L threshold is crossed by the second
+    // booking (cumulative 55L), so only its 5L excess and the full 10L after
+    // are liable — the first 30L is never liable.
+    const operator: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: "Purchase - Domestic", section: "194Q" }],
+    };
+    const cfg = tdsCtx(operator, { dutySectionOf: () => null, panKeyOf: () => "TaxId 999" });
+    const out = run(
+      cfg,
+      [],
+      [{
+        ledger: "Purchase - Domestic",
+        rows: [
+          row("20250410", "G/1", 3000000, partyB),
+          row("20250510", "G/2", 2500000, partyB),
+          row("20250610", "G/3", 1000000, partyB),
+        ],
+      }],
+    );
+    const found = ofCheck(out, "tds_not_deducted");
+    // 0.1% of 5,00,000 = 500 and of 10,00,000 = 1,000; the pre-crossing booking is not liable.
+    expect(found.map((f) => f.amount)).toEqual([500, 1000]);
+  });
+
+  it("194Q stays silent when the year aggregate never crosses the threshold", () => {
+    const operator: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: "Purchase - Domestic", section: "194Q" }],
+    };
+    const cfg = tdsCtx(operator, { dutySectionOf: () => null });
+    const out = run(
+      cfg,
+      [],
+      [{
+        ledger: "Purchase - Domestic",
+        rows: [
+          row("20250410", "G/1", 3000000, partyB),
+          row("20250510", "G/2", 1500000, partyB), // 45L total, below 50L
+        ],
+      }],
+    );
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
+  });
+
+  it("an express 194Q opt-out suppresses 194Q findings entirely", () => {
+    // The buyer did not meet the previous-year turnover condition: the operator
+    // sets 194Q Applicable = N, so an otherwise-liable 194Q booking produces
+    // nothing — not a single-payer exemption, the whole section is out.
+    const operator: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: "Purchase - Domestic", section: "194Q" }],
+      section194QApplicable: false,
+    };
+    const cfg = tdsCtx(operator, { dutySectionOf: () => null, panKeyOf: () => "TaxId 999" });
+    const out = run(
+      cfg,
+      [],
+      [{
+        ledger: "Purchase - Domestic",
+        rows: [
+          row("20250410", "G/1", 3000000, partyB),
+          row("20250510", "G/2", 3000000, partyB), // well past the 50L aggregate
+        ],
+      }],
+    );
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
+    expect(out.findings.some((f) => f.section === "194Q")).toBe(false);
+  });
+
+  it("a wholeYear section (194C) still makes every booking liable once the aggregate crosses", () => {
+    // Six 20,000 bookings: aggregate 1,20,000 crosses the 1,00,000 threshold,
+    // so the whole year is liable even though each is below the single limit.
+    const out = run(
+      tdsCtx(),
+      [],
+      [{ ledger: expenseLedger, rows: [1, 2, 3, 4, 5, 6].map((i) =>
+        row(`2025051${i}`, `P/${i}`, 20000, partyB)) }],
+    );
+    const found = ofCheck(out, "tds_not_deducted");
+    expect(found).toHaveLength(6);
+    expect(found.reduce((a, f) => a + f.amount, 0)).toBe(2400);
+  });
+
   it("rates: PAN 4th char P/H at 1% for 194C, entity C/F at 2%", () => {
     const pan = tdsCtx(stdOperator, {
       entityOf: (p) => (p === partyA ? "P" : "F"),
