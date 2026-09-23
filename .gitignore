@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .env
 reports/out/
+
+# Operator party map carries real party names — never commit it. Sample is tracked.
+config/as26-map.json
