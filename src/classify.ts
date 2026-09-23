@@ -9,7 +9,8 @@ export interface Overrides {
   /**
    * The `pfEsiLedgers` key (task 9): the fund payable ledger names per fund,
    * replacing the liability-root name heuristic wholesale for the fund it
-   * names. Absent lists leave the heuristic in force.
+   * names. Only a MISSING list leaves the heuristic in force; an explicit
+   * empty list replaces it with "no payable ledger" (design Q4).
    */
   pfEsiLedgers?: { pf: string[]; esi: string[] };
 }

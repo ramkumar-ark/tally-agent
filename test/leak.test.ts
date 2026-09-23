@@ -453,6 +453,28 @@ describe("pf/esi leak surfaces", () => {
     // The real dues landed as Excel serials: due 2025-05-15 -> 45792.
     expect(partText(readXlsm(await readFile(path)), "xl/worksheets/sheet1.xml")).toContain("45792");
   });
+
+  it("refuses an outPath that resolves onto the source workbook itself", async () => {
+    const session = createSession(pfSecretDownstream(), EMPTY_OVERRIDES);
+    await session.pfEsiReview({
+      fromDate: "20250401",
+      toDate: "20260331",
+      operator: parsePfEsiTemplate(filledPfEsiOperator()),
+    });
+    const dir = mkdtempSync(join(tmpdir(), "tally-agent-3cd-guard-"));
+    const sourcePath = join(dir, "PF ESI funds.xlsm");
+    const source = makeWinmanFixture();
+    writeFileSync(sourcePath, source);
+    // Both the plain identity and a dot-dotted, spelt-differently alias of it.
+    await expect(
+      session.write3cdPfEsi({ sourcePath, outPath: sourcePath }),
+    ).rejects.toThrow(/resolves to the source workbook/);
+    await expect(
+      session.write3cdPfEsi({ sourcePath, outPath: join(dir, ".", "PF ESI funds.xlsm") }),
+    ).rejects.toThrow(/resolves to the source workbook/);
+    // The template survives both refusals byte-identical.
+    expect(readFileSync(sourcePath).equals(source)).toBe(true);
+  });
 });
 
 /**

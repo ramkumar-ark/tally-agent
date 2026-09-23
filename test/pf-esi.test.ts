@@ -42,6 +42,15 @@ describe("fund ledger discovery", () => {
     const f = findFundLedgers(masters, ctx, { pf: ["Some Other PF Ledger"] });
     expect(f.pf).toEqual(["Some Other PF Ledger"]);
   });
+
+  // Overrides Q4 ruling: an explicit empty per-fund list is believed-in-force
+  // tuning ("no payable ledger"), replacing the heuristic wholesale, while the
+  // other fund keeps its heuristic.
+  it("replaces the heuristic wholesale with an explicit empty list", () => {
+    const f = findFundLedgers(masters, ctx, { pf: [] });
+    expect(f.pf).toEqual([]);
+    expect(f.esi).toEqual(["Staff ESI Payable"]);
+  });
 });
 
 describe("employee contribution extraction", () => {

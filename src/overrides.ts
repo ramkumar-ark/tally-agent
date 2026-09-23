@@ -31,11 +31,15 @@ export function loadOverrides(path: string, warn?: (why: string) => void): Overr
 }
 
 /**
- * The `pfEsiLedgers` key: `{ "pf": [...ledger names], "esi": [...] }`. An
- * operator override believed in force must never be skipped quietly, so a
- * malformed entry throws — and never echoes a ledger name, which may be
- * company-internal. Empty lists are stripped: an empty list means "unset",
- * not "this fund has no payable ledger" (that comes from the books side).
+ * The `pfEsiLedgers` key: `{ "pf": [...ledger names], "esi": [...] }`.
+ * Per design Q4, an explicit entry replaces the fund-ledger heuristic for
+ * that fund — an explicit empty array (e.g. `{"PF": []}`) means "this fund
+ * has no payable ledger" and REPLACES the heuristic wholesale; only a
+ * MISSING key is "unset" for its fund, and only the whole key absent, its
+ * value `null`, or an empty `{}` (no pf/esi keys at all) is unset overall.
+ * An operator override believed in force must never be skipped quietly, so
+ * a malformed entry throws — and never echoes a ledger name, which may be
+ * company-internal.
  */
 function pfEsiLedgers(
   raw: unknown,
@@ -51,10 +55,11 @@ function pfEsiLedgers(
     if (!Array.isArray(value)) throw bad(list);
     const names = value.map((n) => String(n ?? "").trim()).filter((n) => n !== "");
     if (names.length !== value.length) throw bad(list);
-    if (names.length === 0) continue;
     out[list] = names;
   }
-  return out.pf || out.esi ? { pfEsiLedgers: out as { pf: string[]; esi: string[] } } : null;
+  return out.pf === undefined && out.esi === undefined
+    ? null
+    : { pfEsiLedgers: out as { pf: string[]; esi: string[] } };
 }
 
 /**

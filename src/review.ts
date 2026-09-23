@@ -33,8 +33,8 @@ import { scrutinize, type MonthMovement } from "./scrutiny.js";
 import { clause20b, employeeEvents, findFundLedgers, type BooksContext, type Clause20bRow, type FundLedgers } from "./pf-esi.js";
 import type { OperatorPfEsi } from "./pf-esi-file.js";
 import { lawFor, type FundKey } from "./pf-esi-law.js";
-import { basename, dirname, extname, join } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, resolve } from "node:path";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { readXlsm, writeXlsm } from "./xlsm.js";
 import { readSchema, readHandshake, writeSheetRows, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
@@ -1942,10 +1942,38 @@ export function createSession(
       extname(opts.outPath).toLowerCase() === ".xlsm"
         ? opts.outPath
         : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    // Copying onto the source would destroy the operator's template before
+    // its contents were used; both entries are resolved through their real
+    // paths where they exist so a dot-dotted outPath cannot slip past.
+    const sourceId = await realPathId(opts.sourcePath);
+    if (sourceId === (await realPathId(target))) {
+      throw new Error("the outPath target resolves to the source workbook itself; write the copy somewhere else");
+    }
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, writeXlsm(out));
     return target;
   }
+
+/**
+ * An identity for a possibly-not-yet-existing path: its realpath when the
+ * entry is there, else its parent directory's realpath joined with its
+ * basename, else its resolved absolute form. Only ever used to detect a
+ * self-overwrite, never as a general path normaliser.
+ */
+async function realPathId(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch {
+    // not on disk (yet)
+  }
+  const abs = resolve(p);
+  try {
+    return join(await realpath(dirname(abs)), basename(abs));
+  } catch {
+    // the directory is missing too
+  }
+  return abs;
+}
 
   function maskGstFinding(
     f: {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
-import { loadOverrides, loadWrongGroup } from "../src/overrides.js";
+import { loadOverrides, loadPfEsiLedgers, loadWrongGroup } from "../src/overrides.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 
 function file(body: unknown): string {
@@ -55,5 +55,35 @@ describe("loadWrongGroup", () => {
       keywords: { expense: [], income: [], party: [], bank: [], capital: [], loan: [], neutral: [] },
     });
     expect(loadOverrides(shipped)).toEqual(EMPTY_OVERRIDES);
+  });
+});
+
+describe("loadPfEsiLedgers", () => {
+  it("is unset when the key is missing, null, or a bare {}", () => {
+    expect(loadPfEsiLedgers(file({}))).toBeUndefined();
+    expect(loadPfEsiLedgers(file({ pfEsiLedgers: null }))).toBeUndefined();
+    expect(loadPfEsiLedgers(file({ pfEsiLedgers: {} }))).toBeUndefined();
+    expect(loadOverrides(file({})).pfEsiLedgers).toBeUndefined();
+  });
+
+  // Overrides Q4: an explicit per-fund empty list is believed-in-force tuning
+  // ("no payable ledger"), replacing the heuristic for that fund.
+  it("keeps an explicit empty list and lets a missing fund fall through", () => {
+    expect(loadPfEsiLedgers(file({ pfEsiLedgers: { pf: [] } }))).toEqual({ pf: [] });
+    expect(loadPfEsiLedgers(file({ pfEsiLedgers: { pf: [], esi: ["Ledger Nine"] } }))).toEqual({
+      pf: [],
+      esi: ["Ledger Nine"],
+    });
+    const viaLoadOverrides = loadOverrides(file({ pfEsiLedgers: { pf: [] } }));
+    expect(viaLoadOverrides.pfEsiLedgers).toEqual({ pf: [] });
+  });
+
+  it("still throws on a malformed entry, without echoing it", () => {
+    expect(() => loadPfEsiLedgers(file({ pfEsiLedgers: { esi: "" } }))).toThrow(
+      "overrides: pfEsiLedgers.esi must be a list of ledger names from the company's books",
+    );
+    expect(() => loadPfEsiLedgers(file({ pfEsiLedgers: { pf: ["keep"], esi: ["", "drop"] } }))).toThrow(
+      "overrides: pfEsiLedgers.esi must be a list of ledger names from the company's books",
+    );
   });
 });
