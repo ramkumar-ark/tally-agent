@@ -43,7 +43,7 @@ function colName(n: number): string {
 }
 
 /** Excel's serial day number: days since 1899-12-30. */
-function serial(ymd: string): number {
+export function serial(ymd: string): number {
   const y = Number(ymd.slice(0, 4));
   const m = Number(ymd.slice(4, 6));
   const d = Number(ymd.slice(6, 8));
