@@ -8,7 +8,8 @@ export type CheckId =
   | "overdrawn_bank"
   | "ledger_under_primary_group"
   | "dormant_balance"
-  | "ledger_in_wrong_group";
+  | "ledger_in_wrong_group"
+  | "pf_esi_unclassified_contribution";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const CHECK_ORDINAL: Record<CheckId, number> = {
@@ -20,6 +21,7 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   ledger_under_primary_group: 6,
   dormant_balance: 7,
   ledger_in_wrong_group: 8,
+  pf_esi_unclassified_contribution: 9,
 };
 
 export type GstCheckId =
