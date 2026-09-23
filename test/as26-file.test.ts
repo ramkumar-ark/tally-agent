@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readWorkbook } from "../src/xlsx-read.js";
 import { parseAs26Export } from "../src/as26-file.js";
-import { buildAs26Fixture } from "./as26-fixture.js";
+import { buildAs26Fixture, defaultAs26Fixture } from "./as26-fixture.js";
 
 describe("as26 fixture", () => {
   it("exposes hidden data sheets by name regardless of state", () => {
@@ -9,6 +9,38 @@ describe("as26 fixture", () => {
     const names = sheets.map((s) => s.name);
     expect(names).toContain("TDS - Form 16A");
     expect(sheets.find((s) => s.name === "TDS_Detailed")?.state).toBe("hidden");
+  });
+});
+
+describe("parseAs26Export — detailed", () => {
+  const file = parseAs26Export(buildAs26Fixture());
+
+  it("parses per-transaction rows with text dates and banded names", () => {
+    expect(file.transactions).toHaveLength(4);
+    const t = file.transactions[0];
+    expect(t).toMatchObject({ kind: "tds", date: "20250414", amount: 300000, tax: 6000, status: "F", bookingDate: "20250530", section: "194C" });
+  });
+
+  it("carries banded names forward so group rows keep their deductor", () => {
+    expect(file.transactions[1].nameKey).toBe(file.transactions[0].nameKey);
+  });
+
+  it("joins detailed names to summaries across case (UPPER vs mixed)", () => {
+    for (const t of file.transactions) {
+      expect(file.summaries.some((s) => s.kind === t.kind && s.section === t.section && s.nameKey === t.nameKey)).toBe(true);
+    }
+  });
+
+  it("counts 16B-16E data rows without parsing them", () => {
+    expect(file.skipped.form16BCDE).toBe(0); // fixture's sheet is empty
+  });
+
+  it("skips (counts) rows without a parsable date instead of throwing", () => {
+    const fx = defaultAs26Fixture();
+    fx.tdsDetail[3] = ["NAGAR PALIKA NAGAR BHAVAN", "14/04/2025", 300000, null, 6000, null, "MUMA01234E", null, "F", "30-May-2025", "194C"];
+    const f = parseAs26Export(buildAs26Fixture(fx));
+    expect(f.transactions).toHaveLength(3);
+    expect(f.skipped.noDate).toBe(1);
   });
 });
 

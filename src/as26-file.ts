@@ -156,5 +156,40 @@ export function parseAs26Export(buf: Buffer): As26File {
     }
   }
 
-  return { summaries, transactions: [], skipped: { noDate: 0, blankTax: 0, form16BCDE } };
+  const transactions: As26Transaction[] = [];
+  const skipped = { noDate: 0, blankTax: 0, form16BCDE };
+
+  const parseDetail = (sheet: GridSheet, kind: As26Kind): void => {
+    const headerRow = locateHeaderRow(sheet, DETAIL_TOKENS.name);
+    if (headerRow === null) throw new Error(`as26 ${sheet.name}: could not locate the header row`);
+    const b = bindHeader(sheet, headerRow, DETAIL_TOKENS);
+    const missing = ["name", "date", "amount", "tax", "section"].filter((f) => !b.has(f));
+    if (missing.length) {
+      throw new Error(`as26 ${sheet.name}: required column(s) missing — got headers for: ${[...b.keys()].join(", ") || "none"}`);
+    }
+    let lastName: string | null = null;
+    for (const r of sheet.rows) {
+      if (r.row <= headerRow) continue;
+      const nameCell = String(r.cells.get(b.get("name") ?? -1)?.value ?? "").trim();
+      const name = nameCell || lastName;
+      const tax = round2(num(r.cells.get(b.get("tax") ?? -1)?.value ?? null));
+      const amount = round2(num(r.cells.get(b.get("amount") ?? -1)?.value ?? null));
+      if (!name && tax === 0 && amount === 0) continue; // blank padding row
+      if (nameCell) lastName = nameCell;
+      const date = as26Date(r.cells.get(b.get("date") ?? -1));
+      if (!date) { skipped.noDate += 1; continue; }
+      if (tax === 0 && amount === 0) { skipped.blankTax += 1; continue; }
+      const booking = as26Date(r.cells.get(b.get("bookingDate") ?? -1));
+      transactions.push({
+        kind, nameKey: canonicalKey(name ?? ""), date, amount, tax,
+        status: String(r.cells.get(b.get("status") ?? -1)?.value ?? "").trim(),
+        bookingDate: booking, section: String(r.cells.get(b.get("section") ?? -1)?.value ?? "").trim(),
+      });
+    }
+  };
+
+  parseDetail(sheetByToken(sheets, SHEET_TOKENS.tdsDetail)!, "tds");
+  parseDetail(sheetByToken(sheets, SHEET_TOKENS.tcsDetail)!, "tcs");
+
+  return { summaries, transactions, skipped };
 }
