@@ -174,3 +174,91 @@ describe("receivableLedgers", () => {
     expect(receivableLedgers([{ name: "Cash", parent: "Current Assets" }], isAssetRoot)).toEqual([]);
   });
 });
+
+// --- Task 7: stage-2 reconciliation core ---
+
+import { reconcileParty } from "../src/as26.js";
+import type { As26File, As26SummaryRow, As26Transaction } from "../src/as26-file.js";
+
+const NK = "nagar palika nagar bhavan";
+const nameOf = "Nagar Palika Nagar Bhavan";
+
+const sum = (taxTotal: number): As26SummaryRow => ({
+  kind: "tds", name: nameOf, nameKey: NK, section: "194C",
+  taxTotal, taxClaimed: 0, balanceCf: 0, gross: 0,
+});
+const txn = (tax: number, bookingDate: string | null = null, date = "20250612"): As26Transaction => ({
+  kind: "tds", nameKey: NK, date, amount: tax, tax, status: bookingDate ? "O" : "F", bookingDate, section: "194C",
+});
+const txFile = (tx: As26Transaction[], total: number): As26File => ({
+  summaries: [sum(total)], transactions: tx,
+  skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+});
+const bookFacts = (ded: Array<[string, number]>): BooksFacts => ({
+  deductions: ded.map(([date, tax]) => ({
+    ledgerKey: NK, kind: "tds" as const, date, tax, voucherType: "Journal",
+  })),
+  sales: [],
+});
+const mapper = { mappings: [{ ledger: nameOf, as26Name: nameOf }] };
+const matchOf = (file: As26File, facts: BooksFacts) =>
+  matchParties(file, facts, mapper, ledgers).matches[0];
+
+describe("reconcileParty", () => {
+  it("bulk: three books deductions explained by one 26AS line", () => {
+    const facts = bookFacts([["20250610", 6000], ["20250611", 8000], ["20250612", 10000]]);
+    const file = txFile([txn(24000)], 24000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.booksTax).toBe(24000);
+    expect(r.as26Tax).toBe(24000);
+    expect(r.paired).toHaveLength(0);
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].parts).toHaveLength(3);
+    expect(r.combinations[0].side).toBe("as26");
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
+  it("split: one books deduction explained by two 26AS lines", () => {
+    const facts = bookFacts([["20250612", 10000]]);
+    const file = txFile([txn(6000), txn(4000, null, "20250620")], 10000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].side).toBe("books");
+    expect(r.combinations[0].parts).toHaveLength(2);
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
+  it("ambiguous: multiple fitting subsets never force a pick", () => {
+    const facts = bookFacts([["20250612", 30000]]);
+    const file = txFile([txn(20000), txn(10000), txn(25000, null, "20250620"), txn(5000, null, "20250621")], 60000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.ambiguous).toBeGreaterThanOrEqual(1);
+    expect(r.unmatchedBooks).toHaveLength(1);
+    expect(r.combinations).toHaveLength(0);
+  });
+  it("cap: over 40 unmatched per side skips the search", () => {
+    const facts = bookFacts(Array.from({ length: 41 }, (_, i) => [`202506${String(1 + i % 20).padStart(2, "0")}`, 1000 + i] as [string, number]));
+    const file = txFile([txn(999999)], 999999);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.combinationSearchSkipped).toBe(true);
+    expect(r.combinations).toHaveLength(0);
+  });
+  it("tolerance: ₹0.60 reconciles, ₹1.60 does not", () => {
+    const near = bookFacts([["20250612", 10000.6]]);
+    const fNear = txFile([txn(10000)], 10000);
+    expect(reconcileParty(fNear, near, matchOf(fNear, near), "20251231").paired).toHaveLength(1);
+    const far = bookFacts([["20250612", 10001.6]]);
+    const r = reconcileParty(fNear, far, matchOf(fNear, far), "20251231");
+    expect(r.paired).toHaveLength(0);
+    expect(r.unmatchedBooks).toHaveLength(1);
+    expect(r.unmatchedAs26).toHaveLength(1);
+  });
+  it("late booking sums where bookingDate > toDate; totals stay primary", () => {
+    const facts = bookFacts([["20250612", 7000]]);
+    const file = txFile([txn(7000), txn(3000, "20260115", "20250620")], 10000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.lateBookedTax).toBe(3000);
+    expect(r.as26Tax).toBe(10000);
+    expect(r.booksTax).toBe(7000);
+  });
+});

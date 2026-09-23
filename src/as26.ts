@@ -208,3 +208,142 @@ export function receivableLedgers(
   }
   return out;
 }
+
+// --- Task 7: stage-2 reconciliation core ---
+
+export const AS26_TAX_TOLERANCE = 1.0;
+export const AS26_VALUE_TOLERANCE = 1000.0;
+export const COMBINATION_MAX_SIZE = 4;
+export const COMBINATION_MAX_ITEMS = 40;
+
+export interface ReconItem { date: string; tax: number; }
+
+export interface PartyRecon {
+  match: PartyMatch;
+  booksTax: number; as26Tax: number;
+  paired: Array<{ books: ReconItem; as26: ReconItem }>;
+  combinations: Array<{ target: ReconItem; parts: ReconItem[]; side: "books" | "as26" }>;
+  ambiguous: number;
+  unmatchedBooks: ReconItem[]; unmatchedAs26: ReconItem[];
+  combinationSearchSkipped: boolean;
+  lateBookedTax: number;
+}
+
+/** Index-combination subsets of `items` with size 2..maxSize, in index order. */
+function* subsets(items: ReconItem[], maxSize: number): Generator<ReconItem[]> {
+  const n = items.length;
+  for (let size = 2; size <= Math.min(maxSize, n); size += 1) {
+    const idx: number[] = Array.from({ length: size }, (_, i) => i);
+    while (true) {
+      yield idx.map((i) => items[i]);
+      let k = size - 1;
+      while (k >= 0 && idx[k] === n - size + k) k -= 1;
+      if (k < 0) break;
+      idx[k] += 1;
+      for (let j = k + 1; j < size; j += 1) idx[j] = idx[j - 1] + 1;
+    }
+  }
+}
+
+const sumTax = (items: ReconItem[]): number => round2(items.reduce((s, i) => s + i.tax, 0));
+
+const fits = (sum: number, target: number): boolean =>
+  Math.abs(sum - target) <= AS26_TAX_TOLERANCE;
+
+/** Stage-2 reconciliation: totals first, then unique 1:1 pairing within
+ * tolerance, then a bounded combination explanation. The search never
+ * mutates the totals — it only explains leftovers, honestly: more than one
+ * fitting subset means the item stays unmatched and is counted ambiguous. */
+export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
+  const booksItems: ReconItem[] = facts.deductions
+    .filter((d) => d.ledgerKey === match.ledgerKey && d.kind === match.kind)
+    .map((d) => ({ date: d.date, tax: d.tax }));
+  const rows = file.transactions.filter((t) => t.kind === match.kind && t.nameKey === match.as26NameKey);
+  const lateBookedTax = round2(rows
+    .filter((t) => t.bookingDate && t.bookingDate > toDate)
+    .reduce((s, t) => s + t.tax, 0));
+  const as26Items: ReconItem[] = rows.map((t) => ({ date: t.bookingDate || t.date, tax: t.tax }));
+
+  const booksTax = sumTax(booksItems);
+  const as26Tax = sumTax(rows.map((t) => ({ date: t.date, tax: t.tax })));
+
+  // 1:1 pairing: pair only when the candidate is unique in both directions.
+  const paired: PartyRecon["paired"] = [];
+  const usedBooks = new Set<number>();
+  const usedAs26 = new Set<number>();
+  const candCols = booksItems.map((b) =>
+    as26Items.map((a, j) => (Math.abs(round2(a.tax - b.tax)) <= AS26_TAX_TOLERANCE ? j : -1)).filter((j) => j >= 0));
+  const candRows = as26Items.map((a) =>
+    booksItems.map((b, i) => (Math.abs(round2(a.tax - b.tax)) <= AS26_TAX_TOLERANCE ? i : -1)).filter((i) => i >= 0));
+  booksItems.forEach((b, i) => {
+    if (usedBooks.has(i)) return;
+    const cs = candCols[i];
+    if (cs.length !== 1) return;
+    const j = cs[0];
+    if (usedAs26.has(j) || candRows[j].length !== 1) return;
+    paired.push({ books: b, as26: as26Items[j] });
+    usedBooks.add(i);
+    usedAs26.add(j);
+  });
+
+  let unmatchedBooks = booksItems.filter((_, i) => !usedBooks.has(i));
+  let unmatchedAs26 = as26Items.filter((_, i) => !usedAs26.has(i));
+
+  const combinations: PartyRecon["combinations"] = [];
+  let ambiguous = 0;
+  const searchSkipped =
+    unmatchedBooks.length > COMBINATION_MAX_ITEMS || unmatchedAs26.length > COMBINATION_MAX_ITEMS;
+
+  if (!searchSkipped) {
+    const takenBooks = new Set<number>();
+    const takenAs26 = new Set<number>();
+    // combinations targeting a books item, parts from 26AS
+    const bookTargets = unmatchedBooks.filter((_, i) => !takenBooks.has(i));
+    for (const target of bookTargets) {
+      const pool = unmatchedAs26.filter((_, i) => !takenAs26.has(i));
+      const fitAs26: ReconItem[][] = [];
+      for (const s of subsets(pool, COMBINATION_MAX_SIZE)) {
+        if (fits(sumTax(s), target.tax)) fitAs26.push(s);
+      }
+      if (fitAs26.length === 1) {
+        const parts = fitAs26[0];
+        combinations.push({ target, parts, side: "books" });
+        for (const p of parts) {
+          const k = unmatchedAs26.findIndex((x) => x === p);
+          if (k >= 0) takenAs26.add(k);
+        }
+        takenBooks.add(unmatchedBooks.findIndex((x) => x === target));
+      } else if (fitAs26.length > 1) {
+        ambiguous += 1;
+      }
+    }
+    // combinations targeting an as26 item, parts from books
+    const as26Targets = unmatchedAs26.filter((_, i) => !takenAs26.has(i));
+    for (const target of as26Targets) {
+      const pool = unmatchedBooks.filter((_, i) => !takenBooks.has(i));
+      const fitBooks: ReconItem[][] = [];
+      for (const s of subsets(pool, COMBINATION_MAX_SIZE)) {
+        if (fits(sumTax(s), target.tax)) fitBooks.push(s);
+      }
+      if (fitBooks.length === 1) {
+        const parts = fitBooks[0];
+        combinations.push({ target, parts, side: "as26" });
+        for (const p of parts) {
+          const k = unmatchedBooks.findIndex((x) => x === p);
+          if (k >= 0) takenBooks.add(k);
+        }
+        const t = unmatchedAs26.findIndex((x) => x === target);
+        if (t >= 0) takenAs26.add(t);
+      } else if (fitBooks.length > 1) {
+        ambiguous += 1;
+      }
+    }
+    unmatchedBooks = unmatchedBooks.filter((_, i) => !takenBooks.has(i));
+    unmatchedAs26 = unmatchedAs26.filter((_, i) => !takenAs26.has(i));
+  }
+
+  return {
+    match, booksTax, as26Tax, paired, combinations, ambiguous,
+    unmatchedBooks, unmatchedAs26, combinationSearchSkipped: searchSkipped, lateBookedTax,
+  };
+}
