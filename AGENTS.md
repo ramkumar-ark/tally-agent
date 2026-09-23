@@ -169,6 +169,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   and `ledgerVoucherRows`' `sideSign`, once, at the boundary (R-MCP-5). The
   payment (party-ledger debit) and duty (credit = deduction, debit = deposit)
   predicates were already correct and are unchanged.
+- **TDS party→master resolution is indexed once** (`masterOf`, `src/review.ts`'s
+  TDS session): `analyzeTds` calls `panKeyOf`/`entityOf`/`deducteeTypeOf`/
+  `certificateRateOf` per booking, and the linear `masters.find` each closure
+  used blocked the event loop for 30+ min on a real FY 25-26 day-book run
+  (~6.8k bookings against ~2.7k masters). Never reintroduce a `find` there;
+  `test/tds-review-perf.test.ts` is the regression guard. On finding-heavy runs
+  the remaining cost is masking (`maskKnownNames`, `src/mask.ts`): O(findings ×
+  vaulted names), rebuilding a RegExp per entry per string.
 
 ## Sharp edges found implementing depreciation (2026-09-16)
 

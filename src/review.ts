@@ -1035,8 +1035,17 @@ export function createSession(
         panAliasOf.set(canonicalKey(p.ledger), vault.pseudonym(hit.pan, "tax_id"));
       }
     }
-    const realOf = (party: string): string =>
-      masters.find((l) => canonicalKey(l.name) === canonicalKey(party))?.name ?? party;
+    // Party→master resolution is a hot path: `analyzeTds` calls these closures
+    // per booking, so a linear `masters.find` here was tens of millions of
+    // `canonicalKey` scans on a real company (30+ min of blocked CPU). Index
+    // the masters once; first match wins, preserving the old `find` semantics
+    // for a duplicate canonical key.
+    const masterOf = new Map<string, LedgerTaxInfo>();
+    for (const l of masters) {
+      const k = canonicalKey(l.name);
+      if (!masterOf.has(k)) masterOf.set(k, l);
+    }
+    const realOf = (party: string): string => masterOf.get(canonicalKey(party))?.name ?? party;
 
     const roleOfLedger = (ledger: string): GroupRole =>
       c.role(groupOfLedger.get(canonicalKey(ledger)) ?? "");
@@ -1126,15 +1135,14 @@ export function createSession(
     const transporterDeclared = (party: string): boolean => ops(party)?.transporterDeclaration ?? false;
     const deducteeFiledReturn = (party: string): boolean => ops(party)?.deducteeFiledReturn ?? false;
     const entityOf = (party: string): "P" | "H" | "C" | "F" | null => {
-      const real = realOf(party);
-      const pan = masters.find((l) => canonicalKey(l.name) === canonicalKey(real))?.pan ?? null;
+      const pan = masterOf.get(canonicalKey(party))?.pan ?? null;
       if (!pan || pan.length < 4) return null;
       const ch = pan[3].toUpperCase();
       return ch === "P" || ch === "H" || ch === "C" || ch === "F" ? (ch as "P" | "H" | "C" | "F") : null;
     };
-    const panKeyOf = (party: string): string | null => panAliasOf.get(canonicalKey(realOf(party))) ?? null;
+    const panKeyOf = (party: string): string | null => panAliasOf.get(canonicalKey(party)) ?? null;
     const deducteeTypeOf = (party: string): string =>
-      masters.find((l) => canonicalKey(l.name) === canonicalKey(realOf(party)))?.tdsDeducteeType ?? "";
+      masterOf.get(canonicalKey(party))?.tdsDeducteeType ?? "";
 
     const ctx: TdsCtx = {
       tdsParties: unique([
