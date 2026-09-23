@@ -117,3 +117,94 @@ export function loadAs26Map(path: string, warn?: (why: string) => void): As26Map
   });
   return { mappings };
 }
+
+// --- Task 6: books facts helpers ---
+
+import type { LedgerVoucherRow, VoucherRow } from "./downstream.js";
+import { kindOf, partyOf, gstHeadOf } from "./gst.js";
+import type { GstCtx } from "./gst.js";
+
+/** Deduction events from month-chunked Ledger Vouchers of the TDS/TCS
+ * receivable ledger(s). Debits only — a credit row is a refund entry, which
+ * is counted (visible) but never silently netted. */
+export function deductionEvents(rows: LedgerVoucherRow[], kind: As26Kind): { events: BooksDeduction[]; credits: number } {
+  const events: BooksDeduction[] = [];
+  let credits = 0;
+  for (const r of rows) {
+    if (r.amount > 0) {
+      events.push({
+        ledgerKey: canonicalKey(r.counterparty),
+        kind,
+        date: r.date,
+        tax: round2(r.amount),
+        voucherType: r.voucherType,
+      });
+    } else if (r.amount < 0) {
+      credits += 1;
+    }
+  }
+  return { events, credits };
+}
+
+/** Per-party sales + invoice refs from the period's day book (sale and
+ * deduction are separate vouchers — the join is party+period). One
+ * BooksSale per outward voucher; that is per-invoice evidence, which
+ * check 001's schedule needs. */
+export function booksSales(vouchers: VoucherRow[], ctx: GstCtx): BooksSale[] {
+  const sales: BooksSale[] = [];
+  for (const v of vouchers) {
+    if (v.cancelled) continue;
+    const kind = kindOf(v, ctx);
+    if (kind !== "outward") continue;
+    const party = partyOf(v, kind, ctx);
+    if (!party) continue;
+    let taxable = 0;
+    let gross = 0;
+    for (const e of v.entries) {
+      const group = ctx.groupOf(e.ledger);
+      if (ctx.rootOf(group) === "Sales Accounts") {
+        // positive=debit: an outward sale sits as a credit line
+        taxable += -e.amount;
+      } else if (ctx.inDutiesAndTaxes(group) && gstHeadOf(e.ledger) && e.amount < 0) {
+        gross += -e.amount;
+      }
+    }
+    sales.push({
+      ledgerKey: canonicalKey(party),
+      date: v.date,
+      ref: v.voucherNumber || null,
+      taxable: round2(taxable),
+      gross: round2(gross + taxable),
+    });
+  }
+  return sales;
+}
+
+/** Receivable ledgers by name heuristic under an asset root; kind by name.
+ * None ⇒ empty array — the wiring turns that into a hard operator-facing
+ * error rather than a silent zero. */
+export function receivableLedgers(
+  ledgers: Array<{ name: string; parent: string }>,
+  isAssetRoot: (group: string) => boolean,
+): Array<{ name: string; kind: As26Kind }> {
+  const parentOf = new Map(ledgers.map((l) => [canonicalKey(l.name), l.parent]));
+  const underAssetRoot = (name: string): boolean => {
+    let seen = new Set<string>();
+    let p: string | undefined = parentOf.get(canonicalKey(name));
+    while (p && !seen.has(p)) {
+      seen.add(p);
+      if (isAssetRoot(p)) return true;
+      p = parentOf.get(canonicalKey(p));
+    }
+    return false;
+  };
+  const out: Array<{ name: string; kind: As26Kind }> = [];
+  for (const l of ledgers) {
+    const n = canonicalKey(l.name);
+    if (!/(tds|tcs)/.test(n)) continue;
+    if (!/receivable/i.test(n)) continue;
+    if (!underAssetRoot(l.name)) continue;
+    out.push({ name: l.name, kind: n.includes("tcs") ? "tcs" : "tds" });
+  }
+  return out;
+}

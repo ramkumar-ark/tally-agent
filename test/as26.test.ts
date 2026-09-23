@@ -72,3 +72,105 @@ describe("matchParties — mapping-only", () => {
     expect(g.tax).toBe(18000);
   });
 });
+
+// --- Task 6: books facts helpers ---
+
+import type { LedgerVoucherRow, VoucherRow } from "../src/downstream.js";
+import { deductionEvents, booksSales, receivableLedgers } from "../src/as26.js";
+import type { GstCtx } from "../src/gst.js";
+
+const lvRow = (date: string, counterparty: string, amount: number, voucherType = "Journal"): LedgerVoucherRow => ({
+  date, voucherType, voucherNumber: `V/${date}`, reference: "", counterparty,
+  amount, matchStatus: "unknown", tax: null,
+});
+
+const as26Ctx: GstCtx = {
+  groupOf: (l) =>
+    l === "Nagar Palika Nagar Bhavan" || l === "Anand Buildmart Pvt Ltd"
+      ? "Sundry Debtors"
+      : l === "Works Contract Service" ? "Sales Accounts"
+      : l === "Building Materials" ? "Purchase Accounts"
+      : l.includes("CGST") || l.includes("IGST") ? "Duties & Taxes"
+      : "Unclassified",
+  rootOf: (g) => (g === "Sales Accounts" ? "Sales Accounts" : g === "Purchase Accounts" ? "Purchase Accounts" : null),
+  roleOf: (g) => (g === "Sundry Debtors" ? "debtor" : "other"),
+  inDutiesAndTaxes: (g) => g.includes("Duties"),
+  gstinOf: () => null,
+};
+
+/** Normal outward Tally layout (positive=debit): party debit, sales-accounts credit, GST heads credit. */
+const sale = (): VoucherRow => ({
+  date: "20250612", voucherType: "Contract Sales", voucherNumber: "CS/9", reference: "",
+  partyLedgerName: "Nagar Palika Nagar Bhavan", cancelled: false,
+  entries: [
+    { ledger: "Nagar Palika Nagar Bhavan", amount: 47200 },
+    { ledger: "Works Contract Service", amount: -40000 },
+    { ledger: "Output CGST", amount: -3600 },
+    { ledger: "Output IGST", amount: -3600 },
+  ],
+});
+
+describe("deductionEvents", () => {
+  it("debits become events, credits are counted not netted", () => {
+    const ledger = "TDS Receivable";
+    const rows = [
+      lvRow("20250612", "Nagar Palika Nagar Bhavan", 9000.5, "Journal"),
+      lvRow("20250712", "Anand Buildmart Pvt Ltd", 2000.25, "Journal"),
+      lvRow("20250812", "Nagar Palika Nagar Bhavan", -500, "D/Note"),
+    ];
+    const { events, credits } = deductionEvents(rows, "tds");
+    expect(credits).toBe(1);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      ledgerKey: "nagar palika nagar bhavan", kind: "tds",
+      date: "20250612", tax: 9000.5, voucherType: "Journal",
+    });
+    expect(events[1].tax).toBe(2000.25);
+    void ledger;
+  });
+  it("only debits — a zero row is ignored", () => {
+    const { events, credits } = deductionEvents([lvRow("20250612", "X", 0)], "tds");
+    expect(events).toHaveLength(0);
+    expect(credits).toBe(0);
+  });
+});
+
+describe("booksSales", () => {
+  it("per-invoice sale rows with taxable, GST-inclusive gross and ref", () => {
+    const cancelled: VoucherRow = { ...sale(), cancelled: true, voucherNumber: "CS/X" };
+    const otherSide: VoucherRow = {
+      ...sale(), partyLedgerName: "Anand Buildmart Pvt Ltd",
+      entries: [
+        { ledger: "Anand Buildmart Pvt Ltd", amount: -47200 },
+        { ledger: "Building Materials", amount: 40000 },
+      ],
+    };
+    const sales = booksSales([sale(), cancelled, otherSide], as26Ctx);
+    expect(sales).toHaveLength(1); // cancelled skipped; inward voucher not a sale
+    expect(sales[0]).toMatchObject({
+      ledgerKey: "nagar palika nagar bhavan", date: "20250612",
+      taxable: 40000, gross: 47200, ref: "CS/9",
+    });
+  });
+});
+
+describe("receivableLedgers", () => {
+  const isAssetRoot = (g: string) => g.includes("Current Assets");
+  it("identifies TDS/TCS receivable ledgers under an asset root, kind by name", () => {
+    const led = receivableLedgers([
+      { name: "TDS Receivable", parent: "Current Assets" },
+      { name: "TCS Receivable", parent: "Current Assets" },
+      { name: "TDS Yellow Led", parent: "Sundry Debtors" },
+      { name: "Sunil Sharma", parent: "Sundry Debtors" },
+      { name: "Sunil Sharma", parent: "Sundry Debtors" },
+      { name: "Current Assets", parent: "" },
+    ], isAssetRoot);
+    expect(led).toEqual([
+      { name: "TDS Receivable", kind: "tds" },
+      { name: "TCS Receivable", kind: "tcs" },
+    ]);
+  });
+  it("none found ⇒ empty array", () => {
+    expect(receivableLedgers([{ name: "Cash", parent: "Current Assets" }], isAssetRoot)).toEqual([]);
+  });
+});

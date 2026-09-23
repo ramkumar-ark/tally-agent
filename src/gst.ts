@@ -101,7 +101,7 @@ interface Acc {
   heads: Record<GstHead, number>;
 }
 
-const kindOf = (v: VoucherRow, ctx: GstCtx): GstKind | null => {
+export const kindOf = (v: VoucherRow, ctx: GstCtx): GstKind | null => {
   let hasSales = false;
   let hasPurchase = false;
   for (const e of v.entries) {
@@ -115,7 +115,7 @@ const kindOf = (v: VoucherRow, ctx: GstCtx): GstKind | null => {
   return null;
 };
 
-const partyOf = (v: VoucherRow, kind: GstKind | null, ctx: GstCtx): string | null => {
+export const partyOf = (v: VoucherRow, kind: GstKind | null, ctx: GstCtx): string | null => {
   if (v.partyLedgerName) return v.partyLedgerName;
   if (!kind) return null;
   const want: GroupRole = kind === "outward" ? "debtor" : "creditor";
