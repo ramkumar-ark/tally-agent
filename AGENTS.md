@@ -177,6 +177,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `test/tds-review-perf.test.ts` is the regression guard. On finding-heavy runs
   the remaining cost is masking (`maskKnownNames`, `src/mask.ts`): O(findings ×
   vaulted names), rebuilding a RegExp per entry per string.
+- **The engine's duty side is the union of master-flagged duty ledgers and the
+  operator template's `TDS Duty` rows** (`dutyLedgerNamesAll`, `src/review.ts`).
+  Tally masters on a real company can carry zero TDS flags, leaving the
+  master-derived set empty and every booking reported as undeducted; the
+  template's `Ledger Kind: TDS Duty` rows are then the only duty signal.
+  Master-flagged behaviour is unchanged (the union is a superset), canonical-key
+  deduplicated; `test/tds-duty-ledgers.test.ts` guards both cases. Populating
+  the duty side is necessary but not sufficient: if the books genuinely contain
+  few duty credits against many bookings, the bulk of `tds_not_deducted` is
+  **substantive**, not a wiring artifact — read that total as an upper bound.
+  The 194Q threshold logic is deliberately out of scope.
 
 ## Sharp edges found implementing depreciation (2026-09-16)
 

@@ -1087,7 +1087,14 @@ export function createSession(
       const seen = new Set<string>();
       return names.filter((n) => (seen.has(canonicalKey(n)) ? false : (seen.add(canonicalKey(n)), true)));
     };
-    const fetchSet = unique([...dutyLedgerNames, ...operatorDutyLedgers, ...expenseLedgerNames, ...partyLedgerNames]);
+    // The duty side the engine reads is the union of the master-flagged duty
+    // ledgers and the operator template's `TDS Duty` rows. On a company whose
+    // masters carry no TDS flags the master side is empty and the template is
+    // the only signal; with flags present the union is a superset, so
+    // master-flagged behaviour is unchanged. Canonical-key deduplicated so one
+    // ledger named by both sides is read once.
+    const dutyLedgerNamesAll = unique([...dutyLedgerNames, ...operatorDutyLedgers]);
+    const fetchSet = unique([...dutyLedgerNamesAll, ...expenseLedgerNames, ...partyLedgerNames]);
     // Books come either from ~640 sequential Ledger-Vouchers calls or from one
     // operator day-book export. The projector reproduces the live path's signs
     // and carries only the five fields the engine reads, so nothing else in
@@ -1172,7 +1179,7 @@ export function createSession(
     // (an operator fullCheck export) runs the same engine on operator rows.
     const bookRows = asTdsLedgerRows(fetched.rows, fetchSet);
     const analysis = analyzeTds(
-      bookRows.filter((r) => dutyLedgerNames.some((n) => canonicalKey(n) === r.ledger)),
+      bookRows.filter((r) => dutyLedgerNamesAll.some((n) => canonicalKey(n) === r.ledger)),
       bookRows.filter((r) => expenseLedgerNames.some((n) => canonicalKey(n) === r.ledger)),
       bookRows.filter((r) => ctx.tdsParties.some((p) => canonicalKey(p) === r.ledger)),
       { ...ctx, operator } as Parameters<typeof analyzeTds>[3],
