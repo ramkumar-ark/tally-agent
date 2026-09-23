@@ -442,6 +442,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   untouched, or a real value that is a token of its own alias (`1` inside
   `Doc 1`) would re-substitute to `Doc Doc 1`.
 
+## Winman 3CD PF/ESI design (2026-09-23)
+
+- Read `docs/design/2026-09-23-winman-3cd-pf-esi-design.md` before touching
+  `src/xlsm.ts` / `src/winman3cd.ts` / `src/pf-esi*.ts` — it is the design of
+  record for the Winman 3CD round-trip foundation and clause 20(b) PF/ESI.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
