@@ -85,6 +85,9 @@ const instructions = (company: string | undefined, hasLedgers: boolean): Sheet =
       "One row per 26AS deductor/collector name. Type the matching Tally ledger name into the \"Tally ledger\" column. Leave it blank to leave that party unmapped — the reconciliation reports it as a mapping gap and computes no money checks for it.",
     ],
     [
+      "If one 26AS deductor/collector is represented by several Tally ledgers (for example a customer split across a site ledger and a head-office ledger), add another row for it with the SAME \"26AS name\" and pick the next ledger. The reconciliation sums all of them and compares the total against 26AS once, as a single party. The reverse is a mistake and is refused: a Tally ledger may map to only one 26AS name.",
+    ],
+    [
       "Privacy: this file carries company and party names. Never paste its rows into chat — pass its path to tb_26as_review as as26MapPath; the file itself is read inside the gateway.",
     ],
     ["Rows already mapped are pre-filled, so you can re-fill and re-run iteratively."],
@@ -111,9 +114,16 @@ export function buildAs26MapTemplate(opts: {
   map: As26Map;
   ledgers: string[];
 }): Buffer {
-  const mappedLedgerBy26as = new Map(
-    opts.map.mappings.map((m) => [canonicalKey(m.as26Name), m.ledger]),
-  );
+  // One 26AS name may carry several ledgers; the first rides the deductor's
+  // own row and each extra one gets a follow-on row with the same name (the
+  // operator adds such rows by hand, so re-fill must round-trip them too).
+  const mappedLedgersBy26as = new Map<string, string[]>();
+  for (const m of opts.map.mappings) {
+    const k = canonicalKey(m.as26Name);
+    const arr = mappedLedgersBy26as.get(k);
+    if (arr) arr.push(m.ledger);
+    else mappedLedgersBy26as.set(k, [m.ledger]);
+  }
   const ledgers = dedupe(opts.ledgers);
   // The Ledgers sheet is always written — it is the dropdown's backing range —
   // even when the company's masters are unavailable (an empty list).
@@ -131,12 +141,12 @@ export function buildAs26MapTemplate(opts: {
         ...(ledgers.length > 0 ? { validation: { formula: ledgerRange(lastLedgerRow) } } : {}),
       },
     ],
-    rows: opts.deductors.map((d) => [
-      d.name,
-      d.kind,
-      d.tax,
-      mappedLedgerBy26as.get(canonicalKey(d.name)) ?? "",
-    ]),
+    rows: opts.deductors.flatMap((d) => {
+      const mapped = mappedLedgersBy26as.get(canonicalKey(d.name)) ?? [];
+      const first: Array<string | number> = [d.name, d.kind, d.tax, mapped[0] ?? ""];
+      const extra = mapped.slice(1).map((ledger): Array<string | number> => [d.name, d.kind, "", ledger]);
+      return [first, ...extra];
+    }),
   };
   return buildWorkbook([
     instructions(opts.company, ledgers.length > 0),
@@ -148,8 +158,9 @@ export function buildAs26MapTemplate(opts: {
 /**
  * Parse a filled mapping template back into the same As26Map the JSON channel
  * yields, so the review merges both sources identically. Blank rows and
- * pre-filled rows whose Tally ledger is still empty are skipped; malformed
- * input and duplicate keys refuse citing the ROW NUMBER only, never a name.
+ * pre-filled rows whose Tally ledger is still empty are skipped. A 26AS name
+ * may repeat (several rows, one ledger each), but a Tally ledger mapped twice
+ * refuses, citing the ROW NUMBER only, never a name.
  */
 export function parseAs26MapTemplate(buf: Buffer): As26Map {
   const sheets = readWorkbook(buf);
@@ -189,7 +200,6 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
 
   const mappings: As26MapEntry[] = [];
   const seenLedger = new Set<string>();
-  const seenName = new Set<string>();
   for (const r of sheet.rows.slice(1)) {
     const as26Name = cellText(r, nameCol, "26AS name");
     const ledger = cellText(r, ledgerCol, "Tally ledger");
@@ -201,14 +211,12 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
     }
     if (!ledger) continue; // pre-filled name, not yet mapped
     const lk = canonicalKey(ledger);
-    const nk = canonicalKey(as26Name);
-    if (seenLedger.has(lk) || seenName.has(nk)) {
+    if (seenLedger.has(lk)) {
       throw new Error(
-        `as26-map template row ${r.row}: maps a ledger or 26AS name already mapped earlier in the file`,
+        `as26-map template row ${r.row}: maps a ledger already mapped earlier in the file`,
       );
     }
     seenLedger.add(lk);
-    seenName.add(nk);
     mappings.push({ ledger, as26Name });
   }
   return { mappings };

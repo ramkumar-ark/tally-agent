@@ -302,7 +302,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   operator's disk, like the report workbook, and nothing in it was ever
   masked. `tb_write_26as_template` pre-fills previously effective mappings
   (from the map) and one row per distinct canonical 26AS name (tax summed
-  across summaries) for iterative re-fill.
+  across summaries) for iterative re-fill; a name mapped to several ledgers
+  emits its deductor row plus one follow-on row per extra ledger (same
+  name/kind, blank tax), so a multi-ledger map round-trips on re-fill.
 - The Tally-ledger dropdown is always backed by the `Ledgers` sheet's range
   (`Ledgers!$A$2:$A$N`), never an inline OOXML list: an inline list is one
   comma-joined quoted string capped at 255 chars and breaks on a comma or
@@ -381,8 +383,23 @@ This file is the project's committed home for project-intrinsic agent knowledge:
     parent is usually a group, so a ledger-only chain never reaches an
     asset root. Only fall back to the loose voucher-name heuristic when
     masters are genuinely absent (`masterPairs.length === 0`), never merely
-    because the run is a day book — otherwise GST TDS receivables (under
-    `Duties & Taxes`) are misread as income-tax TDS.
+  because the run is a day book — otherwise GST TDS receivables (under
+  `Duties & Taxes`) are misread as income-tax TDS.
+- **One 26AS deductor may own several Tally ledgers** (a customer split across
+  a site ledger and a head-office ledger). `matchParties` groups mappings by
+  `${kind}|${nameKey}` and emits one `PartyMatch` whose `ledgerKeys`/
+  `ledgerNames` (original case, mapping order) hold the whole group; the
+  `ledgerName` display label is `ledgerNames.join(" + ")` and is what every
+  finding and the report's Mapping sheet print. `reconcileParty` filters with
+  `new Set(match.ledgerKeys)` and `analyzeAs26` looks sales up with
+  `match.ledgerKeys.flatMap(...)` — any new per-party computation must
+  aggregate over the whole group, never one ledger. Both loaders keep only
+  `seenLedger`: a repeated 26AS name is fine, a ledger mapped twice (same or
+  different name) — which also catches an exact duplicate row — is refused
+  citing entry/row number only. The reverse (one ledger → many deductors)
+  cannot happen and stays refused. `maskReconMatch` masks `ledgerNames`
+  element-wise as well as `ledgerName`, so the original-case array never
+  escapes through the `...m` spread.
 
 ## Masking sharp edges (whole-token substitution, 2026-09-23)
 

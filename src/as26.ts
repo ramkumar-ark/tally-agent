@@ -7,7 +7,12 @@ export interface BooksSale { ledgerKey: string; date: string; ref: string | null
 export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; }
 
 export interface PartyMatch {
-  ledgerKey: string; ledgerName: string;
+  /** Every Tally ledger mapped to this deductor/collector, canonical keys. */
+  ledgerKeys: string[];
+  /** The same ledgers in original case, in mapping order. */
+  ledgerNames: string[];
+  /** Display label for the group: `ledgerNames` joined with " + ". */
+  ledgerName: string;
   as26NameKey: string; as26Name: string;
   kind: As26Kind; source: "operator";
 }
@@ -17,7 +22,9 @@ export function round2(n: number): number { return Math.round((n + Number.EPSILO
 
 /** Stage-1 party matching — mapping-only policy (captain deviation): operator
  * entries join exactly; unmapped names and ledgers surface as gaps, never
- * auto-matched. Canonical collisions cannot arise where there is no fallback. */
+ * auto-matched. One 26AS name may carry several ledgers and they group into a
+ * single party; one ledger may carry only one 26AS name (loader-enforced).
+ * Canonical collisions cannot arise where there is no fallback. */
 export function matchParties(
   file: As26File, facts: BooksFacts, map: As26Map, ledgerNames: string[],
 ): { matches: PartyMatch[]; gaps: As26Gap[] } {
@@ -35,6 +42,12 @@ export function matchParties(
     else deductors.set(k, { kind: s.kind, nameKey: s.nameKey, name: s.name, tax: s.taxTotal });
   }
 
+  // Group operator mappings by (kind, 26AS name key): a single deductor or
+  // collector may be represented by several Tally ledgers (a customer split
+  // across a site ledger and a head-office ledger) and reconciles as one
+  // party. The reverse — one ledger standing for two deductors — is refused
+  // by the loader, so it never reaches here.
+  const groupsByKey = new Map<string, PartyMatch>();
   for (const m of map.mappings) {
     const lk = canonicalKey(m.ledger), nk = canonicalKey(m.as26Name);
     const ledger = ledgerByKey.get(lk);
@@ -48,10 +61,22 @@ export function matchParties(
       gaps.push({ kind, nameKey: nk, name: m.as26Name, tax: 0, ledger: m.ledger, reason: "name-absent" });
       continue;
     }
+    const groupKey = `${summary.kind}|${nk}`;
+    let group = groupsByKey.get(groupKey);
+    if (!group) {
+      group = {
+        ledgerKeys: [], ledgerNames: [], ledgerName: "",
+        as26NameKey: nk, as26Name: m.as26Name, kind: summary.kind, source: "operator",
+      };
+      groupsByKey.set(groupKey, group);
+    }
+    group.ledgerKeys.push(lk);
+    group.ledgerNames.push(m.ledger);
+    group.ledgerName = group.ledgerNames.join(" + ");
     matchedLedgerKeys.add(lk);
-    matchedNameKeys.add(`${summary.kind}|${nk}`);
-    matches.push({ ledgerKey: lk, ledgerName: m.ledger, as26NameKey: nk, as26Name: m.as26Name, kind: summary.kind, source: "operator" });
+    matchedNameKeys.add(groupKey);
   }
+  matches.push(...groupsByKey.values());
 
   for (const d of deductors.values()) {
     if (matchedNameKeys.has(`${d.kind}|${d.nameKey}`)) continue;
@@ -101,18 +126,17 @@ export function loadAs26Map(path: string, warn?: (why: string) => void): As26Map
   }
   const mappings: As26MapEntry[] = [];
   const seenLedger = new Set<string>();
-  const seenName = new Set<string>();
   (raw.mappings ?? []).forEach((m, i) => {
     const ledger = typeof m.ledger === "string" ? m.ledger.trim() : "";
     const as26Name = typeof m.as26Name === "string" ? m.as26Name.trim() : "";
     if (!ledger || !as26Name) {
       throw new Error(`as26-map entry ${i + 1}: "ledger" and "as26Name" must both be non-empty strings`);
     }
-    const lk = canonicalKey(ledger), nk = canonicalKey(as26Name);
-    if (seenLedger.has(lk) || seenName.has(nk)) {
-      throw new Error(`as26-map entry ${i + 1}: maps a ledger or 26AS name already mapped earlier in the file`);
+    const lk = canonicalKey(ledger);
+    if (seenLedger.has(lk)) {
+      throw new Error(`as26-map entry ${i + 1}: maps a ledger already mapped earlier in the file`);
     }
-    seenLedger.add(lk); seenName.add(nk);
+    seenLedger.add(lk);
     mappings.push({ ledger, as26Name });
   });
   return { mappings };
@@ -260,8 +284,9 @@ const fits = (sum: number, target: number): boolean =>
  * mutates the totals — it only explains leftovers, honestly: more than one
  * fitting subset means the item stays unmatched and is counted ambiguous. */
 export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
+  const keySet = new Set(match.ledgerKeys);
   const booksItems: ReconItem[] = facts.deductions
-    .filter((d) => d.ledgerKey === match.ledgerKey && d.kind === match.kind)
+    .filter((d) => keySet.has(d.ledgerKey) && d.kind === match.kind)
     .map((d) => ({ date: d.date, tax: d.tax }));
   const rows = file.transactions.filter((t) => t.kind === match.kind && t.nameKey === match.as26NameKey);
   const lateBookedTax = round2(rows
@@ -406,7 +431,7 @@ export function analyzeAs26(
   for (const match of matches) {
     const r = reconcileParty(file, facts, match, opts.toDate);
     recons.push(r);
-    const partySales = salesByKey.get(match.ledgerKey) ?? [];
+    const partySales = match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []);
     const booksTaxable = sumSales(partySales, (s) => s.taxable);
     const booksGross = sumSales(partySales, (s) => s.gross);
     const summary = file.summaries.find((s) => s.kind === match.kind && s.nameKey === match.as26NameKey);

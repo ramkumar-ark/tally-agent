@@ -77,6 +77,32 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     expect(cell(2, 3)).toBe(null);
   });
 
+  it("round-trips several ledgers under one 26AS name, one per row", () => {
+    const multi = { mappings: [
+      { ledger: "Alpha Site Ledger", as26Name: "Alpha Traders" },
+      { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
+    ]};
+    const buf = buildAs26MapTemplate({ deductors, map: multi, ledgers: ["Alpha Site Ledger", "Alpha Head Office"] });
+    expect(parseAs26MapTemplate(buf)).toEqual(multi);
+    const mapping = sheetOf(buf, "Mapping")!;
+    const nameAt = (row: number) => mapping.rows[row].cells.get(0)?.value;
+    const ledgerAt = (row: number) => mapping.rows[row].cells.get(3)?.value;
+    expect(nameAt(1)).toBe("Alpha Traders");
+    expect(ledgerAt(1)).toBe("Alpha Site Ledger");
+    expect(nameAt(2)).toBe("Alpha Traders");
+    expect(ledgerAt(2)).toBe("Alpha Head Office");
+  });
+
+  it("accepts a hand-added second row for the same 26AS name", () => {
+    expect(parseAs26MapTemplate(rawTemplate([
+      ["Alpha Traders", "tds", 12000, "Alpha Site Ledger"],
+      ["Alpha Traders", "tds", "", "Alpha Head Office"],
+    ]))).toEqual({ mappings: [
+      { ledger: "Alpha Site Ledger", as26Name: "Alpha Traders" },
+      { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
+    ]});
+  });
+
   it("skips fully blank rows and pre-filled rows with no ledger yet", () => {
     expect(parseAs26MapTemplate(rawTemplate([
       ["Alpha Traders", "tds", 12000, ""],
@@ -85,7 +111,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     ]))).toEqual({ mappings: [{ ledger: "Beta Minerals Ledger", as26Name: "Beta Minerals" }] });
   });
 
-  it("refuses a duplicate ledger or 26AS name citing the row number only", () => {
+  it("refuses a ledger mapped twice (even to different 26AS names) citing the row number only", () => {
     let msg = "";
     try {
       parseAs26MapTemplate(rawTemplate([

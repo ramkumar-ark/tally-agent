@@ -18,6 +18,14 @@ Excel template, the same way the TDS review takes a filled TDS template.
    its `kind` and `26AS tax`, and a **Tally ledger** column to fill. Rows
    already mapped come pre-filled, so you can re-fill and re-run iteratively.
    Leave a row's Tally ledger blank to leave that party unmapped.
+   - **One 26AS name may need several rows.** If a deductor/collector is
+     represented by more than one Tally ledger — a customer split across a site
+     ledger and a head-office ledger, say — add another row with the **same
+     26AS name** and pick the next ledger. One ledger per row. The review sums
+     every ledger mapped to that name (tax, credits, sales, dates) and compares
+     the total against 26AS once, as a single party, so a split customer no
+     longer shows a false shortfall. The **reverse is refused**: a Tally ledger
+     may map to only one 26AS name.
    - The **Tally ledger** column has a dropdown of the company's ledger names,
      backed by the **Ledgers** sheet (which lists them all, for reference). The
      dropdown works for any company size — it is bound to the Ledgers range,

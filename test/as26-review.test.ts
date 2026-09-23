@@ -116,6 +116,26 @@ describe("Session.as26Review", () => {
     expect(res.mastersUnavailable).toBe(false);
   });
 
+  it("groups two ledgers under one deductor and keeps both names masked", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, mapFile(
+      JSON.stringify({ mappings: [
+        { ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" },
+        { ledger: "Kaveri Minerals Trading", as26Name: "Anand Buildmart Pvt Ltd" },
+      ]}),
+    ));
+    expect(res.totals.partiesMatched).toBe(1);
+    expect(res.recon[0].match.ledgerKeys).toHaveLength(2);
+    for (const n of res.recon[0].match.ledgerNames) expect(n).toMatch(PSEUDONYM);
+    // The group label joins each ledger's own stable pseudonym; it must not
+    // be masked as one opaque name.
+    expect(res.recon[0].match.ledgerName).toBe(res.recon[0].match.ledgerNames.join(" + "));
+    expect(res.recon[0].match.ledgerName).toContain(" + ");
+    const raw = JSON.stringify(res);
+    expect(raw).not.toContain("Anand Buildmart");
+    expect(raw).not.toContain("Kaveri Minerals");
+  });
+
   it("degrades on master failure and still reconciles against counterparties", async () => {
     const err = console.error;
     console.error = () => {};

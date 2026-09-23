@@ -859,11 +859,18 @@ export function createSession(
         ...(schedule ? { schedule } : {}),
       };
     });
-    const maskReconMatch = (m: PartyMatch) => ({
-      ...m,
-      ledgerName: pseudoName(m.ledgerName),
-      as26Name: vault.pseudonym(m.as26Name, "debtor"),
-    });
+    const maskReconMatch = (m: PartyMatch) => {
+      // Each ledger keeps its own stable pseudonym (so it matches the rest of
+      // the report); the group label joins them, never masks the join as one
+      // opaque name.
+      const ledgerNames = m.ledgerNames.map(pseudoName);
+      return {
+        ...m,
+        ledgerNames,
+        ledgerName: ledgerNames.join(" + "),
+        as26Name: vault.pseudonym(m.as26Name, "debtor"),
+      };
+    };
     const recon = result.recon.map((r) => ({
       ...r,
       match: maskReconMatch(r.match),

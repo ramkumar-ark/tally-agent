@@ -23,12 +23,22 @@ describe("loadAs26Map", () => {
   it("malformed JSON throws", () => {
     expect(() => loadAs26Map(mapFile("{"))).toThrow(/as26-map/);
   });
-  it("duplicate ledger or as26Name keys throw citing the entry index, never a value", () => {
+  it("a ledger mapped twice throws citing the entry index, never a value", () => {
     const dup = JSON.stringify({ mappings: [
       { ledger: "Alpha Traders", as26Name: "Alpha Traders" },
       { ledger: "Alpha Traders", as26Name: "Beta Traders" },
     ]});
     expect(() => loadAs26Map(mapFile(dup))).toThrow(/as26-map entry 2/);
+  });
+  it("repeated 26AS names with different ledgers are allowed", () => {
+    const split = JSON.stringify({ mappings: [
+      { ledger: "Alpha Site Ledger", as26Name: "Alpha Builders" },
+      { ledger: "Alpha Head Office", as26Name: "Alpha Builders" },
+    ]});
+    expect(loadAs26Map(mapFile(split)).mappings).toEqual([
+      { ledger: "Alpha Site Ledger", as26Name: "Alpha Builders" },
+      { ledger: "Alpha Head Office", as26Name: "Alpha Builders" },
+    ]);
   });
   it("blank fields throw citing the entry index", () => {
     const blank = JSON.stringify({ mappings: [{ ledger: "  ", as26Name: "X" }] });
@@ -52,6 +62,35 @@ describe("matchParties — mapping-only", () => {
     // unmapped deductors + unmapped ledgers with deductions
     const reasons = gaps.map((g) => g.reason);
     expect(reasons.filter((r) => r === "unmapped").length).toBeGreaterThanOrEqual(4);
+  });
+  it("groups several ledgers under one 26AS name into a single party", () => {
+    const map = { mappings: [
+      { ledger: "Anand Buildmart Pvt Ltd", as26Name: "Nagar Palika Nagar Bhavan" },
+      { ledger: "Kaveri Minerals Trading", as26Name: "Nagar Palika Nagar Bhavan" },
+    ]};
+    const { matches, gaps } = matchParties(file, facts(ledgers), map, ledgers);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].ledgerKeys).toEqual([
+      canonicalKey("Anand Buildmart Pvt Ltd"), canonicalKey("Kaveri Minerals Trading"),
+    ]);
+    expect(matches[0].ledgerName).toBe("Anand Buildmart Pvt Ltd + Kaveri Minerals Trading");
+    // every grouped ledger counts as matched — none resurfaces as an unmapped gap
+    const unmappedLedgers = gaps.filter((g) => g.reason === "unmapped" && g.ledger).map((g) => g.ledger);
+    expect(unmappedLedgers).not.toContain("Anand Buildmart Pvt Ltd");
+    expect(unmappedLedgers).not.toContain("Kaveri Minerals Trading");
+  });
+  it("reports an absent grouped ledger as a gap while reconciling the rest", () => {
+    const map = { mappings: [
+      { ledger: "Anand Buildmart Pvt Ltd", as26Name: "Nagar Palika Nagar Bhavan" },
+      { ledger: "No Such Ledger", as26Name: "Nagar Palika Nagar Bhavan" },
+    ]};
+    const { matches, gaps } = matchParties(file, facts(ledgers), map, ledgers);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].ledgerKeys).toEqual([canonicalKey("Anand Buildmart Pvt Ltd")]);
+    const absent = gaps.find((g) => g.reason === "ledger-absent")!;
+    expect(absent.ledger).toBe("No Such Ledger");
+    // the deductor formed a group, so it is not also reported unmapped
+    expect(gaps.some((g) => g.reason === "unmapped" && g.nameKey === "nagarpalikanagarbhavan")).toBe(false);
   });
   it("stale/absent mappings become gaps, never throws", () => {
     const map = { mappings: [
@@ -260,6 +299,36 @@ describe("reconcileParty", () => {
     expect(r.lateBookedTax).toBe(3000);
     expect(r.as26Tax).toBe(10000);
     expect(r.booksTax).toBe(7000);
+  });
+});
+
+describe("multi-ledger aggregation", () => {
+  const splitFacts = (): BooksFacts => ({
+    deductions: [
+      { ledgerKey: canonicalKey("Anand Buildmart Pvt Ltd"), kind: "tds", date: "20250612", tax: 10000, voucherType: "Journal" },
+      { ledgerKey: canonicalKey("Kaveri Minerals Trading"), kind: "tds", date: "20250613", tax: 14000, voucherType: "Journal" },
+    ],
+    sales: [],
+  });
+  const splitMap = { mappings: [
+    { ledger: "Anand Buildmart Pvt Ltd", as26Name: nameOf },
+    { ledger: "Kaveri Minerals Trading", as26Name: nameOf },
+  ]};
+  it("sums every ledger mapped to one deductor and compares against 26AS once", () => {
+    const file = txFile([txn(24000)], 24000);
+    const r = analyzeAs26(file, splitFacts(), splitMap, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    expect(r.recon).toHaveLength(1);
+    expect(r.recon[0].booksTax).toBe(24000);
+    expect(r.recon[0].as26Tax).toBe(24000);
+    expect(r.recon[0].match.ledgerName).toBe("Anand Buildmart Pvt Ltd + Kaveri Minerals Trading");
+    expect(r.findings.some((f) => f.check === "books_tax_not_in_26as" || f.check === "as26_tax_not_in_books")).toBe(false);
+  });
+  it("would report a shortfall if only one of the split ledgers were mapped", () => {
+    const file = txFile([txn(24000)], 24000);
+    const r = analyzeAs26(file, splitFacts(), { mappings: [splitMap.mappings[0]] }, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    const f = r.findings.find((x) => x.check === "as26_tax_not_in_books")!;
+    expect(f).toBeTruthy();
+    expect(f.amount).toBe(14000);
   });
 });
 
