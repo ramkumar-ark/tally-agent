@@ -50,16 +50,16 @@ function colLetter(n: number): string {
 }
 
 /**
- * An in-cell dropdown can only ride a single OOXML list formula: the names are
- * comma-joined inside a quoted string, so a comma or quote in any name breaks
- * it and Excel caps the formula at 255 characters. When that is not feasible
- * the ledger list goes on its own reference sheet instead.
+ * The Tally-ledger dropdown is backed by a range on the always-written
+ * `Ledgers` sheet, never an inline list: an OOXML list formula joined from
+ * names is capped at 255 characters and breaks on a comma or quote, so it
+ * cannot carry a real company's ledger list (thousands of names). A
+ * cross-sheet range reference has neither limit.
  */
-function inlineLedgerList(ledgers: string[]): string[] | null {
-  if (ledgers.length === 0 || ledgers.length > 200) return null;
-  if (ledgers.some((l) => /[",\r\n]/.test(l))) return null;
-  if (ledgers.join(",").length > 250) return null;
-  return ledgers;
+export const LEDGER_SHEET = "Ledgers";
+
+function ledgerRange(lastRow: number): string {
+  return `${LEDGER_SHEET}!$A$2:$A$${lastRow}`;
 }
 
 function dedupe(names: string[]): string[] {
@@ -76,7 +76,7 @@ function dedupe(names: string[]): string[] {
   return out;
 }
 
-const instructions = (company: string | undefined, dropdown: boolean): Sheet => ({
+const instructions = (company: string | undefined, hasLedgers: boolean): Sheet => ({
   name: "Instructions",
   columns: [{ header: "How to fill this template", width: 110, format: "text" }],
   rows: [
@@ -89,8 +89,8 @@ const instructions = (company: string | undefined, dropdown: boolean): Sheet => 
     ],
     ["Rows already mapped are pre-filled, so you can re-fill and re-run iteratively."],
     [
-      dropdown
-        ? "The Tally ledger column has a dropdown of this company's ledger names."
+      hasLedgers
+        ? "The Tally ledger column has a dropdown of this company's ledger names, backed by the Ledgers sheet."
         : "The Ledgers sheet lists this company's ledger names for reference — copy a name into the Tally ledger column.",
     ],
     ["Do not rename the sheets or the header columns; the parser binds by header text, never by position."],
@@ -100,7 +100,7 @@ const instructions = (company: string | undefined, dropdown: boolean): Sheet => 
 });
 
 const ledgerReferenceSheet = (ledgers: string[]): Sheet => ({
-  name: "Ledgers",
+  name: LEDGER_SHEET,
   columns: [{ header: "Tally ledger", width: 40, format: "text" }],
   rows: ledgers.map((l) => [l]),
 });
@@ -115,7 +115,9 @@ export function buildAs26MapTemplate(opts: {
     opts.map.mappings.map((m) => [canonicalKey(m.as26Name), m.ledger]),
   );
   const ledgers = dedupe(opts.ledgers);
-  const inline = inlineLedgerList(ledgers);
+  // The Ledgers sheet is always written — it is the dropdown's backing range —
+  // even when the company's masters are unavailable (an empty list).
+  const lastLedgerRow = ledgers.length + 1;
   const mapping: Sheet = {
     name: "Mapping",
     columns: [
@@ -126,7 +128,7 @@ export function buildAs26MapTemplate(opts: {
         header: "Tally ledger",
         width: 34,
         format: "text",
-        ...(inline ? { validation: { list: inline } } : {}),
+        ...(ledgers.length > 0 ? { validation: { formula: ledgerRange(lastLedgerRow) } } : {}),
       },
     ],
     rows: opts.deductors.map((d) => [
@@ -136,9 +138,11 @@ export function buildAs26MapTemplate(opts: {
       mappedLedgerBy26as.get(canonicalKey(d.name)) ?? "",
     ]),
   };
-  const sheets: Sheet[] = [instructions(opts.company, inline !== null), mapping];
-  if (inline === null && ledgers.length > 0) sheets.push(ledgerReferenceSheet(ledgers));
-  return buildWorkbook(sheets);
+  return buildWorkbook([
+    instructions(opts.company, ledgers.length > 0),
+    mapping,
+    ledgerReferenceSheet(ledgers),
+  ]);
 }
 
 /**

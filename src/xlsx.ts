@@ -9,9 +9,12 @@ export interface Column {
   format?: "text" | "money" | "date" | "pct";
   /**
    * An in-cell dropdown for the column's data rows (OOXML list validation).
+   * `list` is a comma-joined quoted formula (an inline list); `formula` is a
+   * raw formula1 body (e.g. `Ledgers!$A$2:$A$40` or a defined name) so a
+   * cross-sheet range reference can back the dropdown whatever its length.
    * Convenience only — the parser re-validates everything it reads.
    */
-  validation?: { list: string[] };
+  validation?: { list: string[] } | { formula: string };
 }
 
 export interface Sheet {
@@ -103,16 +106,20 @@ function sheetXml(sheet: Sheet): string {
         .join("")}</cols>`
     : "";
   // In-cell dropdowns on the data rows of a validated column (never the header).
-  const validations = sheet.columns.filter((c) => c.validation?.list.length);
+  const validations = sheet.columns.filter((c) =>
+    c.validation ? ("list" in c.validation ? c.validation.list.length > 0 : !!c.validation.formula) : false,
+  );
   const dataValidations = validations.length
     ? `<dataValidations count="${validations.length}">${validations
-        .map((c, i) => {
+        .map((c) => {
           const idx = sheet.columns.indexOf(c);
           const firstDataRow = (sheet.title?.length ?? 0) + 2;
+          const v = c.validation!;
+          const body = "list" in v ? `"${v.list.join(",")}"` : v.formula;
           return (
             `<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" ` +
             `sqref="${colName(idx)}${firstDataRow}:${colName(idx)}${firstDataRow + 249}">` +
-            `<formula1>"${c.validation!.list.join(",")}"</formula1></dataValidation>`
+            `<formula1>${body}</formula1></dataValidation>`
           );
         })
         .join("")}</dataValidations>`

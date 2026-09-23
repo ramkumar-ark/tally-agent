@@ -292,12 +292,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   masked. `tb_write_26as_template` pre-fills previously effective mappings
   (from the map) and one row per distinct canonical 26AS name (tax summed
   across summaries) for iterative re-fill.
-- The Tally-ledger dropdown is a convenience only: an OOXML list formula is
-  one comma-joined quoted string capped at 255 chars, so a comma/quote in any
-  name or a long list falls back to a `Ledgers` reference sheet
-  (`inlineLedgerList`). The ledger list comes from `dayBookPath`
-  (`readDayBookLedgerNames`, which reads only `ledgers[]` and skips the
-  period validation `readDayBook` enforces) else live masters
+- The Tally-ledger dropdown is always backed by the `Ledgers` sheet's range
+  (`Ledgers!$A$2:$A$N`), never an inline OOXML list: an inline list is one
+  comma-joined quoted string capped at 255 chars and breaks on a comma or
+  quote, so it cannot carry a real company's ledger list (thousands of names).
+  The writer's `Column.validation` accepts `{ formula }` for exactly this; the
+  `Ledgers` sheet is written even when the list is empty. The list comes from
+  `dayBookPath` (`readDayBookLedgerNames`, which reads only `ledgers[]` and
+  skips the period validation `readDayBook` enforces) else live masters
   (`Session.ledgerNames`, degrades to [] with a warning when Tally is down).
 - Design of record §10 covers the workflow; operator walkthrough is
   `docs/operator/26as-mapping-template.md`.

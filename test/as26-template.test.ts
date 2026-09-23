@@ -13,6 +13,7 @@ import {
 } from "../src/as26-template.js";
 import { EMPTY_AS26_MAP } from "../src/as26.js";
 import type { As26File } from "../src/as26-file.js";
+import { entry } from "./xlsx.test.js";
 
 const dirs: string[] = [];
 const tmpFile = (name: string, buf: Buffer | string): string => {
@@ -115,15 +116,30 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     expect(() => parseAs26MapTemplate(buf)).toThrow(/no "Mapping" sheet — found: Nonsense/);
   });
 
-  it("carries the ledger list on a reference sheet when an inline dropdown is not feasible", () => {
+  it("always writes the Ledgers sheet and backs the Tally ledger dropdown with its range", () => {
     const short = buildAs26MapTemplate({ deductors, map, ledgers });
-    expect(sheetOf(short, "Ledgers")).toBeUndefined();
+    expect(sheetOf(short, "Ledgers")).toBeDefined();
 
-    const many = Array.from({ length: 40 }, (_, i) => `Sample Ledger Number ${i}`);
+    const many = Array.from({ length: 2700 }, (_, i) => `Sample Ledger Number ${i}`);
     const wide = buildAs26MapTemplate({ deductors, map, ledgers: many });
     const ref = sheetOf(wide, "Ledgers")!;
-    expect(ref.rows).toHaveLength(41); // header plus 40 names
+    expect(ref.rows).toHaveLength(2701); // header plus 2700 names
     expect(ref.rows[1].cells.get(0)?.value).toBe("Sample Ledger Number 0");
+    // The dropdown binds to the Ledgers range, so a real company's thousands
+    // of names ride the validation without an inline list cap.
+    const xml = entry(wide, "xl/worksheets/sheet2.xml"); // Mapping is sheet 2
+    expect(xml).toContain("<formula1>Ledgers!$A$2:$A$2701</formula1>");
+  });
+
+  it("keeps a comma or quote in a ledger name off the dropdown formula", () => {
+    const buf = buildAs26MapTemplate({
+      deductors,
+      map,
+      ledgers: ['Sample, Traders "Unit 2"', "Plain Ledger"],
+    });
+    const xml = entry(buf, "xl/worksheets/sheet2.xml");
+    expect(xml).toContain("<formula1>Ledgers!$A$2:$A$3</formula1>");
+    expect(xml).not.toContain("Sample, Traders");
   });
 
   it("names the file as26-map-template-<company|all>-<date>.xlsx", () => {

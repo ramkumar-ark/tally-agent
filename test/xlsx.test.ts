@@ -96,6 +96,20 @@ describe("buildWorkbook validations", () => {
     expect(xml).toMatch(/sqref="A2:A251"/); // header at row 1, data from row 2
   });
 
+  it("emits a raw cross-sheet range formula when asked for one", () => {
+    const ranged: Sheet = {
+      name: "Pick",
+      columns: [
+        { header: "Ledger", validation: { formula: "Ledgers!$A$2:$A$2701" } },
+        { header: "Plain" },
+      ],
+      rows: [["x", "y"]],
+    };
+    const xml = entry(buildWorkbook([ranged]), "xl/worksheets/sheet1.xml");
+    expect(xml).toContain("<formula1>Ledgers!$A$2:$A$2701</formula1>");
+    expect(xml).toMatch(/sqref="A2:A251"/);
+  });
+
   it("emits no validation block without a validation and leaves other sheets untouched", () => {
     const xml = entry(buildWorkbook([sheet]), "xl/worksheets/sheet1.xml");
     expect(xml).not.toContain("<dataValidation");

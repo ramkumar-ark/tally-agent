@@ -18,10 +18,12 @@ Excel template, the same way the TDS review takes a filled TDS template.
    its `kind` and `26AS tax`, and a **Tally ledger** column to fill. Rows
    already mapped come pre-filled, so you can re-fill and re-run iteratively.
    Leave a row's Tally ledger blank to leave that party unmapped.
-   - If the **Tally ledger** column has a dropdown, pick from the company's
-     ledger names.
-   - Otherwise the template carries a **Ledgers** reference sheet listing the
-     company's ledger names; copy the matching name across.
+   - The **Tally ledger** column has a dropdown of the company's ledger names,
+     backed by the **Ledgers** sheet (which lists them all, for reference). The
+     dropdown works for any company size — it is bound to the Ledgers range,
+     not to an inline list. If the company has no ledger masters available the
+     Ledgers sheet is empty and the dropdown has nothing to offer; fill the
+     column by typing the name.
 4. **Pass the filled file back.** Give its path to `tb_26as_review` as
    `as26MapPath` and re-run. Repeat until the gaps close.
 
