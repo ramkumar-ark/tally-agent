@@ -25,9 +25,10 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the sixteen approved tools", () => {
+  it("exposes exactly the eighteen approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
+      "tb_26as_review",
       "tb_depreciation_review",
       "tb_fixed_asset_register",
       "tb_gst_mismatch",
@@ -37,6 +38,7 @@ describe("tool surface", () => {
       "tb_list_companies",
       "tb_review",
       "tb_tds_review",
+      "tb_write_26as_report",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
       "tb_write_gst_report",

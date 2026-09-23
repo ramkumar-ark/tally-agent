@@ -11,6 +11,7 @@ import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./t
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadWrongGroup } from "./overrides.js";
+import { parseAs26Export } from "./as26-file.js";
 import {
   appendAudit,
   writeDepreciationReport,
@@ -18,11 +19,13 @@ import {
   writeGstReport,
   writeLedgerReport,
   writeReport,
+  writeAs26Report,
   writeTdsReport,
   writeVaultDump,
 } from "./report.js";
 import {
   createSession,
+  type As26ReviewResult,
   type DepReviewResult,
   type FaReviewResult,
   type GstMismatchResult,
@@ -80,6 +83,11 @@ export function overridesPath(metaUrl: string): string {
   return fileURLToPath(new URL("../config/overrides.json", metaUrl));
 }
 
+/** The 26AS operator party map sits next to the build like the overrides. */
+export function as26MapPath(metaUrl: string): string {
+  return fileURLToPath(new URL("../config/as26-map.json", metaUrl));
+}
+
 /** One id per gateway process, naming this session's audit and vault files. */
 export function newSessionId(now = new Date()): string {
   return now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -94,6 +102,7 @@ export function registerTools(
   let last: ReviewResult | undefined;
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
+  let lastAs26: As26ReviewResult | undefined;
   let lastDayBookMeta: { bytes: number; digest: string } | undefined;
   let lastDep: DepReviewResult | undefined;
   let lastFa: FaReviewResult | undefined;
@@ -460,6 +469,103 @@ export function registerTools(
   );
 
   register(
+    "tb_26as_review",
+    "Tally-books vs TRACES Form 26AS reconciliation: TDS/TCS tax booked but absent from 26AS, " +
+      "26AS tax the books never booked, gross-vs-taxable valuation mismatch, mapping gaps, " +
+      "late booking and export self-consistency. Pass the PATH of the TRACES Form 26AS export " +
+      "(.xlsm) — never paste its rows into chat; parties appear as pseudonyms; drill in with " +
+      "tb_ledger_activity using finding ids. Optionally pass dayBookPath to run the books from " +
+      "an operator day-book export instead of live Tally.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      as26Path: z.string()
+        .describe("Path to the TRACES Form 26AS export (.xlsm); read inside the gateway, only the path is audited"),
+      dayBookPath: z.string().optional()
+        .describe(
+          "Optional PATH to an operator day-book JSON export for the whole period; books are read " +
+            "from that file instead of from Tally. Pass the path — never paste the rows.",
+        ),
+      company: z.string().optional(),
+      as26MapPath: z.string().optional()
+        .describe(
+          "Optional PATH to an operator party-map JSON ({ mappings: [{ ledger, as26Name }] }); " +
+            "defaults to config/as26-map.json next to the build. The path is audited, never its rows.",
+        ),
+    },
+    async (args) => {
+      const file = parseAs26Export(await readFile(args.as26Path));
+      let dayBook: DayBookInput | undefined;
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        dayBook = readDayBook(text, {
+          company: args.company ?? cfg.defaultCompany,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        });
+      }
+      const result = await session.as26Review(
+        args.company ?? cfg.defaultCompany,
+        args.fromDate,
+        args.toDate,
+        file,
+        args.as26MapPath ?? as26MapPath(import.meta.url),
+        dayBook,
+      );
+      lastAs26 = result;
+      await audit(
+        "tb_26as_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          as26Path: args.as26Path,
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+          ...(args.as26MapPath ? { as26MapPath: args.as26MapPath } : {}),
+        },
+        result.findings.length,
+        maskedCountAs26(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_26as_report",
+    "Write the 26AS reconciliation report (markdown plus workbook: findings, deductor " +
+      "reconciliation, books evidence and the 26AS-name mapping aid) to disk. Real names are " +
+      "restored on write; compose the narrative with the pseudonyms you were given.",
+    {
+      company: z.string(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      markdown: z.string().describe("The narrative report, in masked terms"),
+    },
+    async (args) => {
+      if (!lastAs26) throw new Error("run tb_26as_review first: there are no 26AS findings to write");
+      const paths = await writeAs26Report({
+        reportDir: cfg.reportDir,
+        company: args.company,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        markdown: args.markdown,
+        result: lastAs26,
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_26as_report",
+        { company: args.company, fromDate: args.fromDate, toDate: args.toDate },
+        lastAs26.findings.length,
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
+
+  register(
     "tb_depreciation_review",
     "Income Tax Act depreciation per block of assets for a year, against what the books charged, " +
       "block-wise and asset-wise (WDV, additional depreciation, s.50). Optionally pass the PATH of the " +
@@ -597,6 +703,10 @@ function maskedCount(findings: Array<{ ledger: string }>): number {
 
 function maskedCountTds(findings: Array<{ deductee: string }>): number {
   return findings.filter((f) => /^(\w+) \d+$/.test(f.deductee)).length;
+}
+
+function maskedCountAs26(findings: Array<{ party: string }>): number {
+  return findings.filter((f) => /^(\w+) \d+$/.test(f.party)).length;
 }
 
 /** Kept separate so the tool handler stays synchronous to read. */

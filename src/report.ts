@@ -4,7 +4,7 @@ import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
 import { count, money, displayDate } from "./format.js";
 import { round2, type BlockResult, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
-import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding } from "./review.js";
+import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding, As26ReviewResult } from "./review.js";
 import type { Vault } from "./vault.js";
 
 /**
@@ -876,4 +876,114 @@ export async function writeFaRegisterReport(opts: {
   });
 
   return { markdownPath, csvPath, workbookPath };
+}
+
+/** 26AS recon report (R-R-4): de-masked markdown plus the four-sheet
+ * workbook — findings as returned, deductor reconciliation, books evidence
+ * and the mapping aid (exact 26AS names the operator may paste into
+ * config/as26-map.json; only here on disk, never in chat). */
+export async function writeAs26Report(opts: {
+  reportDir: string;
+  company: string;
+  fromDate: string;
+  toDate: string;
+  markdown: string;
+  result: As26ReviewResult;
+  vault: Vault;
+}): Promise<{ markdownPath: string; workbookPath: string }> {
+  await mkdir(opts.reportDir, { recursive: true });
+  const stem = `${slug(opts.company)}-${opts.fromDate}-${opts.toDate}`;
+  const markdownPath = join(opts.reportDir, `as26-review-${stem}.md`);
+  const workbookPath = join(opts.reportDir, `as26-review-${stem}.xlsx`);
+
+  const findingsSheet: Sheet = {
+    name: "Findings",
+    columns: [
+      { header: "id", width: 14, format: "text" },
+      { header: "check", width: 26, format: "text" },
+      { header: "severity", width: 10, format: "text" },
+      { header: "party", width: 26, format: "text" },
+      { header: "kind", width: 6, format: "text" },
+      { header: "section", width: 10, format: "text" },
+      { header: "amount", width: 16, format: "money" },
+      { header: "detail", width: 70, format: "text" },
+    ],
+    rows: opts.result.findings.map((f) => [
+      f.id, f.check, f.severity, f.party, f.kind, f.section, f.amount, f.detail,
+    ]),
+  };
+  const deductorsSheet: Sheet = {
+    name: "Deductors",
+    columns: [
+      { header: "party", width: 26, format: "text" },
+      { header: "kind", width: 6, format: "text" },
+      { header: "26AS tax", width: 16, format: "money" },
+      { header: "books tax", width: 16, format: "money" },
+      { header: "delta", width: 16, format: "money" },
+      { header: "gross 26AS", width: 16, format: "money" },
+      { header: "taxable", width: 16, format: "money" },
+      { header: "gross incl GST", width: 16, format: "money" },
+      { header: "delta value", width: 16, format: "money" },
+      { header: "paired", width: 8, format: "text" },
+      { header: "combination", width: 10, format: "text" },
+      { header: "ambiguous", width: 10, format: "text" },
+      { header: "unmatched", width: 10, format: "text" },
+      { header: "search skipped", width: 12, format: "text" },
+    ],
+    rows: opts.result.recon.map((r) => [
+      r.match.ledgerName, r.match.kind, r.as26Tax, r.booksTax,
+      round2(r.booksTax - r.as26Tax),
+      r.as26GrossValue ?? null, r.booksTaxableValue ?? null, r.booksGrossValue ?? null,
+      r.as26GrossValue !== undefined && r.booksGrossValue !== undefined
+        ? round2(r.booksGrossValue - r.as26GrossValue) : null,
+      String(r.paired.length), String(r.combinations.length),
+      String(r.ambiguous), String(r.unmatchedBooks.length + r.unmatchedAs26.length),
+      r.combinationSearchSkipped ? "yes" : "no",
+    ]),
+  };
+  const eventsSheet: Sheet = {
+    name: "Books Events",
+    columns: [
+      { header: "party", width: 26, format: "text" },
+      { header: "source", width: 10, format: "text" },
+      { header: "date", width: 12, format: "text" },
+      { header: "tax", width: 14, format: "money" },
+      { header: "voucher type", width: 12, format: "text" },
+      { header: "ref", width: 16, format: "text" },
+    ],
+    rows: opts.result.bookEvents.map((e) => [
+      e.party, e.source, e.date, e.tax, e.voucherType, e.ref,
+    ]),
+  };
+  const mappingSheet: Sheet = {
+    name: "Mapping",
+    columns: [
+      { header: "26AS name", width: 30, format: "text" },
+      { header: "kind", width: 6, format: "text" },
+      { header: "26AS tax", width: 14, format: "money" },
+      { header: "mapped ledger", width: 30, format: "text" },
+      { header: "source", width: 10, format: "text" },
+    ],
+    rows: [
+      ...opts.result.recon.map((r) => [
+        r.match.as26Name, r.match.kind, r.as26Tax, r.match.ledgerName, r.match.source,
+      ]),
+      ...opts.result.gaps.map((g) => [
+        g.name, g.kind, g.tax, g.ledger ?? "", g.reason,
+      ]),
+    ],
+  };
+
+  await writeFile(
+    markdownPath,
+    demaskText(opts.markdown, opts.vault) + "\n",
+    "utf8",
+  );
+  await writeWorkbook({
+    reportDir: opts.reportDir,
+    fileName: `as26-review-${stem}.xlsx`,
+    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet],
+    vault: opts.vault,
+  });
+  return { markdownPath, workbookPath };
 }

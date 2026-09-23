@@ -227,6 +227,11 @@ export interface PartyRecon {
   unmatchedBooks: ReconItem[]; unmatchedAs26: ReconItem[];
   combinationSearchSkipped: boolean;
   lateBookedTax: number;
+  /** Value interpretation carried for the report's Deductors sheet
+   * (books GST-exclusive / GST-inclusive totals vs 26AS gross). */
+  booksTaxableValue?: number;
+  booksGrossValue?: number;
+  as26GrossValue?: number;
 }
 
 /** Index-combination subsets of `items` with size 2..maxSize, in index order. */
@@ -406,6 +411,9 @@ export function analyzeAs26(
     const booksGross = sumSales(partySales, (s) => s.gross);
     const summary = file.summaries.find((s) => s.kind === match.kind && s.nameKey === match.as26NameKey);
     const as26Gross = summary?.gross ?? 0;
+    r.booksTaxableValue = booksTaxable;
+    r.booksGrossValue = booksGross;
+    r.as26GrossValue = as26Gross;
 
     // 001 — books tax beyond what 26AS declares
     const excessBooks = round2(r.booksTax - r.as26Tax);

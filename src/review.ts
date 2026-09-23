@@ -13,7 +13,7 @@ import {
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
-import { count, dayBefore, displayMonth } from "./format.js";
+import { count, dayBefore, displayDate, displayMonth } from "./format.js";
 import { canonicalKey } from "./key.js";
 import {
   analyzeAs26,
@@ -200,6 +200,10 @@ export interface As26ReviewResult {
   groupsUnavailable: boolean;
   skipped: As26Result["skipped"];
   counts: { credits: number; receivableLedgers: string[] };
+  /** Every books evidence row behind the recon, party-pseudonymed: the
+   * written report's Books Events sheet (the drill-down the deduction and
+   * sale vouchers give the operator). */
+  bookEvents: Array<{ party: string; source: "deduction" | "sale"; date: string; tax: number; voucherType: string; ref: string | null }>;
 }
 
 /** One masked depreciation finding: the engine shape with ledger+block pseudonymed. */
@@ -847,7 +851,40 @@ export function createSession(
       ledgerName: pseudoName(m.ledgerName),
       as26Name: vault.pseudonym(m.as26Name, "debtor"),
     });
-    const recon = result.recon.map((r) => ({ ...r, match: maskReconMatch(r.match) }));
+    const recon = result.recon.map((r) => ({
+      ...r,
+      match: maskReconMatch(r.match),
+      // 8-digit dates would read "[number]" after scrubDigits — keep the
+      // readable form for the tool output and the written Deductors sheet.
+      paired: r.paired.map((p) => ({
+        books: { ...p.books, date: displayDate(p.books.date) },
+        as26: { ...p.as26, date: displayDate(p.as26.date) },
+      })),
+      combinations: r.combinations.map((c) => ({
+        target: { ...c.target, date: displayDate(c.target.date) },
+        parts: c.parts.map((p) => ({ ...p, date: displayDate(p.date) })),
+        side: c.side,
+      })),
+      unmatchedBooks: r.unmatchedBooks.map((i) => ({ ...i, date: displayDate(i.date) })),
+      unmatchedAs26: r.unmatchedAs26.map((i) => ({ ...i, date: displayDate(i.date) })),
+    }));
+    const masterByKey = new Map(masterPairs.map((l) => [canonicalKey(l.name), l.name]));
+    const pseudoKey = (k: string): string =>
+      masterByKey.has(k)
+        ? maskLedgerName(masterByKey.get(k)!, ledgerGroupOf.get(k) ?? "", c, vault)
+        : vault.pseudonym(k, "debtor");
+    const REF_MASK = (ref: string | null): string | null =>
+      ref && !DATE_LABEL.test(ref) ? vault.pseudonym(ref, "doc") : ref;
+    const bookEvents = [
+      ...deductions.map((e) => ({
+        party: pseudoKey(e.ledgerKey), source: "deduction" as const, date: displayDate(e.date),
+        tax: e.tax, voucherType: e.voucherType, ref: null as string | null,
+      })),
+      ...sales.map((s) => ({
+        party: pseudoKey(s.ledgerKey), source: "sale" as const, date: displayDate(s.date),
+        tax: s.gross, voucherType: "Sales", ref: REF_MASK(s.ref),
+      })),
+    ];
     const gaps = result.gaps.map((g) => ({
       ...g,
       ledger: g.ledger ? pseudoName(g.ledger) : undefined,
@@ -870,6 +907,7 @@ export function createSession(
         groupsUnavailable,
         skipped: result.skipped,
         counts: { credits, receivableLedgers: recLedgers },
+        bookEvents,
       },
       vault,
     ) as As26ReviewResult;
