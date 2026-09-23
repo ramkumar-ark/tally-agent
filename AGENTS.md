@@ -267,6 +267,61 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   display dedupe to make the paths "match" (same D5 reasoning; recorded in
   design §10, 2026-09-22).
 
+## Sharp edges found implementing 26AS reconciliation (2026-09-22)
+
+- The design of record lives in `docs/design/2026-09-22-form-26as-reconciliation-design.md`
+  (ordinal table, tolerances, honesty rules, privacy contract, operator
+  mapping workflow) — read it before touching `src/as26*.ts`.
+- TRACES 26AS summary sheets are matched by normalized sheet name
+  **ignoring hidden state** — every TRACES data sheet is hidden, unlike the
+  Winman parser's visible-only filter. Detailed-sheet names band down
+  (carry the last non-blank forward); transaction dates are text
+  `dd-MMM-yyyy`, and float tails like `230000.8900000001` are round-2'd at
+  the parser.
+- TAN/deposit/subtotal columns are never bound by the parser; errors cite
+  sheet/row/column, never a cell value. Real TRACES headers carry `(Rs.)`
+  suffixes, so `bindHeader` is two-pass — exact token first, prefix second
+  (`Amount Paid / Credited(Rs.)` ≠ `amountpaidcredited`); first bind wins,
+  which is also what keeps `GROSSRECEIPT` from stealing its
+  `GROSSRECEIPTSASPER26AS` column.
+- check 003's captain-deviation wording: when only the GST-inclusive
+  interpretation matches, the finding detail says "matched on the
+  GST-inclusive value" (also in the written report), and it fires only when
+  BOTH interpretations miss by > `AS26_VALUE_TOLERANCE` (1000).
+- `matchParties` is mapping-only (captain deviation): no canonical
+  auto-match exists anymore — unmapped/ambiguous pairs become `mapping_gap`
+  findings; `config/as26-map.json` follows the overrides-file semantics
+  (missing→EMPTY+warn, malformed/dup/blank throw citing the entry NUMBER),
+  `config/as26-map.sample.json` ships committed, and `tb_26as_review` takes
+  an optional `as26MapPath` override for iterative correction.
+- Books evidence split: deductions ride the month-chunked receivable-ledger
+  path (`deductionEvents`, positive=debit at the boundary — never re-flip),
+  sales ride the voucher walk (`booksSales`, one BooksSale per outward
+  voucher, taxable = Sales-Accounts-root debit magnitudes; ref =
+  `voucherNumber` because `VoucherRow` has no `reference` field). Party+period is
+  the join; `kindOf`/`partyOf` are exported additively from `src/gst.ts`.
+- `booksSales`' `kindOf` needs `ctx.groupOf(ledger)` populated from the
+  **ledger master pairs** (`ledgersTax`/bundle ledgers), NOT the group tree:
+  without a master row for a sales ledger its sale silently vanishes (test
+  fakes must include sales-account ledgers in masters).
+- All dates the review result emits are `displayDate`-formatted at the
+  session boundary (schedule labels, recon items, book events): a bare
+  `YYYYMMDD` string in any outbound string is eaten by `scrubDigits`
+  (`[number]`). `tb_26as_review`'s books dates included.
+- `receivableLedgers` is a name heuristic (`(tds|tcs)` + `receivable` under
+  an asset root) with a hard operator-facing error when it finds nothing;
+  when ledger masters degrade, a voucher-entry name fallback applies. The
+  planned group-override key for it is NOT built (open follow-up).
+- The combination search is honesty-bounded: unique-both-ways 1:1 pairing,
+  subsets sized 2..4, >1 fit ⇒ `ambiguous` stays unmatched, >40 unmatched
+  per side ⇒ `combinationSearchSkipped` flag; totals never mutate.
+- The written workbook de-masks cells+titles on disk only
+  (`writeWorkbook` + vault); its Deductors sheet carries
+  `booksTaxableValue`/`booksGrossValue`/`as26GrossValue` set in
+  `analyzeAs26`, and its Mapping sheet lists matches UNION gaps so an
+  empty-map report doubles as the operator's correction worksheet.
+  `maskedCountAs26` counts parties under `/^(\w+) \d+$/`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
