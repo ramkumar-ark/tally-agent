@@ -15,6 +15,19 @@ import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
 import { count, dayBefore, displayMonth } from "./format.js";
 import { canonicalKey } from "./key.js";
+import {
+  analyzeAs26,
+  booksSales,
+  deductionEvents,
+  loadAs26Map,
+  receivableLedgers,
+  type BooksDeduction,
+  type PartyMatch,
+  type PartyRecon,
+  type As26Result,
+} from "./as26.js";
+import type { As26File, As26Kind } from "./as26-file.js";
+import type { LedgerTaxInfo } from "./downstream.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
@@ -32,6 +45,7 @@ import {
   type GroupRole,
   type GstKind,
   type Severity,
+  type As26Finding,
   type Side,
   type TbRow,
   type TdsCheckId,
@@ -171,6 +185,21 @@ export interface TdsReviewResult {
     rejected: number;
     mastersSource: "live" | "bundle" | "absent";
   };
+}
+
+/** One masked 26AS finding: the engine shape with the party pseudonymed. */
+export interface As26ReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  findings: As26Finding[];
+  recon: Array<Omit<PartyRecon, "match"> & { match: Omit<PartyMatch, "ledgerName" | "as26Name"> & { ledgerName: string; as26Name: string } }>;
+  gaps: As26Result["gaps"];
+  totals: As26Result["totals"];
+  mastersUnavailable: boolean;
+  groupsUnavailable: boolean;
+  skipped: As26Result["skipped"];
+  counts: { credits: number; receivableLedgers: string[] };
 }
 
 /** One masked depreciation finding: the engine shape with ledger+block pseudonymed. */
@@ -354,6 +383,22 @@ export interface Session {
    * expense ledgers and the disposal-signal ledgers.
    */
   faRegister(company: string | undefined, fromDate: string, toDate: string): Promise<FaReviewResult>;
+  /**
+   * TRACES Form 26AS reconciliation (design of record:
+   * docs/design/2026-09-22-form-26as-reconciliation-design.md). The operator
+   * export arrives already parsed (path-only channel at the tool layer); the
+   * operator party map is read inside the gateway by path. The day-book file
+   * is the optional replacement for the live voucher fetch (captain
+   * deviation 3); it swaps `d.vouchers` and the receivable master source.
+   */
+  as26Review(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+    file: As26File,
+    as26MapPath: string,
+    dayBook?: DayBookInput,
+  ): Promise<As26ReviewResult>;
   vault: Vault;
 }
 
@@ -372,6 +417,7 @@ export function createSession(
   let lastCompany: string | undefined;
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
+  let lastAs26: As26ReviewResult | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -633,6 +679,203 @@ export function createSession(
     ledgers: string[],
   ): TdsLedgerRows[] =>
     ledgers.map((ledger) => ({ ledger: canonicalKey(ledger), rows: rowsByLedger(rows, ledger) }));
+
+  /**
+   * 26AS reconciliation (design: docs/design/2026-09-22-form-26as-
+   * reconciliation-design.md). Masters fail soft — the mapping still runs
+   * against counterparty names — but a live run whose masters do not name a
+   * TDS/TCS receivable ledger under an asset group is the operator's setup
+   * error, thrown hard (never a silent zero).
+   */
+  async function as26Review(
+    company: string | undefined,
+    fromDate: string,
+    toDate: string,
+    file: As26File,
+    as26MapPath: string,
+    dayBook?: DayBookInput,
+  ): Promise<As26ReviewResult> {
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+
+    let groups: Array<{ name: string; parent: string }> = [];
+    let masterPairs: Array<{ name: string; parent: string }> = [];
+    let masters: LedgerTaxInfo[] = [];
+    let mastersUnavailable = false;
+    let groupsUnavailable = false;
+    let voucherList: VoucherRow[];
+
+    if (dayBook) {
+      voucherList = dayBook.vouchers;
+      groups = dayBook.groups ?? [];
+      // bundle masters have no gstin/pan — 26AS needs only name+parent
+      masterPairs = dayBook.ledgers ?? [];
+    } else {
+      const [g, m, v] = await Promise.all([
+        d.groups(company).catch(() => null),
+        d.ledgersTax(company).catch(() => null),
+        d.vouchers(company, fromDate, toDate),
+      ]);
+      voucherList = v;
+      if (g === null) {
+        groupsUnavailable = true;
+        console.error("tally-agent: group tree unavailable — 26AS masking falls back to master-less policy");
+      } else {
+        groups = g;
+      }
+      if (m === null) {
+        mastersUnavailable = true;
+        console.error("tally-agent: ledger masters unavailable — the 26AS mapping runs against counterparty names only");
+      } else {
+        masters = m;
+        masterPairs = m.map((l) => ({ name: l.name, parent: l.parent }));
+      }
+    }
+    for (const l of masterPairs) groupOfLedger.set(canonicalKey(l.name), l.parent);
+
+    const mastersGstinOf = new Map<string, string>();
+    if (!dayBook) {
+      for (const m of masters ?? []) {
+        if (m.gstin) mastersGstinOf.set(canonicalKey(m.name), m.gstin);
+      }
+    }
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    const ledgerGroupOf = groupOfLedger;
+    const ctx: GstCtx = {
+      groupOf: (ledger) => ledgerGroupOf.get(canonicalKey(ledger)) ?? "",
+      rootOf: (group) => c.rootOf(group),
+      roleOf: (group) => c.role(group),
+      inDutiesAndTaxes: (group) =>
+        c.ancestry(group).some((g) => canonicalKey(g) === "duties & taxes"),
+      gstinOf: (ledger) => mastersGstinOf.get(canonicalKey(ledger)) ?? null,
+    };
+
+    const assetRoots = new Set(["current assets", "fixed assets", "misc. expenses (asset)"]);
+    const isAssetRoot = (group: string): boolean => assetRoots.has(canonicalKey(group));
+    let receivable = receivableLedgers(masterPairs, isAssetRoot);
+    if (receivable.length === 0 && (mastersUnavailable || dayBook)) {
+      // Masters absent: the same name heuristic applied to every ledger the
+      // period's vouchers themselves touch — the books carry the evidence.
+      const names = new Set<string>();
+      for (const v of voucherList) {
+        if (v.cancelled) continue;
+        for (const e of v.entries) names.add(e.ledger);
+      }
+      receivable = [...names]
+        .filter((n) => /(?:tds|tcs)/.test(canonicalKey(n)) && /receivable/i.test(n))
+        .map((n) => ({
+          name: n,
+          kind: (/tcs/.test(canonicalKey(n)) ? "tcs" : "tds") as As26Kind,
+        }));
+    }
+    if (receivable.length === 0 && !mastersUnavailable && !dayBook) {
+      throw new Error(
+        "no TDS/TCS receivable ledger found under an asset group — name the ledger 'TDS Receivable' (or 'TCS Receivable') or extend the rule in src/as26.ts",
+      );
+    }
+
+    const deductions: BooksDeduction[] = [];
+    let credits = 0;
+    if (receivable.length > 0) {
+      let rows: Map<string, LedgerVoucherRow[]>;
+      if (dayBook) {
+        rows = new Map(
+          projectLedgerRows(voucherList, receivable.map((r) => r.name)).map((r) => [r.ledger, r.rows]),
+        );
+      } else {
+        rows = (await fetchLedgerRows(
+          company,
+          receivable.map((r) => r.name),
+          fromDate,
+          toDate,
+        )).rows;
+      }
+      for (const r of receivable) {
+        const ev = deductionEvents(rowsByLedger(rows, r.name), r.kind);
+        deductions.push(...ev.events);
+        credits += ev.credits;
+      }
+    }
+
+    const sales = booksSales(voucherList, ctx);
+    let ledgerNames = masterPairs.map((l) => l.name);
+    if (ledgerNames.length === 0) {
+      // Masters unavailable: the operator map still joins against every
+      // counterparty the books themselves carried in the period (R-D-2).
+      const names = new Set<string>();
+      for (const dd of deductions) names.add(dd.ledgerKey);
+      for (const ss of sales) names.add(ss.ledgerKey);
+      ledgerNames = [...names];
+    }
+
+    const map = loadAs26Map(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
+    const result = analyzeAs26(file, { deductions, sales }, map, ledgerNames, { fromDate, toDate });
+
+    // --- masking (R-P-5): parties pseudonym, refs Doc N, totals untouched ---
+    const isTallyLedger = new Set(masterPairs.map((l) => canonicalKey(l.name)));
+    const pseudoName = (n: string): string => {
+      if (!n) return n;
+      if (isTallyLedger.has(canonicalKey(n))) {
+        return maskLedgerName(n, ledgerGroupOf.get(canonicalKey(n)) ?? "", c, vault);
+      }
+      if (ledgerGroupOf.has(canonicalKey(n))) {
+        return maskLedgerName(n, ledgerGroupOf.get(canonicalKey(n)) ?? "", c, vault);
+      }
+      return vault.pseudonym(n, "debtor");
+    };
+    const DATE_LABEL = /^\d{1,2}-[A-Za-z]{3}-\d{4}$/;
+    const findings: As26Finding[] = result.findings.map((f) => {
+      if (isTallyLedger.has(canonicalKey(f.party))) realLedgerByFinding.set(f.id, f.party);
+      const schedule = f.schedule?.map((row) => {
+        const label = row.label && !DATE_LABEL.test(row.label) && row.label !== "unknown date"
+          ? vault.pseudonym(row.label, "doc")
+          : row.label;
+        return { ...row, label: scrubSecrets(label) };
+      });
+      return {
+        ...f,
+        party: pseudoName(f.party),
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+        ...(schedule ? { schedule } : {}),
+      };
+    });
+    const maskReconMatch = (m: PartyMatch) => ({
+      ...m,
+      ledgerName: pseudoName(m.ledgerName),
+      as26Name: vault.pseudonym(m.as26Name, "debtor"),
+    });
+    const recon = result.recon.map((r) => ({ ...r, match: maskReconMatch(r.match) }));
+    const gaps = result.gaps.map((g) => ({
+      ...g,
+      ledger: g.ledger ? pseudoName(g.ledger) : undefined,
+      name: g.name ? vault.pseudonym(g.name, "debtor") : g.name,
+    }));
+    const recLedgers = receivable.map((r) =>
+      maskLedgerName(r.name, ledgerGroupOf.get(canonicalKey(r.name)) ?? "", c, vault),
+    );
+
+    const masked: As26ReviewResult = sweepStrings(
+      {
+        company: company ?? undefined,
+        fromDate,
+        toDate,
+        findings,
+        recon,
+        gaps,
+        totals: result.totals,
+        mastersUnavailable,
+        groupsUnavailable,
+        skipped: result.skipped,
+        counts: { credits, receivableLedgers: recLedgers },
+      },
+      vault,
+    ) as As26ReviewResult;
+    lastAs26 = masked;
+    return masked;
+  }
 
   async function tdsReview(
     company: string | undefined,
@@ -1443,6 +1686,7 @@ export function createSession(
     },
 
     tdsReview,
+    as26Review,
     depreciationReview,
     faRegister,
   };
