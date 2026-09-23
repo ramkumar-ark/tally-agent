@@ -464,5 +464,30 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Task 13's live validation was completed 2026-09-15: both narrow-month and
   full-FY runs execute end-to-end with the Task 12 degradation (see §10 of
   the TDS design doc), but the company's masters carry 0 TDS flags — zero
-  findings is by construction until it masters its TDS flags or the
-  operator file lands (a separate captain call).
+  findings is by construction until it masters its TDS flags or the operator
+  file lands (a separate captain call).
+
+## PAN from GSTIN when the master PAN is empty (2026-09-23)
+
+- A ledger master with no PAN but a well-formed GSTIN now yields a derived
+  PAN: `panFromGstin` (`src/review.ts`) requires a 15-char GSTIN whose
+  chars 3-12 match `PAN_SHAPE` (`/^[A-Z]{5}[0-9]{4}[A-Z]$/`). The derived PAN
+  feeds the same paths as a master PAN — `panOf`/`panAliasOf` (vault
+  pseudonym), `entityOf`'s PAN 4th character, and therefore the s.206AA
+  decision. A malformed/short GSTIN yields nothing (unchanged behaviour).
+- Precedence: operator-template/Winman PAN > explicit master PAN > GSTIN-
+  derived. The operator/Winman override deletes the key from `panDerived`, so
+  an overridden deductee never carries the derivation note. `ctx
+  .panDerivedFromGstinOf` (optional on `TdsCtx`) drives the
+  `" (PAN derived from GSTIN)"` detail suffix; raw PAN/GSTIN never leave the
+  vault.
+- The no-PAN rate is a hard 20% (`S206AA_RATE` in `src/tds.ts`), NOT
+  `law.rates.noPan` — the 194Q `noPan: 0.05` entry is unused. Never wire
+  `rateFor` to `law.rates.noPan` without a captain call; the design of record
+  is the s.206AA floor.
+- Measured on one real FY 25-26 day-book run (counts/amounts only): 206AA-note
+  findings 3162 → 771, 194Q `tds_not_deducted` 2296 → 1912, `tds_master_gap`
+  542 → 416, total not-deducted ₹82,09,983 → ₹15,06,375; 1873 findings now
+  carry the derivation note. The drop is the expected direction (many masters
+  carry a GSTIN but no PAN); the residual 206AA findings are masters with
+  neither.

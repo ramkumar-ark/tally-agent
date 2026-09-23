@@ -37,6 +37,8 @@ export interface TdsCtx {
   resolveSection(expenseLedger: string): { section: string | null; candidates: string[] };
   dutySectionOf(dutyLedger: string): string | null;
   panKeyOf(party: string): string | null;
+  /** True when `panKeyOf`'s PAN was derived from the ledger's GSTIN (no master PAN). */
+  panDerivedFromGstinOf?(party: string): boolean;
   entityOf(party: string): "P" | "H" | "C" | "F" | null;
   deducteeTypeOf?(party: string): string;
   certificateRateOf(party: string, section: string, date: string): number | null;
@@ -430,7 +432,11 @@ export function analyzeTds(
       const liability = round2(rate.rate * liableBase);
       if (liability <= TDS_TOLERANCE) continue;
 
-      const mit194 = rate.via206AA ? " (s.206AA: no PAN on the deductee)" : "";
+      const panNote = rate.via206AA
+        ? " (s.206AA: no PAN on the deductee)"
+        : ctx.panDerivedFromGstinOf?.(b.party)
+          ? " (PAN derived from GSTIN)"
+          : "";
       if (ctx.transporterDeclared(b.party) && section === "194C") {
         // 194C(6): a transporter declaration excludes these payments.
         push(
@@ -455,7 +461,7 @@ export function analyzeTds(
           b.party,
           section,
           liability,
-          `booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${mit194}: tax of ${money(liability)} was payable, but no duty credit was found.`,
+          `booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}: tax of ${money(liability)} was payable, but no duty credit was found.`,
         );
         continue;
       }
@@ -467,7 +473,7 @@ export function analyzeTds(
           b.party,
           section,
           round2(liability - ded.tax),
-          `duty credit of ${money(ded.tax)} on ${displayDate(ded.date)} is short of the ${money(liability)} payable on the booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${mit194}.`,
+          `duty credit of ${money(ded.tax)} on ${displayDate(ded.date)} is short of the ${money(liability)} payable on the booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}.`,
         );
       }
       const advance = events.payments

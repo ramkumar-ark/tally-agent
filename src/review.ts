@@ -55,6 +55,19 @@ import {
   type DepFinding,
 } from "./types.js";
 
+/** A PAN is five letters, four digits, one letter. */
+const PAN_SHAPE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+/**
+ * The PAN a ledger master carries implicitly: a GSTIN's characters 3–12 are
+ * the holder's PAN. Only a 15-character GSTIN whose PAN span matches the
+ * shape yields one — anything malformed derives nothing (unchanged behaviour).
+ */
+function panFromGstin(gstin: string | null): string | null {
+  if (!gstin || gstin.length !== 15) return null;
+  const candidate = gstin.slice(2, 12);
+  return PAN_SHAPE.test(candidate) ? candidate : null;
+}
+
 /**
  * Ledger-bearing fields in a downstream voucher row. The real
  * tally_prime_mcp_server report envelope carries the counterparty under
@@ -1025,13 +1038,30 @@ export function createSession(
     }
 
     // PAN channel: a real PAN travels only as its TaxId N pseudonym (M2
-    // pattern). The PAN's 4th character feeds the statutory rate.
-    const panAliasOf = new Map<string, string>();
+    // pattern). The PAN's 4th character feeds the statutory rate. A master
+    // that carries no PAN of its own takes the PAN embedded in its GSTIN
+    // (characters 3–12) when that is well-formed; an explicit master PAN
+    // always wins, and an absent or malformed GSTIN derives nothing.
+    // `panDerived` records the derived cases so a finding can say the PAN came
+    // from the GSTIN without ever printing either — both travel only as their
+    // TaxId alias.
+    const panOf = new Map<string, string>();
+    const panDerived = new Set<string>();
     for (const l of masters) {
-      if (l.pan && !panAliasOf.has(canonicalKey(l.name))) {
-        panAliasOf.set(canonicalKey(l.name), vault.pseudonym(l.pan, "tax_id"));
+      const k = canonicalKey(l.name);
+      if (panOf.has(k)) continue;
+      if (l.pan) {
+        panOf.set(k, l.pan);
+        continue;
+      }
+      const derived = panFromGstin(l.gstin);
+      if (derived) {
+        panOf.set(k, derived);
+        panDerived.add(k);
       }
     }
+    const panAliasOf = new Map<string, string>();
+    for (const [k, pan] of panOf) panAliasOf.set(k, vault.pseudonym(pan, "tax_id"));
     // §8.4 PAN pickup: for each template Parties row declaring a Winman
     // Deductee Name, that exact string (trimmed) joins one deductee; a
     // Winman-only PAN is adopted through the same vault channel, identical
@@ -1053,6 +1083,9 @@ export function createSession(
         }
         if (!p.pan) panAdopted += 1;
         panAliasOf.set(canonicalKey(p.ledger), vault.pseudonym(hit.pan, "tax_id"));
+        // The operator/Winman PAN takes precedence over a GSTIN-derived one,
+        // so the rate no longer rests on the GSTIN.
+        panDerived.delete(canonicalKey(p.ledger));
       }
     }
     // Party→master resolution is a hot path: `analyzeTds` calls these closures
@@ -1162,7 +1195,7 @@ export function createSession(
     const transporterDeclared = (party: string): boolean => ops(party)?.transporterDeclaration ?? false;
     const deducteeFiledReturn = (party: string): boolean => ops(party)?.deducteeFiledReturn ?? false;
     const entityOf = (party: string): "P" | "H" | "C" | "F" | null => {
-      const pan = masterOf.get(canonicalKey(party))?.pan ?? null;
+      const pan = panOf.get(canonicalKey(party)) ?? null;
       if (!pan || pan.length < 4) return null;
       const ch = pan[3].toUpperCase();
       return ch === "P" || ch === "H" || ch === "C" || ch === "F" ? (ch as "P" | "H" | "C" | "F") : null;
@@ -1179,6 +1212,7 @@ export function createSession(
       resolveSection,
       dutySectionOf,
       panKeyOf,
+      panDerivedFromGstinOf: (party: string): boolean => panDerived.has(canonicalKey(party)),
       entityOf,
       deducteeTypeOf,
       certificateRateOf,

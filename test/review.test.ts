@@ -258,9 +258,10 @@ describe("tdsReview", () => {
   const mkSession = (
     ledgerVouchersByLedger: Record<string, unknown>,
     callsOut: Array<{ ledger: string; from: string; to: string }> = [],
+    masters: string = MASTERS,
   ) => {
     const s = createSession(
-      Object.assign(fakeDownstream({ tally_get_ledgers: MASTERS }), {
+      Object.assign(fakeDownstream({ tally_get_ledgers: masters }), {
         ledgerVoucherRows: async (_c: any, ledgerName: string, _f: string, _t: string) => {
           const body = ledgerVouchersByLedger[String(ledgerName).toLowerCase()] ?? { source: "ledger-vouchers-report", vouchers: [] };
           const row = (v: any) => ({
@@ -405,6 +406,90 @@ describe("tdsReview", () => {
         skipped: { noSection: 0, noJoin: 0 },
       }),
     ).rejects.toThrow(/template Parties row 2, column C \(PAN\)/);
+  });
+
+  it("derives a PAN from a well-formed GSTIN when the master carries none, so 194Q books the standard rate", async () => {
+    const masters = JSON.stringify([
+      { name: "Goods Seller", parent: "Sundry Creditors", gstin: "27AAACA1234F1Z9", IsTDSApplicable: "Yes", TDSDeducteeType: "Firm" },
+      { name: "Goods Purchase", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+    ]);
+    const s = mkSession(
+      {
+        "goods purchase": {
+          source: "ledger-vouchers-report",
+          vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/1", amount: "6000000.00", partyLedgerName: "Goods Seller" }],
+        },
+        "goods seller": { source: "ledger-vouchers-report", vouchers: [] },
+      },
+      [],
+      masters,
+    );
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: "Goods Purchase", section: "194Q" }],
+      parties: [{ ledger: "Goods Seller", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false }],
+    }, "json");
+    const f = r.findings.find((x) => x.check === "tds_not_deducted")!;
+    expect(f).toBeDefined();
+    expect(f.amount).toBe(1000); // 1,000,000 above the 50 lakh crossing × 0.1%, not 5%
+    expect(f.detail).toContain("PAN derived from GSTIN");
+    expect(f.detail).not.toContain("s.206AA");
+    expect(r.totals.notDeducted).toBe(1000);
+    // Neither the derived PAN nor the GSTIN it came from leaves the gateway.
+    expect(JSON.stringify(r)).not.toContain("AAACA1234F");
+    expect(JSON.stringify(r)).not.toContain("27AAACA1234F1Z9");
+  });
+
+  it("keeps 206AA when the GSTIN is malformed and no master PAN exists", async () => {
+    const masters = JSON.stringify([
+      { name: "Goods Seller", parent: "Sundry Creditors", gstin: "27ABCD12345F1Z9", IsTDSApplicable: "Yes", TDSDeducteeType: "Firm" },
+      { name: "Goods Purchase", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+    ]);
+    const s = mkSession(
+      {
+        "goods purchase": {
+          source: "ledger-vouchers-report",
+          vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/1", amount: "6000000.00", partyLedgerName: "Goods Seller" }],
+        },
+        "goods seller": { source: "ledger-vouchers-report", vouchers: [] },
+      },
+      [],
+      masters,
+    );
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: "Goods Purchase", section: "194Q" }],
+      parties: [{ ledger: "Goods Seller", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false }],
+    }, "json");
+    const f = r.findings.find((x) => x.check === "tds_not_deducted")!;
+    expect(f.amount).toBe(200000); // 1,000,000 × 20% (the s.206AA floor)
+    expect(f.detail).toContain("s.206AA");
+    expect(f.detail).not.toContain("PAN derived from GSTIN");
+    expect(r.findings.some((x) => x.check === "tds_master_gap" && /no PAN recorded/.test(x.detail))).toBe(true);
+  });
+
+  it("keeps an explicit master PAN ahead of the GSTIN-derived one", async () => {
+    const masters = JSON.stringify([
+      { name: "Sample Builders LLP", parent: "Sundry Creditors", gstin: "27AAAPP1234P1Z9", IncomeTaxNumber: "ABCC1234A", IsTDSApplicable: "Yes", TDSDeducteeType: "Firm" },
+      { name: "Site Repairs Contract", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+      { name: "TDS Contractors", parent: "Duties & Taxes", IsTDSApplicable: "Yes" },
+    ]);
+    const s = mkSession(
+      {
+        "site repairs contract": {
+          source: "ledger-vouchers-report",
+          vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/12", amount: "250000.00", partyLedgerName: "Sample Builders LLP" }],
+        },
+        "sample builders llp": { source: "ledger-vouchers-report", vouchers: [] },
+        "tds contractors": { source: "ledger-vouchers-report", vouchers: [] },
+      },
+      [],
+      masters,
+    );
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
+    const f = r.findings.find((x) => x.check === "tds_not_deducted")!;
+    expect(f.amount).toBe(5000); // master PAN 4th char C → 2%, not the GSTIN PAN's P → 1%
+    expect(f.detail).not.toContain("PAN derived from GSTIN");
   });
 });
 
