@@ -313,6 +313,32 @@ company used for this verification `tb_review` completed in 10.7 min peaking at
 2.37 GB RSS, while `tb_gst_summary` consumed the full 15-minute cap and wedged
 Tally. Fixing that export is a separate upstream task.
 
+### Excel COM from WSL (Winman 3CD round-trip)
+
+Verified 2026-09-23. Excel automation works from this WSL2 distro, so the Winman
+Form 3CD round trip can be checked without leaving the terminal
+(`scripts/verify-winman-roundtrip.mjs`; design of record
+`docs/design/2026-09-23-winman-3cd-pf-esi-design.md` §2.5 and §10).
+
+- **`powershell.exe` is not on `PATH`** (this distro sets
+  `interop.appendWindowsPath=false`). Use the absolute path:
+  `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`.
+- Excel 16.0. Set `$xl.AutomationSecurity = 1` (msoAutomationSecurityLow) before
+  `Workbooks.Open` so the workbook's signed VBA project loads; then drive its
+  macros with `Application.Run`.
+- A WSL path such as `/tmp/x.xlsm` is opened by the Windows Excel process over
+  the 9p share as `\\wsl.localhost\<distro>\tmp\x.xlsm` (`<distro>` is
+  `$WSL_DISTRO_NAME`); `/mnt/c/...` maps to `C:\...`. Both work.
+- Two traps, both encoded in the script:
+  - `$wb.Close($false)` **hangs indefinitely** once `ValidateMandatoryFields`
+    has run — call `$xl.Quit()` alone.
+  - `$xl.Quit()` returns but `EXCEL.EXE` lingers. Capture the app PID via
+    `GetWindowThreadProcessId($xl.Hwnd)` and force-kill that PID — never
+    `taskkill /IM EXCEL.EXE`, which would also kill the operator's other
+    workbooks.
+- **V4 — the Winman import click — is captain-operated** and cannot be
+  automated from here. V1–V3 are mechanical; V4 is the honest manual boundary.
+
 ## What is not verified
 
 - **The `.mcp.json` and `.claude/settings.json` files themselves have not been
