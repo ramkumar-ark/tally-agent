@@ -5,6 +5,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { buildAs26Fixture } from "./as26-fixture.js";
 import { parseAs26Export } from "../src/as26-file.js";
 import { createSession } from "../src/review.js";
+import { buildAs26MapTemplate } from "../src/as26-template.js";
 import { EMPTY_OVERRIDES } from "../src/overrides.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import type { DayBookInput } from "../src/tds-daybook.js";
@@ -196,6 +197,23 @@ describe("Session.as26Review", () => {
     const raw = JSON.stringify(res);
     expect(raw).not.toContain("TDS Receivable");
     expect(raw).not.toContain("CGST");
+  });
+
+  it("accepts a filled .xlsx mapping template at as26MapPath", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "as26-review-"));
+    dirs.push(dir);
+    const p = join(dir, "as26-map.xlsx");
+    writeFileSync(
+      p,
+      buildAs26MapTemplate({
+        deductors: [{ name: "Anand Buildmart Pvt Ltd", kind: "tds", tax: 4600.15 }],
+        map: { mappings: [{ ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" }] },
+        ledgers: ["Anand Buildmart Pvt Ltd"],
+      }),
+    );
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, p);
+    expect(res.totals.partiesMatched).toBe(1);
   });
 
   it("rejects a bad period before touching downstream", async () => {

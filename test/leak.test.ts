@@ -281,6 +281,7 @@ describe("no secret leaves the gateway", () => {
       "tb_review",
       "tb_tds_review",
       "tb_write_26as_report",
+      "tb_write_26as_template",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
       "tb_write_gst_report",

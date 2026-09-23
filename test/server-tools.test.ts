@@ -6,6 +6,7 @@ import { registerTools, type ToolRegistrar } from "../src/index.js";
 import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
+import { buildAs26Fixture } from "./as26-fixture.js";
 import { EMPTY_TDS_OPERATOR } from "../src/tds-file.js";
 
 function harness() {
@@ -25,7 +26,7 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the eighteen approved tools", () => {
+  it("exposes exactly the nineteen approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",
@@ -39,6 +40,7 @@ describe("tool surface", () => {
       "tb_review",
       "tb_tds_review",
       "tb_write_26as_report",
+      "tb_write_26as_template",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
       "tb_write_gst_report",
@@ -525,5 +527,25 @@ describe("tb_depreciation_review", () => {
     expect(parsed.markdownPath).toMatch(/depreciation-review-.*\.md$/);
     expect(parsed.csvPath).toMatch(/depreciation-findings-.*\.csv$/);
     expect(parsed.workbookPath).toMatch(/depreciation-review-.*\.xlsx$/);
+  });
+});
+
+describe("tb_write_26as_template", () => {
+  it("writes the mapping template and keeps real names out of the model envelope", async () => {
+    const { tools } = harness();
+    const dir = mkdtempSync(join(tmpdir(), "as26-tmpl-"));
+    const as26Path = join(dir, "26as.xlsm");
+    writeFileSync(as26Path, buildAs26Fixture());
+    const out = await tools.get("tb_write_26as_template")!({
+      as26Path,
+      company: "Demo Traders Pvt Ltd",
+    });
+    const parsed = JSON.parse(out);
+    expect(parsed.templatePath).toMatch(/as26-map-template-.*\.xlsx$/);
+    expect(existsSync(parsed.templatePath)).toBe(true);
+    expect(parsed.deductors).toBeGreaterThan(0);
+    expect(out).not.toContain("Nagar Palika");
+    expect(out).not.toContain("Anand Buildmart");
+    expect(out).not.toContain("Kaveri");
   });
 });

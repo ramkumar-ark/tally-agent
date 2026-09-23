@@ -13,6 +13,12 @@ import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadWrongGroup } from "./overrides.js";
 import { parseAs26Export } from "./as26-file.js";
 import {
+  as26TemplateFileName,
+  buildAs26MapTemplate,
+  loadAs26MapFile,
+  templateDeductors,
+} from "./as26-template.js";
+import {
   appendAudit,
   writeDepreciationReport,
   writeFaRegisterReport,
@@ -34,7 +40,7 @@ import {
   type Session,
   type TdsReviewResult,
 } from "./review.js";
-import { loadDayBookText, readDayBook, type DayBookInput } from "./tds-daybook.js";
+import { loadDayBookText, readDayBook, readDayBookLedgerNames, type DayBookInput } from "./tds-daybook.js";
 
 export type ToolRegistrar = (
   name: string,
@@ -469,12 +475,74 @@ export function registerTools(
   );
 
   register(
+    "tb_write_26as_template",
+    "Generate the fillable Excel 26AS party-mapping template (as26-map-template-<company>-<date>.xlsx) " +
+      "into the report directory and return its path. It pre-fills one row per 26AS deductor/collector " +
+      "with the Tally ledger already in effect; type the matching Tally ledger into the \"Tally ledger\" " +
+      "column, then pass its path to tb_26as_review as as26MapPath — never paste its rows into chat.",
+    {
+      as26Path: z.string()
+        .describe("Path to the TRACES Form 26AS export (.xlsm); read inside the gateway, only the path is audited"),
+      as26MapPath: z.string().optional()
+        .describe(
+          "Optional PATH to the operator party map already in effect (JSON or a filled .xlsx template); " +
+            "its rows are pre-filled so the template can be re-filled iteratively. Defaults to config/as26-map.json.",
+        ),
+      dayBookPath: z.string().optional()
+        .describe(
+          "Optional PATH to an operator day-book export; when given its ledger list fills the template's " +
+            "dropdown/reference sheet instead of live Tally masters.",
+        ),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      const file = parseAs26Export(await readFile(args.as26Path));
+      const map = loadAs26MapFile(
+        args.as26MapPath ?? as26MapPath(import.meta.url),
+        (why) => console.error(`tally-agent: ${why}`),
+      );
+      let ledgers: string[] = [];
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        ledgers = readDayBookLedgerNames(text, args.company ?? cfg.defaultCompany);
+      }
+      if (ledgers.length === 0) ledgers = await session.ledgerNames(args.company ?? cfg.defaultCompany);
+      const deductors = templateDeductors(file);
+      const outPath = join(
+        cfg.reportDir,
+        as26TemplateFileName(
+          args.company,
+          new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+        ),
+      );
+      await writeFile(outPath, buildAs26MapTemplate({ company: args.company, deductors, map, ledgers }));
+      await audit(
+        "tb_write_26as_template",
+        {
+          company: args.company,
+          as26Path: args.as26Path,
+          ...(args.as26MapPath ? { as26MapPath: args.as26MapPath } : {}),
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+        },
+        deductors.length,
+        0,
+      );
+      return JSON.stringify(
+        { templatePath: outPath, deductors: deductors.length, ledgers: ledgers.length },
+        null,
+        2,
+      );
+    },
+  );
+
+  register(
     "tb_26as_review",
     "Tally-books vs TRACES Form 26AS reconciliation: TDS/TCS tax booked but absent from 26AS, " +
       "26AS tax the books never booked, gross-vs-taxable valuation mismatch, mapping gaps, " +
       "late booking and export self-consistency. Pass the PATH of the TRACES Form 26AS export " +
       "(.xlsm) — never paste its rows into chat; parties appear as pseudonyms; drill in with " +
-      "tb_ledger_activity using finding ids. Optionally pass dayBookPath to run the books from " +
+      "tb_ledger_activity using finding ids. Correct the party mapping by passing the filled " +
+      "template from tb_write_26as_template as as26MapPath. Optionally pass dayBookPath to run the books from " +
       "an operator day-book export instead of live Tally.",
     {
       fromDate: z.string().describe("Period start, YYYYMMDD"),
@@ -489,8 +557,10 @@ export function registerTools(
       company: z.string().optional(),
       as26MapPath: z.string().optional()
         .describe(
-          "Optional PATH to an operator party-map JSON ({ mappings: [{ ledger, as26Name }] }); " +
-            "defaults to config/as26-map.json next to the build. The path is audited, never its rows.",
+          "Optional PATH to the operator party map: the fillable .xlsx template from " +
+            "tb_write_26as_template, or the JSON ({ mappings: [{ ledger, as26Name }] }); " +
+            "dispatched by extension. Defaults to config/as26-map.json next to the build. " +
+            "The path is audited, never its rows.",
         ),
     },
     async (args) => {

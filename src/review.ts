@@ -19,7 +19,6 @@ import {
   analyzeAs26,
   booksSales,
   deductionEvents,
-  loadAs26Map,
   receivableLedgers,
   type BooksDeduction,
   type PartyMatch,
@@ -27,6 +26,7 @@ import {
   type As26Result,
 } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
+import { loadAs26MapFile } from "./as26-template.js";
 import type { LedgerTaxInfo } from "./downstream.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
@@ -403,6 +403,12 @@ export interface Session {
     as26MapPath: string,
     dayBook?: DayBookInput,
   ): Promise<As26ReviewResult>;
+  /**
+   * The company's ledger master names, for the 26AS mapping template's
+   * dropdown/reference list. Degrades to [] (with a warning) when masters are
+   * unavailable — the template is still useful without a list.
+   */
+  ledgerNames(company: string | undefined): Promise<string[]>;
   vault: Vault;
 }
 
@@ -822,7 +828,7 @@ export function createSession(
       ledgerNames = [...names];
     }
 
-    const map = loadAs26Map(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
+    const map = loadAs26MapFile(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
     const result = analyzeAs26(file, { deductions, sales }, map, ledgerNames, { fromDate, toDate });
 
     // --- masking (R-P-5): parties pseudonym, refs Doc N, totals untouched ---
@@ -1736,6 +1742,18 @@ export function createSession(
       for (const f of masked) counts[f.severity] += 1;
       lastGst = { company, fromDate, toDate, returnRows: returns.length, counts, findings: masked, aggregate };
       return lastGst;
+    },
+
+    async ledgerNames(company) {
+      try {
+        const masters = await d.ledgersTax(company);
+        return masters.map((m) => m.name).filter((n) => n);
+      } catch {
+        console.error(
+          "tally-agent: ledger masters unavailable — the 26AS mapping template ships without a ledger list",
+        );
+        return [];
+      }
     },
 
     tdsReview,

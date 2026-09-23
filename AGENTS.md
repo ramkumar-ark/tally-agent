@@ -275,6 +275,33 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   display dedupe to make the paths "match" (same D5 reasoning; recorded in
   design §10, 2026-09-22).
 
+## Sharp edges found implementing the 26AS mapping template (2026-09-23)
+
+- The fillable 26AS party-mapping template (`src/as26-template.ts`,
+  `tb_write_26as_template`) is the Excel sibling of the TDS template: the
+  operator fills the "Tally ledger" column and passes it back as
+  `as26MapPath`. `loadAs26MapFile` dispatches on extension
+  (`/\.xls[xm]$/i`) to `parseAs26MapTemplate`, else `loadAs26Map`;
+  `Session.as26Review` calls `loadAs26MapFile`, so the JSON map is unchanged.
+  Worksheet row numbers and JSON entry indices are different NUMBER spaces —
+  the template error cites the 1-based Excel row, the JSON error the 1-based
+  entry index; both never echo a name.
+- The template is written directly by `buildWorkbook` (NOT the de-masking
+  `writeWorkbook` vault wrapper): it carries real 26AS and ledger names on the
+  operator's disk, like the report workbook, and nothing in it was ever
+  masked. `tb_write_26as_template` pre-fills previously effective mappings
+  (from the map) and one row per distinct canonical 26AS name (tax summed
+  across summaries) for iterative re-fill.
+- The Tally-ledger dropdown is a convenience only: an OOXML list formula is
+  one comma-joined quoted string capped at 255 chars, so a comma/quote in any
+  name or a long list falls back to a `Ledgers` reference sheet
+  (`inlineLedgerList`). The ledger list comes from `dayBookPath`
+  (`readDayBookLedgerNames`, which reads only `ledgers[]` and skips the
+  period validation `readDayBook` enforces) else live masters
+  (`Session.ledgerNames`, degrades to [] with a warning when Tally is down).
+- Design of record §10 covers the workflow; operator walkthrough is
+  `docs/operator/26as-mapping-template.md`.
+
 ## Sharp edges found implementing 26AS reconciliation (2026-09-22)
 
 - The design of record lives in `docs/design/2026-09-22-form-26as-reconciliation-design.md`

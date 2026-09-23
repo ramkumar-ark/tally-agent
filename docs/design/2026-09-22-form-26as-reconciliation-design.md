@@ -76,6 +76,11 @@ A tax edge may be explained by a bounded subset of the other side's unmatched ro
 ## 10. Mapping-correction workflow (operator)
 
 1. Run `tb_26as_review` with no or partial map; the `mapping_gap` findings name what is unjoined.
-2. Run `tb_write_26as_report`; the workbook's **Mapping** sheet lists matches union gaps with the 26AS-side de-masked names and the exact books-ledger names to place against them.
-3. Edit `config/as26-map.json` (`{ "mappings": [{ "ledger": "...", "as26Name": "..." }] }`; sample shipped) or pass a temporary file via `as26MapPath`; re-run.
-4. `loadAs26Map` follows the overrides-file semantics: missing → empty map + warn; malformed JSON / duplicate ledger-or-as26Name key / blank field → throw citing the entry NUMBER only.
+2. Generate the fillable mapping template with `tb_write_26as_template` (pass `as26Path`, and `as26MapPath` if a map is already partly in effect). The tool pre-fills one row per 26AS deductor/collector — name, kind and 26AS tax — with the "Tally ledger" column already carrying any in-effect mapping, and gives that column a dropdown of the company's ledger names (from the day book's `ledgers` when `dayBookPath` is given, else live masters; when an inline dropdown is not feasible — too many names, or a comma/quote in one — the list rides a `Ledgers` reference sheet instead).
+3. Fill the "Tally ledger" column in Excel. `tb_write_26as_report`'s workbook **Mapping** sheet lists matches union gaps de-masked, as a second aid.
+4. Pass the filled `.xlsx` back as `as26MapPath` (`tb_26as_review` dispatches on extension); re-run. Repeat as gaps close.
+5. `config/as26-map.json` (`{ "mappings": [{ "ledger": "...", "as26Name": "..." }] }`; sample shipped) remains the default and the JSON channel still works unchanged.
+6. Both loaders share the overrides-file semantics: missing → empty map + warn; malformed input / duplicate ledger-or-as26Name key / blank field → throw citing the NUMBER only (JSON entry index, template Excel ROW number), never a name.
+
+Operator-facing walkthrough: `docs/operator/26as-mapping-template.md`.
+

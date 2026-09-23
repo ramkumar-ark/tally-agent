@@ -249,6 +249,34 @@ export function readDayBook(
   };
 }
 
+/**
+ * The ledger master names a day-book bundle declares, without the period
+ * validation `readDayBook` applies: the 26AS mapping template only needs the
+ * ledger list, not the vouchers or an accounting period. A non-bundle day book
+ * (a bare array or a `vouchers` envelope) carries no masters and yields [].
+ */
+export function readDayBookLedgerNames(text: string, company?: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+  const env = parsed as Record<string, unknown>;
+  const declared = typeof env.company === "string" ? env.company.trim() : "";
+  if (declared && company && canonicalKey(declared) !== canonicalKey(company)) {
+    throw new Error(
+      "the day-book file was exported from a different company than the one under review; re-export it from the company under review",
+    );
+  }
+  if (!Array.isArray(env.ledgers)) return [];
+  return env.ledgers
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+    .map((x) => String(x.name ?? "").trim())
+    .filter((n) => n !== "");
+}
+
 /** Read the file, refusing anything over the configured ceiling before it is read into memory.
  *  A real Tally export can arrive UTF-16 LE with a BOM; decode by what the bytes say. */
 export async function loadDayBookText(path: string, maxBytes: number): Promise<string> {
