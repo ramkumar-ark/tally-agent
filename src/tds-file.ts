@@ -268,9 +268,9 @@ export const EMPTY_TDS_OPERATOR: OperatorFile = {
 // mangled tax id (R-P-9).
 // ---------------------------------------------------------------------------
 
-const normHeader = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
+export const normHeader = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
 
-const colLetter = (n: number): string => {
+export const colLetter = (n: number): string => {
   let out = "";
   let i = n + 1;
   while (i > 0) {
@@ -281,12 +281,12 @@ const colLetter = (n: number): string => {
   return out;
 };
 
-interface ColSpec {
+export interface ColSpec {
   header: string;
   aliases?: string[];
 }
 
-function locatedSheet(sheets: GridSheet[], name: string): GridSheet {
+export function locatedSheet(sheets: GridSheet[], name: string): GridSheet {
   const s = sheets.find((x) => normHeader(x.name) === normHeader(name));
   if (!s) {
     throw new Error(
@@ -301,7 +301,7 @@ function locatedSheet(sheets: GridSheet[], name: string): GridSheet {
  * Bind each logical column to a physical 0-based index by header text (never
  * by position — an inserted helper column must not shift the mapping).
  */
-function bindColumns(sheet: GridSheet, spec: ColSpec[]): Array<{ col: number; header: string }> {
+export function bindColumns(sheet: GridSheet, spec: ColSpec[]): Array<{ col: number; header: string }> {
   const headerRow: GridRow | undefined = sheet.rows[0];
   const wanted = spec.map((c) => ({ ...c, norm: normHeader(c.header) }));
   const found: Array<{ col: number; header: string }> = [];
@@ -330,13 +330,13 @@ function bindColumns(sheet: GridSheet, spec: ColSpec[]): Array<{ col: number; he
   return found;
 }
 
-type Bound = Array<{ col: number; header: string }>;
+export type Bound = Array<{ col: number; header: string }>;
 
-function accessors(bound: Bound): Map<string, number> {
+export function accessors(bound: Bound): Map<string, number> {
   return new Map(bound.map((b) => [b.header, b.col]));
 }
 
-function dataRows(sheet: GridSheet): GridRow[] {
+export function dataRows(sheet: GridSheet): GridRow[] {
   // Skip fully-blank data rows: the writer emits every cell incl. empties,
   // so a trailing blank row is a normal End-of-table marker.
   return (sheet.rows.slice(1) as GridRow[]).filter(
@@ -344,14 +344,14 @@ function dataRows(sheet: GridSheet): GridRow[] {
   );
 }
 
-interface CellRef {
+export interface CellRef {
   sheet: GridSheet;
   row: GridRow;
   col: number;
   header: string;
 }
 
-function raw(cell: GridCell | undefined): GridCell {
+export function raw(cell: GridCell | undefined): GridCell {
   return cell ?? { value: null, isDate: false };
 }
 
@@ -411,7 +411,7 @@ function serialToYmd(n: number): string {
   return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}`;
 }
 
-function dateCell(ref: CellRef, cell: GridCell | undefined): string {
+export function dateCell(ref: CellRef, cell: GridCell | undefined): string {
   const v = raw(cell).value;
   if (v === null || String(v).trim() === "") {
     throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): required cell is blank`);
@@ -440,7 +440,7 @@ function dateCell(ref: CellRef, cell: GridCell | undefined): string {
   throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): not a date — type it as 16-Jan-2026 or 2026-01-16`);
 }
 
-function amountCell(ref: CellRef, cell: GridCell | undefined): number {
+export function amountCell(ref: CellRef, cell: GridCell | undefined): number {
   const v = raw(cell).value;
   if (v === null || String(v).trim() === "") return 0;
   if (typeof v === "number") return v;
@@ -466,7 +466,7 @@ function rateCell(ref: CellRef, cell: GridCell | undefined): number {
 }
 
 /** The enum text families: sections, kind, quarter, form. */
-function enumCell(
+export function enumCell(
   ref: CellRef,
   cell: GridCell | undefined,
   allowed: string[],
@@ -481,7 +481,7 @@ function enumCell(
   return hit;
 }
 
-function textCell(ref: CellRef, cell: GridCell | undefined): string | undefined {
+export function textCell(ref: CellRef, cell: GridCell | undefined): string | undefined {
   const v = raw(cell).value;
   if (v === null || String(v).trim() === "") return undefined;
   if (typeof v !== "string") {
