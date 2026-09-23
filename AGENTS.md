@@ -321,6 +321,20 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `analyzeAs26`, and its Mapping sheet lists matches UNION gaps so an
   empty-map report doubles as the operator's correction worksheet.
   `maskedCountAs26` counts parties under `/^(\w+) \d+$/`.
+- Two traps in the 26AS books path (fixed 2026-09-23, `src/review.ts`
+  `as26Review`):
+  - Every rows `Map` handed to `rowsByLedger` must be keyed by
+    `canonicalKey(name)`, never the raw ledger name — a real ledger's
+    uppercase letters make a raw key unreachable and the whole books side
+    silently reads zero (the live and TDS day-book paths already did this;
+    the 26AS day-book branch did not).
+  - `receivableLedgers` must be given the **group tree as well as the
+    ledger pairs** (`[...masterPairs, ...groups]`): a ledger's immediate
+    parent is usually a group, so a ledger-only chain never reaches an
+    asset root. Only fall back to the loose voucher-name heuristic when
+    masters are genuinely absent (`masterPairs.length === 0`), never merely
+    because the run is a day book — otherwise GST TDS receivables (under
+    `Duties & Taxes`) are misread as income-tax TDS.
 
 ## Masking sharp edges (whole-token substitution, 2026-09-23)
 

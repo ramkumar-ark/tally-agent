@@ -7,6 +7,7 @@ import { parseAs26Export } from "../src/as26-file.js";
 import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/overrides.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
+import type { DayBookInput } from "../src/tds-daybook.js";
 
 const dirs: string[] = [];
 const mapFile = (text: string): string => {
@@ -130,6 +131,71 @@ describe("Session.as26Review", () => {
     } finally {
       console.error = err;
     }
+  });
+
+  it("keys day-book rows canonically and keeps GST TDS receivables out of the income-tax set", async () => {
+    const dayBook: DayBookInput = {
+      shape: "bundle",
+      company: "Demo Traders Pvt Ltd",
+      groups: [
+        { name: "Current Assets", parent: "" },
+        { name: "Loans & Advances (Asset)", parent: "Current Assets" },
+        { name: "Current Liabilities", parent: "" },
+        { name: "Duties & Taxes", parent: "Current Liabilities" },
+        { name: "GST", parent: "Duties & Taxes" },
+      ],
+      ledgers: [
+        { name: "TDS Receivable", parent: "Loans & Advances (Asset)" },
+        { name: "TDS - CGST Receivable A/c", parent: "GST" },
+      ],
+      vouchers: [
+        {
+          date: "20250605", voucherType: "Journal", voucherNumber: "JV/1", partyLedgerName: "Kaveri Minerals Trading",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: 5000 },
+            { ledger: "Kaveri Minerals Trading", amount: -5000 },
+          ],
+        },
+        {
+          date: "20250606", voucherType: "Journal", voucherNumber: "JV/2", partyLedgerName: "Kaveri Minerals Trading",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: -50 },
+            { ledger: "Kaveri Minerals Trading", amount: 50 },
+          ],
+        },
+        {
+          date: "20250607", voucherType: "Journal", voucherNumber: "JV/3", partyLedgerName: "Kaveri Minerals Trading",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS - CGST Receivable A/c", amount: 900 },
+            { ledger: "Kaveri Minerals Trading", amount: -900 },
+          ],
+        },
+      ],
+      observedFrom: "20250605",
+      observedTo: "20250607",
+      rejected: 0,
+      emptyMonths: [],
+    };
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review(
+      "Demo Traders Pvt Ltd", "20250401", "20260331", file, mapFile('{"mappings":[]}'), dayBook,
+    );
+
+    // The asset root is reached through the group tree (ledger -> group ->
+    // root), so only the income-tax receivable is selected; the GST-TDS
+    // receivable sits under Duties & Taxes and is not income-tax TDS.
+    expect(res.counts.receivableLedgers).toHaveLength(1);
+    expect(res.counts.receivableLedgers[0]).toMatch(PSEUDONYM);
+    // Day-book rows are keyed canonically, so the mixed-case ledger's debit
+    // becomes a deduction event and its credit is counted, not silently lost.
+    expect(res.bookEvents.filter((e) => e.source === "deduction")).toHaveLength(1);
+    expect(res.counts.credits).toBe(1);
+    const raw = JSON.stringify(res);
+    expect(raw).not.toContain("TDS Receivable");
+    expect(raw).not.toContain("CGST");
   });
 
   it("rejects a bad period before touching downstream", async () => {

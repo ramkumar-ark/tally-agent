@@ -759,8 +759,12 @@ export function createSession(
 
     const assetRoots = new Set(["current assets", "fixed assets", "misc. expenses (asset)"]);
     const isAssetRoot = (group: string): boolean => assetRoots.has(canonicalKey(group));
-    let receivable = receivableLedgers(masterPairs, isAssetRoot);
-    if (receivable.length === 0 && (mastersUnavailable || dayBook)) {
+    // The parent chain reaches an asset root only when the group tree is
+    // walked too: a ledger's immediate parent can be a group, not a root.
+    const ancestry = [...masterPairs, ...groups];
+    let receivable = receivableLedgers(ancestry, isAssetRoot);
+    const mastersAbsent = mastersUnavailable || masterPairs.length === 0;
+    if (receivable.length === 0 && mastersAbsent) {
       // Masters absent: the same name heuristic applied to every ledger the
       // period's vouchers themselves touch — the books carry the evidence.
       const names = new Set<string>();
@@ -775,7 +779,7 @@ export function createSession(
           kind: (/tcs/.test(canonicalKey(n)) ? "tcs" : "tds") as As26Kind,
         }));
     }
-    if (receivable.length === 0 && !mastersUnavailable && !dayBook) {
+    if (receivable.length === 0 && !mastersAbsent) {
       throw new Error(
         "no TDS/TCS receivable ledger found under an asset group — name the ledger 'TDS Receivable' (or 'TCS Receivable') or extend the rule in src/as26.ts",
       );
@@ -787,7 +791,10 @@ export function createSession(
       let rows: Map<string, LedgerVoucherRow[]>;
       if (dayBook) {
         rows = new Map(
-          projectLedgerRows(voucherList, receivable.map((r) => r.name)).map((r) => [r.ledger, r.rows]),
+          projectLedgerRows(voucherList, receivable.map((r) => r.name)).map((r) => [
+            canonicalKey(r.ledger),
+            r.rows,
+          ]),
         );
       } else {
         rows = (await fetchLedgerRows(
