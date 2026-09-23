@@ -322,6 +322,24 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   empty-map report doubles as the operator's correction worksheet.
   `maskedCountAs26` counts parties under `/^(\w+) \d+$/`.
 
+## Masking sharp edges (whole-token substitution, 2026-09-23)
+
+- `maskKnownNames`, `demaskText` and `maskFinding`'s ledger substitution in
+  `src/mask.ts` are whole-token only, never bare substring replaces. A 26AS
+  schedule row label or sale voucher reference can be the bare string `"1"`,
+  vaulted under the doc role as `Doc N`; a substring replace turned
+  `"1,40,011.00"` into the pseudonym three times and `"01-Apr-2025"` into
+  `"0Doc N-Apr-2025"` (see the regression tests in `test/mask.test.ts`).
+- Boundary guards: word boundaries always; a purely numeric value
+  (`/^\d+$/`) additionally requires no numeric connector (`. , / : -`)
+  attached to a word character, so `1` matches neither `1,40,011.00` nor a
+  date's year. Alphabetic names must still match inside hyphenated references
+  (`Inv-Acme Traders-2201`) — over-tightening the guard leaks real names
+  (`test/leak.test.ts` catches it).
+- `maskKnownNames` matches existing vault aliases first and leaves them
+  untouched, or a real value that is a token of its own alias (`1` inside
+  `Doc 1`) would re-substitute to `Doc Doc 1`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

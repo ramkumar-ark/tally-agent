@@ -175,6 +175,73 @@ describe("maskFinding", () => {
   });
 });
 
+describe("whole-token substitution (short numeric vaulted values)", () => {
+  // A 26AS schedule row label or sale voucher reference can be the bare
+  // string "1", vaulted under the doc role as "Doc 1". Substituting that as
+  // a bare substring mangles every digit 1 in money figures and dates.
+  it("maskKnownNames leaves a numeric real value inside amounts and dates alone", () => {
+    const v = createVault();
+    v.pseudonym("1", "doc");
+    expect(
+      maskKnownNames("tax at stake 1,40,011.00 on 01-Apr-2025 ref 1", v),
+    ).toBe("tax at stake 1,40,011.00 on 01-Apr-2025 ref Doc 1");
+  });
+
+  it("maskFinding does not corrupt a detail whose ledger is a numeric value", () => {
+    const c = buildClassifier(groups);
+    const v = createVault();
+    const masked = maskFinding(
+      {
+        ...({
+          id: "AS26-001-1",
+          check: "as26_value_mismatch",
+          severity: "warning",
+          ledger: "1",
+          group: "Sundry Creditors",
+          amount: 140011,
+          side: "Dr",
+          expected: "Cr",
+          detail: "tax at stake 1,40,011.00 on 01-Apr-2025 ref 1",
+        } as Finding),
+      },
+      c,
+      v,
+    );
+    expect(masked.detail).toBe("tax at stake 1,40,011.00 on 01-Apr-2025 ref Creditor 1");
+  });
+
+  it("maskKnownNames still replaces a real name that appears as a whole token", () => {
+    const v = createVault();
+    v.pseudonym("Acme Traders", "creditor");
+    expect(maskKnownNames("Sale to Acme Traders, as per invoice", v)).toBe(
+      "Sale to Creditor 1, as per invoice",
+    );
+  });
+
+  it("maskKnownNames does not match a real name glued to a larger word", () => {
+    const v = createVault();
+    v.pseudonym("Acme", "creditor");
+    expect(maskKnownNames("AcmeTraders is not Acme", v)).toBe("AcmeTraders is not Creditor 1");
+  });
+
+  it("maskKnownNames still masks an alphabetic name inside a hyphenated reference", () => {
+    const v = createVault();
+    v.pseudonym("Acme Traders", "creditor");
+    expect(maskKnownNames("Inv-Acme Traders-2201", v)).toBe("Inv-Creditor 1-2201");
+  });
+
+  it("demaskText restores a real name but never inside a larger token", () => {
+    const c = buildClassifier(groups);
+    const v = createVault();
+    maskLedgerName("Acme Traders", "Sundry Creditors", c, v); // alias "Creditor 1"
+    expect(demaskText("Creditor 1 owes 1,40,011.00", v)).toBe(
+      "Acme Traders owes 1,40,011.00",
+    );
+    // The alias must not eat the "1" of a larger, unvaulted token.
+    expect(demaskText("Creditor 12 is unvaulted", v)).toBe("Creditor 12 is unvaulted");
+  });
+});
+
 describe("demaskText", () => {
   it("substitutes real names back into report text", () => {
     const c = buildClassifier(groups);

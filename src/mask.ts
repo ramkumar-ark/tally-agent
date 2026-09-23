@@ -1,4 +1,5 @@
 import type { Classifier } from "./classify.js";
+import { canonicalKey } from "./key.js";
 import type { Finding } from "./types.js";
 import type { Vault } from "./vault.js";
 
@@ -55,14 +56,26 @@ export function maskFinding(f: Finding, c: Classifier, v: Vault): Finding {
   }
   const ledger = maskLedgerName(f.ledger, f.group, c, v);
   const detail = scrubSecrets(
-    maskKnownNames(replaceAll(f.detail, f.ledger, ledger), v),
+    maskKnownNames(replaceWholeToken(f.detail, f.ledger, ledger), v),
   );
   return { ...f, ledger, detail };
 }
 
-function replaceAll(haystack: string, needle: string, replacement: string): string {
-  if (!needle) return haystack;
-  return haystack.split(needle).join(replacement);
+/**
+ * Substitutes a real value only where it is a whole token. A real value can
+ * be a bare short string such as "1" (a 26AS schedule row label or sale
+ * voucher reference vaulted under the doc role), and a plain substring
+ * replace then mangles every digit 1 inside money figures and dates:
+ * "1,40,011.00" becomes the pseudonym in three places and "01-Apr-2025"
+ * loses its "1". See {@link wholeTokenPattern}'s boundary guards.
+ */
+function replaceWholeToken(haystack: string, needle: string, replacement: string): string {
+  if (!needle.trim()) return haystack;
+  const re = new RegExp(
+    wholeTokenPattern(escapeRegExp(needle), isNumericValue(needle)),
+    "gi",
+  );
+  return haystack.replace(re, () => replacement);
 }
 
 export function demaskText(text: string, v: Vault): string {
@@ -72,7 +85,9 @@ export function demaskText(text: string, v: Vault): string {
     .sort((a, b) => b.alias.length - a.alias.length);
   let out = text;
   for (const { alias, real } of entries) {
-    out = replaceAll(out, alias, real);
+    if (!alias.trim()) continue;
+    const re = new RegExp(wholeTokenPattern(escapeRegExp(alias), false), "g");
+    out = out.replace(re, () => real);
   }
   return out;
 }
@@ -82,31 +97,73 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Case-insensitive, whitespace-variant-tolerant matcher for one real name:
- * any run of whitespace in the name matches any run of whitespace in the
- * target text, so "Acme Traders" also matches "Acme\r\nTraders" or
+ * A match is a whole token when it is not flanked by a word character. A
+ * purely numeric value gets a stricter guard: it must also not be flanked by
+ * a numeric connector (".", ",", "/", ":", "-") that is itself attached to a
+ * word character. That keeps a short numeric value ("1") from matching inside
+ * "1,40,011.00", "1.5" or a date's year ("01-Apr-2025"), while an alphabetic
+ * name still matches inside a hyphenated reference ("Inv-Acme Traders-2201")
+ * and a token that merely ends a sentence ("ref 1.") or sits in brackets
+ * ("(1)") is still a whole token.
+ */
+const WORD_LEFT = "(?<!\\w)";
+const WORD_RIGHT = "(?!\\w)";
+const NUMERIC_LEFT = "(?<!\\w)(?<!\\w[.,/:\\-])";
+const NUMERIC_RIGHT = "(?!\\w)(?![.,/:\\-]\\w)";
+
+function wholeTokenPattern(core: string, numeric: boolean): string {
+  return numeric
+    ? `${NUMERIC_LEFT}(?:${core})${NUMERIC_RIGHT}`
+    : `${WORD_LEFT}(?:${core})${WORD_RIGHT}`;
+}
+
+const isNumericValue = (s: string): boolean => /^\d+$/.test(s.trim());
+
+/**
+ * Case-insensitive, whitespace-variant-tolerant matcher source for one real
+ * name: any run of whitespace in the name matches any run of whitespace in
+ * the target text, so "Acme Traders" also matches "Acme\r\nTraders" or
  * "Acme  Traders".
  */
-function namePattern(real: string): RegExp {
+function namePatternSource(real: string): string {
   const collapsed = real.trim().replace(/\s+/g, " ");
-  const escaped = escapeRegExp(collapsed).replace(/ /g, "\\s+");
-  return new RegExp(escaped, "gi");
+  return escapeRegExp(collapsed).replace(/ /g, "\\s+");
 }
 
 /**
  * Replaces any occurrence of an already-vaulted real name inside free text
  * (narration, reference, and similar fields the gateway does not otherwise
  * inspect field-by-field) with its pseudonym. Longest real name first, so a
- * shorter party's name is not matched as a substring of a longer one. Only
- * catches names the vault already knows — see the design doc's stated
- * limitation on detecting a name never otherwise masked.
+ * shorter party's name is not matched as a substring of a longer one.
+ *
+ * Vault aliases are matched first and left untouched: an alias can itself
+ * contain a vaulted real value as a token (real "1" is aliased "Doc 1", so
+ * "Doc 1" contains the token "1"), and substituting inside an alias would
+ * corrupt it to "Doc Doc 1". Only catches names the vault already knows — see
+ * the design doc's stated limitation on detecting a name never otherwise
+ * masked.
  */
 export function maskKnownNames(text: string, v: Vault): string {
-  const entries = v.entries().sort((a, b) => b.real.length - a.real.length);
-  let out = text;
-  for (const { real, alias } of entries) {
-    if (!real.trim()) continue;
-    out = out.replace(namePattern(real), alias);
-  }
-  return out;
+  const entries = v.entries().filter((e) => e.real.trim() !== "");
+  if (entries.length === 0) return text;
+
+  const aliasKeys = new Set(entries.map((e) => canonicalKey(e.alias)));
+  const aliasByRealKey = new Map<string, string>();
+  for (const { real, alias } of entries) aliasByRealKey.set(canonicalKey(real), alias);
+
+  const aliases = entries
+    .map((e) => e.alias)
+    .sort((a, b) => b.length - a.length)
+    .map((alias) => wholeTokenPattern(escapeRegExp(alias), false));
+  const reals = entries
+    .map((e) => e.real)
+    .sort((a, b) => b.length - a.length)
+    .map((real) => wholeTokenPattern(namePatternSource(real), isNumericValue(real)));
+
+  const re = new RegExp([...aliases, ...reals].join("|"), "gi");
+  return text.replace(re, (match) => {
+    const key = canonicalKey(match);
+    if (aliasKeys.has(key)) return match;
+    return aliasByRealKey.get(key) ?? match;
+  });
 }
