@@ -1,8 +1,10 @@
 import type { VoucherEntry, VoucherRow } from "./downstream.js";
 import { displayDate, money } from "./format.js";
 import { canonicalKey } from "./key.js";
+import { dueDate, dueDateIsSunday, lawFor } from "./pf-esi-law.js";
 import type { FundKey } from "./pf-esi-law.js";
-import { findingId, type Finding } from "./types.js";
+import type { OperatorChallan, OperatorPfEsi } from "./pf-esi-file.js";
+import { findingId, type CheckId, type Finding } from "./types.js";
 
 /**
  * The books side of Form 3CD clause 20(b): find the PF/ESI payable ledgers and
@@ -158,4 +160,145 @@ export function employeeEvents(
     }
   }
   return { events, findings };
+}
+
+/**
+ * One clause 20(b) row: the books' collected employees'-share contribution for
+ * a fund and wage month, joined to the operator's challan. `dueDate` is the
+ * strict 15th (C1 — a Sunday is an advisory, the date is never moved); C4 puts
+ * the March wage month (next-FY due date) in this FY.
+ */
+export interface Clause20bRow {
+  fund: FundKey;
+  wageMonth: string;
+  amountCollected: number;
+  dueDate: string;
+  amountPaid: number | null;
+  paidOn: string | null;
+  delayDays: number | null;
+  disallowed: boolean;
+}
+
+/**
+ * Clause 20(b) join: books-side collected amounts vs the operator's challans,
+ * one row per fund per wage month (C5). A deposit after the strict due date is
+ * a permanent disallowance under s.36(1)(va). An orphan challan — one whose
+ * wage month the books never collected for — is reported but never invents a
+ * row (Review Focus #3, both directions). Details quote a ledger's whole name
+ * only, with `money()` figures and `displayDate()` dates.
+ */
+export function clause20b(
+  events: FundEvent[],
+  operator: OperatorPfEsi,
+): { rows: Clause20bRow[]; findings: Finding[] } {
+  const byFundMonth = new Map<string, FundEvent[]>();
+  for (const ev of events) {
+    const key = `${ev.fund}|${ev.wageMonth}`;
+    const bucket = byFundMonth.get(key);
+    if (bucket) bucket.push(ev);
+    else byFundMonth.set(key, [ev]);
+  }
+
+  const findings: Finding[] = [];
+  const counters: Record<string, number> = {};
+  const ordinal = (check: CheckId): number => (counters[check] = (counters[check] ?? 0) + 1);
+  const rows: Clause20bRow[] = [];
+
+  const keys = [...byFundMonth.keys()].sort();
+  const usedChallans = new Set<OperatorChallan>();
+
+  for (const key of keys) {
+    const [fund, wageMonth] = key.split("|") as [FundKey, string];
+    const bucket = byFundMonth.get(key) ?? [];
+    const amountCollected = bucket.reduce((s, e) => s + e.amount, 0);
+    const due = dueDate(wageMonth);
+    const ledger = bucket[0]?.ledger ?? lawFor(fund).label;
+
+    const challan =
+      operator.challans.find((c) => c.fund === fund && c.wageMonth === wageMonth) ?? null;
+    if (challan) usedChallans.add(challan);
+
+    const paidOn = challan?.paidOn ?? null;
+    const amountPaid = challan?.amountPaid ?? null;
+    const late = paidOn !== null && paidOn > due;
+    const delayDays = paidOn !== null ? Math.max(0, dayDiff(paidOn, due)) : null;
+
+    rows.push({ fund, wageMonth, amountCollected, dueDate: due, amountPaid, paidOn, delayDays, disallowed: late });
+
+    if (late) {
+      findings.push({
+        id: findingId("pf_esi_late_deposit", ordinal("pf_esi_late_deposit")),
+        check: "pf_esi_late_deposit",
+        severity: "critical",
+        ledger,
+        group: "",
+        amount: amountCollected,
+        side: null,
+        expected: null,
+        detail: `${ledger}: the employees' contribution of ${money(amountCollected)} for the ${fund} wage month ${wageMonth} was due on ${displayDate(due)} but paid on ${displayDate(paidOn)} — a delay of ${delayDays} day(s). Disallowed under s.36(1)(va) (Checkmate Services P. Ltd. v. CIT-1, 2022 INSC 1069).`,
+      });
+    }
+    if (!challan) {
+      findings.push({
+        id: findingId("pf_esi_challan_missing", ordinal("pf_esi_challan_missing")),
+        check: "pf_esi_challan_missing",
+        severity: "warning",
+        ledger,
+        group: "",
+        amount: amountCollected,
+        side: null,
+        expected: null,
+        detail: `${ledger}: the books show ${money(amountCollected)} collected for ${fund}, wage month ${wageMonth}, due ${displayDate(due)}, but the operator workpaper has no challan for that month — the matching challan is missing.`,
+      });
+    } else if (Math.abs(challan.amountPaid - amountCollected) > 0.009) {
+      findings.push({
+        id: findingId("pf_esi_amount_mismatch", ordinal("pf_esi_amount_mismatch")),
+        check: "pf_esi_amount_mismatch",
+        severity: "warning",
+        ledger,
+        group: "",
+        amount: amountCollected,
+        side: null,
+        expected: null,
+        detail: `${ledger}: for ${fund}, wage month ${wageMonth}, the books show ${money(amountCollected)} collected while the challan (sheet "${challan.sheet}", row ${challan.row}) shows ${money(challan.amountPaid)} paid — the two do not agree.`,
+      });
+    }
+
+    if (dueDateIsSunday(due)) {
+      findings.push({
+        id: findingId("pf_esi_due_date_not_working_day", ordinal("pf_esi_due_date_not_working_day")),
+        check: "pf_esi_due_date_not_working_day",
+        severity: "review",
+        ledger,
+        group: "",
+        amount: amountCollected,
+        side: null,
+        expected: null,
+        detail: `${ledger}: the ${fund} due date ${displayDate(due)} (wage month ${wageMonth}) falls on a Sunday. Advisory only (C1): the statutory due date is never moved.`,
+      });
+    }
+  }
+
+  for (const c of operator.challans) {
+    if (usedChallans.has(c)) continue;
+    findings.push({
+      id: findingId("pf_esi_challan_unmatched", ordinal("pf_esi_challan_unmatched")),
+      check: "pf_esi_challan_unmatched",
+      severity: "warning",
+      ledger: lawFor(c.fund).label,
+      group: "",
+      amount: c.amountPaid,
+      side: null,
+      expected: null,
+      detail: `${lawFor(c.fund).label}: the operator workpaper has a challan (sheet "${c.sheet}", row ${c.row}) of ${money(c.amountPaid)} paid on ${displayDate(c.paidOn)} for wage month ${c.wageMonth}, but the books show no employees' contribution collected for that fund and month. No clause 20(b) row was invented for it.`,
+    });
+  }
+
+  return { rows, findings };
+}
+
+/** Calendar-day difference paidOn − dueDateYmd (both YYYYMMDD), clamped at 0. */
+function dayDiff(paidOn: string, dueDateYmd: string): number {
+  const d = (ymd: string) => Date.UTC(Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1, Number(ymd.slice(6, 8)));
+  return Math.round((d(paidOn) - d(dueDateYmd)) / 86_400_000);
 }

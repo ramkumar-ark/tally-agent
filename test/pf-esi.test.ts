@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findFundLedgers, employeeEvents } from "../src/pf-esi.js";
+import { findFundLedgers, employeeEvents, clause20b } from "../src/pf-esi.js";
 
 // Synthetic ledgers and amounts only: the real operator's fund ledgers, party
 // names and figures never appear in the repo (captain ruling 2026-09-23).
@@ -90,5 +90,100 @@ describe("employee contribution extraction", () => {
     expect(events).toHaveLength(0);
     expect(findings.map((f) => f.check)).toContain("pf_esi_unclassified_contribution");
     expect(findings[0].detail).toContain("5,000.00");   // money(), never a bare 6+-digit run
+  });
+});
+
+describe("clause 20(b)", () => {
+  const ev = (fund: "PF" | "ESI", wageMonth: string, amount: number) =>
+    ({ fund, wageMonth, date: `${wageMonth.replace("-", "")}30`, voucherNumber: "1", ledger: "EPF Payable A/c", amount });
+  const ch = (fund: "PF" | "ESI", wageMonth: string, paidOn: string, amountPaid: number) =>
+    ({ fund, wageMonth, paidOn, amountPaid, sheet: "Challans", row: 2 });
+
+  it("makes one row per fund per wage month, ordered", () => {
+    const { rows } = clause20b([ev("PF", "2025-05", 28195), ev("PF", "2025-04", 30575)] as never, { challans: [] });
+    expect(rows.map((r) => r.wageMonth)).toEqual(["2025-04", "2025-05"]);
+    expect(rows[0].dueDate).toBe("20250515");
+    expect(rows[0].amountCollected).toBe(30575);
+  });
+
+  it("sums several credits in the same wage month", () => {
+    const { rows } = clause20b([ev("PF", "2025-04", 30000), ev("PF", "2025-04", 575)] as never, { challans: [] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountCollected).toBe(30575);
+  });
+
+  it("joins the operator challan and computes the delay", () => {
+    const { rows } = clause20b([ev("PF", "2025-04", 30575)] as never, { challans: [ch("PF", "2025-04", "20250514", 30575)] });
+    expect(rows[0].paidOn).toBe("20250514");
+    expect(rows[0].delayDays).toBe(0);
+    expect(rows[0].disallowed).toBe(false);
+  });
+
+  it("flags a late deposit as disallowed under s.36(1)(va)", () => {
+    const { rows, findings } = clause20b([ev("PF", "2025-04", 30575)] as never, { challans: [ch("PF", "2025-04", "20250520", 30575)] });
+    expect(rows[0].delayDays).toBe(5);
+    expect(rows[0].disallowed).toBe(true);
+    expect(findings.map((f) => f.check)).toContain("pf_esi_late_deposit");
+    expect(findings[0].detail).toContain("15-May-2025");     // displayDate, never a bare YYYYMMDD
+    expect(findings[0].detail).toContain("30,575.00");       // money, never a bare digit run
+  });
+
+  // Review Focus #3, both directions
+  it("keeps a book month with no challan and reports it", () => {
+    const { rows, findings } = clause20b([ev("PF", "2026-03", 28401)] as never, { challans: [] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].paidOn).toBeNull();
+    expect(rows[0].amountPaid).toBeNull();
+    expect(findings.map((f) => f.check)).toContain("pf_esi_challan_missing");
+  });
+
+  it("reports a challan for a month the books do not have, and does not invent a row", () => {
+    const { rows, findings } = clause20b([] as never, { challans: [ch("ESI", "2025-11", "20251215", 1000)] });
+    expect(rows).toHaveLength(0);
+    expect(findings.map((f) => f.check)).toContain("pf_esi_challan_unmatched");
+  });
+
+  it("reports a challan that does not agree with the books", () => {
+    const { findings } = clause20b([ev("PF", "2025-04", 30575)] as never, { challans: [ch("PF", "2025-04", "20250514", 25000)] });
+    expect(findings.map((f) => f.check)).toContain("pf_esi_amount_mismatch");
+  });
+
+  // Review Focus #2
+  it("returns nothing at all for a fund with no months", () => {
+    const { rows, findings } = clause20b([ev("PF", "2025-04", 1)] as never, { challans: [] });
+    expect(rows.filter((r) => r.fund === "ESI")).toHaveLength(0);
+    expect(findings.every((f) => f.ledger === "EPF Payable A/c")).toBe(true);
+  });
+
+  it("raises the C1 advisory when the due date is a Sunday", () => {
+    const { findings } = clause20b([ev("PF", "2026-02", 28537)] as never, { challans: [ch("PF", "2026-02", "20260316", 28537)] });
+    expect(findings.map((f) => f.check)).toContain("pf_esi_due_date_not_working_day");
+  });
+});
+
+describe("clause 20(b) — review focus", () => {
+  const ev = (fund: "PF" | "ESI", wageMonth: string, amount: number) =>
+    ({ fund, wageMonth, date: `${wageMonth.replace("-", "")}30`, voucherNumber: "1", ledger: "EPF Payable A/c", amount });
+  const ch = (fund: "PF" | "ESI", wageMonth: string, paidOn: string, amountPaid: number) =>
+    ({ fund, wageMonth, paidOn, amountPaid, sheet: "Challans", row: 2 });
+
+  it("a fund present with no months at all yields zero rows and zero findings", () => {
+    const { rows, findings } = clause20b([], { challans: [] });
+    expect(rows).toHaveLength(0);
+    expect(findings).toHaveLength(0);
+  });
+
+  it("single-month fund with a zero-amount month agrees with a zero challan", () => {
+    const { rows, findings } = clause20b([ev("ESI", "2025-07", 0)] as never, { challans: [ch("ESI", "2025-07", "20250814", 0)] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountCollected).toBe(0);
+    expect(rows[0].disallowed).toBe(false);
+    expect(findings).toHaveLength(0);
+  });
+
+  it("a single fund month is one row, joined once (C8: no double rows)", () => {
+    const { rows } = clause20b([ev("PF", "2025-06", 30000), ev("PF", "2025-06", 500)] as never, { challans: [ch("PF", "2025-06", "20250715", 30500)] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountCollected).toBe(30500);
   });
 });

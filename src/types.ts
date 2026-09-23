@@ -9,7 +9,12 @@ export type CheckId =
   | "ledger_under_primary_group"
   | "dormant_balance"
   | "ledger_in_wrong_group"
-  | "pf_esi_unclassified_contribution";
+  | "pf_esi_unclassified_contribution"
+  | "pf_esi_late_deposit"
+  | "pf_esi_challan_missing"
+  | "pf_esi_challan_unmatched"
+  | "pf_esi_amount_mismatch"
+  | "pf_esi_due_date_not_working_day";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const CHECK_ORDINAL: Record<CheckId, number> = {
@@ -22,6 +27,11 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   dormant_balance: 7,
   ledger_in_wrong_group: 8,
   pf_esi_unclassified_contribution: 9,
+  pf_esi_late_deposit: 10,
+  pf_esi_challan_missing: 11,
+  pf_esi_challan_unmatched: 12,
+  pf_esi_amount_mismatch: 13,
+  pf_esi_due_date_not_working_day: 14,
 };
 
 export type GstCheckId =
