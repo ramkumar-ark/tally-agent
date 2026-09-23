@@ -347,3 +347,211 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     unmatchedBooks, unmatchedAs26, combinationSearchSkipped: searchSkipped, lateBookedTax,
   };
 }
+
+// --- Task 8: stage-3 findings ---
+
+import type { As26SummaryRow, As26Transaction } from "./as26-file.js";
+
+export interface As26Result {
+  findings: As26Finding[];
+  recon: PartyRecon[];
+  gaps: As26Gap[];
+  totals: { booksTax: number; as26Tax: number; partiesMatched: number; combinationExplained: number; ambiguous: number };
+  skipped: As26File["skipped"];
+}
+
+import { as26FindingId, type As26CheckId, type As26Finding, type As26ScheduleRow } from "./types.js";
+import { money, displayDate, count } from "./format.js";
+
+const as26KeyOf = (t: { kind: As26Kind; nameKey: string; section: string } | As26SummaryRow | As26Transaction): string =>
+  `${t.kind}|${t.nameKey}|${t.section}`;
+
+export function analyzeAs26(
+  file: As26File, facts: BooksFacts, map: As26Map, ledgerNames: string[],
+  opts: { fromDate: string; toDate: string },
+): As26Result {
+  const { matches, gaps } = matchParties(file, facts, map, ledgerNames);
+  const findings: As26Finding[] = [];
+  const ordinals = new Map<As26CheckId, number>();
+  const nextOrd = (check: As26CheckId): number => {
+    const n = (ordinals.get(check) ?? 0) + 1;
+    ordinals.set(check, n);
+    return n;
+  };
+  const push = (
+    check: As26CheckId, severity: As26Finding["severity"], party: string, kind: As26Kind,
+    section: string | null, amount: number, detail: string, schedule?: As26ScheduleRow[],
+  ): void => {
+    const f: As26Finding = { id: as26FindingId(check, nextOrd(check)), check, severity, party, kind, section, amount: round2(amount), detail };
+    if (schedule && schedule.length > 0) f.schedule = schedule;
+    findings.push(f);
+  };
+  const capSchedule = (rows: As26ScheduleRow[]): As26ScheduleRow[] => rows.slice(0, 20);
+
+  const salesByKey = new Map<string, BooksSale[]>();
+  for (const s of facts.sales) {
+    if (s.gross === 0 && s.taxable === 0) continue;
+    const arr = salesByKey.get(s.ledgerKey);
+    if (arr) arr.push(s);
+    else salesByKey.set(s.ledgerKey, [s]);
+  }
+  const sumSales = (rows: BooksSale[], pick: (s: BooksSale) => number): number => round2(rows.reduce((s, x) => s + pick(x), 0));
+
+  const recons: PartyRecon[] = [];
+  for (const match of matches) {
+    const r = reconcileParty(file, facts, match, opts.toDate);
+    recons.push(r);
+    const partySales = salesByKey.get(match.ledgerKey) ?? [];
+    const booksTaxable = sumSales(partySales, (s) => s.taxable);
+    const booksGross = sumSales(partySales, (s) => s.gross);
+    const summary = file.summaries.find((s) => s.kind === match.kind && s.nameKey === match.as26NameKey);
+    const as26Gross = summary?.gross ?? 0;
+
+    // 001 — books tax beyond what 26AS declares
+    const excessBooks = round2(r.booksTax - r.as26Tax);
+    if (excessBooks > AS26_TAX_TOLERANCE) {
+      const lateNote = r.lateBookedTax > 0
+        ? `; part of this deductor's credit was booked after ${displayDate(opts.toDate)} (timing possible)`
+        : "";
+      const detail =
+        `Books ${match.kind.toUpperCase()} tax of ${money(r.booksTax)} against 26AS tax of ${money(r.as26Tax)}` +
+        (partySales.length > 0 ? `; sale invoices for the period total ${money(booksGross)}` : "") +
+        lateNote;
+      const schedule = capSchedule(partySales.map((s) => ({
+        label: s.ref ?? displayDate(s.date), amount: s.gross, date: s.date,
+      })));
+      push("books_tax_not_in_26as", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
+    }
+
+    // 002 — 26AS tax with no books counterpart
+    const excessAs26 = round2(r.as26Tax - r.booksTax);
+    if (excessAs26 > AS26_TAX_TOLERANCE) {
+      const rows = file.transactions.filter((t) => t.kind === match.kind && t.nameKey === match.as26NameKey);
+      const latest = rows.reduce((m, t) => (t.bookingDate && t.bookingDate > m ? t.bookingDate : m), "00000000");
+      const statuses = [...new Set(rows.map((t) => t.status))].filter(Boolean).join(", ");
+      const detail =
+        `26AS ${match.kind.toUpperCase()} tax of ${money(r.as26Tax)} against books tax of ${money(r.booksTax)}` +
+        (latest !== "00000000" ? `; latest booking date ${displayDate(latest)}` : "") +
+        (statuses ? `; booking statuses seen: ${statuses}` : "");
+      push("as26_tax_not_in_books", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessAs26, detail);
+    }
+
+    // 003 — 26AS gross vs books value: GST-exclusive (taxable) and GST-inclusive both tried
+    if (as26Gross > 0 && partySales.length > 0) {
+      const dTok = Math.abs(round2(as26Gross - booksTaxable));
+      const dGross = Math.abs(round2(as26Gross - booksGross));
+      if (dTok > AS26_VALUE_TOLERANCE || dGross > AS26_VALUE_TOLERANCE) {
+        let basis: string;
+        if (dTok <= AS26_VALUE_TOLERANCE) {
+          basis = `the GST-exclusive (taxable) valuation matched; the GST-inclusive books gross is out by ${money(dGross)}`;
+        } else if (dGross <= AS26_VALUE_TOLERANCE) {
+          basis = `matched on the GST-inclusive value; the GST-exclusive books taxable is out by ${money(dTok)}`;
+        } else {
+          basis = dTok <= dGross
+            ? `the GST-exclusive (taxable) valuation comes closer; the GST-inclusive books gross is out by ${money(dGross)}`
+            : `the GST-inclusive valuation comes closer; the GST-exclusive books taxable is out by ${money(dTok)}`;
+        }
+        push(
+          "assessable_value_mismatch", "warning", match.ledgerName, match.kind, summary?.section ?? null,
+          round2(Math.min(...[dTok, dGross].filter((d) => d > AS26_VALUE_TOLERANCE))),
+          `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)} and books GST-inclusive gross of ${money(booksGross)}: ${basis}.`,
+        );
+      }
+    }
+
+    // 007 — totals reconcile but the item-level picture is left over
+    const deltaTotals = Math.abs(round2(r.booksTax - r.as26Tax));
+    if (deltaTotals <= AS26_TAX_TOLERANCE &&
+        (r.unmatchedBooks.length > 0 || r.unmatchedAs26.length > 0 || r.ambiguous > 0)) {
+      const sumB = sumTax(r.unmatchedBooks);
+      const sumA = sumTax(r.unmatchedAs26);
+      const leftovers: As26ScheduleRow[] = capSchedule([
+        ...r.unmatchedBooks.map((i) => ({ label: displayDate(i.date), amount: i.tax, date: i.date })),
+        ...r.unmatchedAs26.map((i) => ({ label: displayDate(i.date), amount: i.tax, date: i.date })),
+      ]);
+      push(
+        "unresolved_combination", "review", match.ledgerName, match.kind, summary?.section ?? null,
+        Math.max(sumB, sumA),
+        `Totals reconcile within tolerance (${money(r.booksTax)} books against ${money(r.as26Tax)} 26AS) but ` +
+        `${r.unmatchedBooks.length} books item(s) and ${r.unmatchedAs26.length} 26AS item(s) stay unexplained` +
+        (r.ambiguous > 0 ? ` with ${count(r.ambiguous)} ambiguous combination(s)` : "") +
+        "; likely offsetting entries.",
+        leftovers,
+      );
+    }
+
+    // 005 — 26AS credits landed outside the reviewed window
+    if (r.lateBookedTax > 0) {
+      push(
+        "late_booking", "review", match.ledgerName, match.kind, summary?.section ?? null, r.lateBookedTax,
+        `${money(r.lateBookedTax)} of 26AS tax was booked after ${displayDate(opts.toDate)} — outside the reviewed window, so books and export totals may reconcile once the window is extended (timing possible).`,
+      );
+    }
+
+    // 008 — deductions without any sale entry for the customer
+    if (r.booksTax > 0 && partySales.length === 0) {
+      push(
+        "deduction_without_sale", "review", match.ledgerName, match.kind, summary?.section ?? null, r.booksTax,
+        "Books carry the deduction but no sale entry exists for this customer in the period — the deduction may sit against a prior-period sale or a receipt (not asserted).",
+      );
+    }
+  }
+
+  // 004 — mapping gaps: no money checks ran for these parties
+  for (const g of gaps) {
+    const where = g.reason === "ledger-absent"
+      ? `the mapped ledger does not exist in Tally`
+      : g.reason === "name-absent"
+        ? `the mapped deductor does not appear in 26AS for the period`
+        : g.reason === "ambiguous"
+          ? `the name matches several ledgers and was left unresolved`
+          : g.ledger
+            ? `bookside ${g.kind.toUpperCase()} deductions sit on a ledger the persistent party map does not cover`
+            : `the 26AS deductor is not mapped to a Tally ledger in the persistent party map`;
+    push("mapping_gap", "review", g.ledger ?? g.name, g.kind, null, g.tax,
+      `${where} — tax at stake ${money(g.tax)}; no tax reconciliation ran for this party.`);
+  }
+
+  // 006 — export-internal consistency per summary row (kind, name, section)
+  const sumByKey = new Map<string, As26SummaryRow>();
+  for (const s of file.summaries) sumByKey.set(as26KeyOf(s), s);
+  const txByKey = new Map<string, { tax: number; gross: number }>();
+  for (const t of file.transactions) {
+    const k = as26KeyOf(t);
+    const acc = txByKey.get(k);
+    if (acc) { acc.tax = round2(acc.tax + t.tax); acc.gross = round2(acc.gross + t.amount); }
+    else txByKey.set(k, { tax: t.tax, gross: t.amount });
+  }
+  for (const [k, s] of sumByKey) {
+    const t = txByKey.get(k);
+    if (!t) {
+      push("export_inconsistent", "review", s.name, s.kind, s.section, s.taxTotal,
+        `Summary row reports ${money(s.taxTotal)} tax with no transactions in the detailed sheet for this section.`);
+      continue;
+    }
+    const dTax = Math.abs(round2(s.taxTotal - t.tax));
+    const dGross = Math.abs(round2(s.gross - t.gross));
+    if (dTax > 0.005 || dGross > 0.005) {
+      push("export_inconsistent", "review", s.name, s.kind, s.section, dTax,
+        `Summary reports ${money(s.taxTotal)} tax against ${money(t.tax)} from the detailed sheet` +
+        `, gross ${money(s.gross)} against ${money(t.gross)} — the export disagrees with itself.`);
+    }
+  }
+  for (const [k, t] of txByKey) {
+    if (sumByKey.has(k)) continue;
+    const first = file.transactions.find((x) => as26KeyOf(x) === k);
+    const name = file.summaries.find((x) => `${x.kind}|${x.nameKey}` === k.split("|").slice(0, 2).join("|"))?.name
+      ?? first?.nameKey ?? k;
+    push("export_inconsistent", "review", name, k.split("|")[0] as As26Kind, k.split("|")[2] || null, t.tax,
+      `Detailed-sheet transactions totalling ${money(t.tax)} tax (${money(t.gross)} gross) have no matching summary row.`);
+  }
+
+  const totals = {
+    booksTax: round2(recons.reduce((s, r) => s + r.booksTax, 0)),
+    as26Tax: round2(recons.reduce((s, r) => s + r.as26Tax, 0)),
+    partiesMatched: matches.length,
+    combinationExplained: recons.reduce((s, r) => s + r.combinations.length, 0),
+    ambiguous: recons.reduce((s, r) => s + r.ambiguous, 0),
+  };
+  return { findings, recon: recons, gaps, totals, skipped: file.skipped };
+}

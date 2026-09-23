@@ -305,3 +305,46 @@ export interface DepFinding {
 
 /** Act-vs-books differences below this are rounding, not findings. */
 export const DEP_TOLERANCE = 1.0;
+
+import type { As26Kind } from "./as26-file.js";
+
+export type As26CheckId =
+  | "books_tax_not_in_26as" | "as26_tax_not_in_books" | "assessable_value_mismatch"
+  | "mapping_gap" | "late_booking" | "export_inconsistent"
+  | "unresolved_combination" | "deduction_without_sale";
+
+/** AS26 ids live in their own ordinal space (AS26-<ordinal>-<n>); the TDS, deposit and ledger tables are never renumbered. */
+export const AS26_CHECK_ORDINAL: Record<As26CheckId, number> = {
+  books_tax_not_in_26as: 1,
+  as26_tax_not_in_books: 2,
+  assessable_value_mismatch: 3,
+  mapping_gap: 4,
+  late_booking: 5,
+  export_inconsistent: 6,
+  unresolved_combination: 7,
+  deduction_without_sale: 8,
+};
+
+export function as26FindingId(check: As26CheckId, ordinal: number): string {
+  return `AS26-${String(AS26_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+export interface As26ScheduleRow {
+  label: string; // masked invoice ref or voucher-type + date
+  amount: number;
+  date: string;  // YYYYMMDD
+}
+
+export interface As26Finding {
+  id: string;
+  check: As26CheckId;
+  severity: Severity;
+  /** Real party name pre-mask: a Tally ledger or an unmapped 26AS deductor. */
+  party: string;
+  kind: As26Kind;
+  section: string | null;
+  amount: number;    // tax or value at stake, positive
+  /** money()/displayDate() only — never toFixed(2), never a raw YYYYMMDD. */
+  detail: string;
+  schedule?: As26ScheduleRow[];
+}

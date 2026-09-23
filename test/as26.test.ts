@@ -262,3 +262,129 @@ describe("reconcileParty", () => {
     expect(r.booksTax).toBe(7000);
   });
 });
+
+// --- Task 8: stage-3 findings ---
+
+import { analyzeAs26 } from "../src/as26.js";
+import type { As26Finding } from "../src/types.js";
+
+const result = (
+  ded: Array<[string, number]>,
+  tx: As26Transaction[],
+  total: number,
+  opts: { sales?: BooksFacts["sales"]; gross?: number; toDate?: string; led?: string[] } = {},
+) => {
+  const file = txFile(tx, total);
+  const s = file.summaries[0];
+  if (opts.gross !== undefined) s.gross = opts.gross;
+  const f: BooksFacts = { deductions: bookFacts(ded).deductions, sales: opts.sales ?? [] };
+  return analyzeAs26(
+    file, f, mapper, opts.led ?? ledgers,
+    { fromDate: "20250401", toDate: opts.toDate ?? "20251231" },
+  );
+};
+
+describe("analyzeAs26 — findings 001–008", () => {
+  it("001 fires with the invoice schedule, money detail and the late-booking annotation", () => {
+    const sales = [{ ledgerKey: NK, date: "20250612", ref: "CS/9", taxable: 160000, gross: 190000 }];
+    const r = result(
+      [["20250612", 190000]],
+      [txn(180000), txn(7000, "20260115", "20250620")],
+      187000,
+      { sales, toDate: "20251231", gross: 187000 },
+    );
+    const f = r.findings.find((x) => x.check === "books_tax_not_in_26as")!;
+    expect(f).toBeTruthy();
+    expect(f.severity).toBe("critical");
+    expect(f.id).toBe("AS26-001-1");
+    expect(f.amount).toBe(3000);
+    expect(f.detail).toMatch(/1,90,000\.00/);
+    expect(f.detail).toMatch(/1,87,000\.00/);
+    expect(f.detail).toMatch(/31-Dec-2025/); // date never bare
+    expect(f.detail).toMatch(/booked after/);
+    expect(f.schedule).toHaveLength(1);
+    expect(f.schedule![0]).toMatchObject({ label: "CS/9", amount: 190000, date: "20250612" });
+    for (const x of r.findings) expect(x.detail).not.toMatch(/\d{6,}/);
+  });
+  it("002 fires on 26AS excess with the latest booking date and statuses seen", () => {
+    const r = result([["20250612", 100000]], [txn(104000), txn(3000, "20260210", "20250801")], 107000);
+    const f = r.findings.find((x) => x.check === "as26_tax_not_in_books")!;
+    expect(f.severity).toBe("critical");
+    expect(f.detail).toMatch(/10-Feb-2026/);
+    expect(f.detail).toMatch(/F, O/);
+    expect(f.amount).toBe(7000);
+  });
+  it("003 says explicitly when the GST-inclusive interpretation matched", () => {
+    const sales = [{ ledgerKey: NK, date: "20250612", ref: null, taxable: 40000, gross: 47200 }];
+    const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 47200 });
+    const f = r.findings.find((x) => x.check === "assessable_value_mismatch")!;
+    expect(f.severity).toBe("warning");
+    expect(f.amount).toBe(7200);
+    expect(f.detail).toMatch(/GST-inclusive/);
+  });
+  it("003 with neither interpretation matching names the closer one", () => {
+    const sales = [{ ledgerKey: NK, date: "20250612", ref: null, taxable: 40000, gross: 50000 }];
+    const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 47200 });
+    const f = r.findings.find((x) => x.check === "assessable_value_mismatch")!;
+    expect(f.amount).toBe(2800); // the smaller delta
+    expect(f.detail).toMatch(/closer/);
+  });
+  it("004 fires per mapping gap with the tax at stake", () => {
+    const EMPTY = analyzeAs26(txFile([txn(18000)], 18000), facts(ledgers), { mappings: [] }, ledgers, {
+      fromDate: "20250401", toDate: "20251231",
+    });
+    const f = EMPTY.findings.find((x) => x.check === "mapping_gap")!;
+    expect(f.id).toBe("AS26-004-1");
+    expect(f.severity).toBe("review");
+    expect(f.amount).toBe(18000);
+    expect(EMPTY.findings.filter((x) => x.check === "mapping_gap").length).toBeGreaterThanOrEqual(4);
+  });
+  it("005 fires per party with late-booked tax", () => {
+    const r = result([["20250612", 7000]], [txn(7000), txn(3000, "20260115", "20250620")], 10000);
+    const f = r.findings.find((x) => x.check === "late_booking")!;
+    expect(f.severity).toBe("review");
+    expect(f.amount).toBe(3000);
+    expect(f.detail).toMatch(/31-Dec-2025/);
+  });
+  it("006 fires when the summary and detailed sheets disagree", () => {
+    // total 19000 declared, transactions carry 18000
+    const r = result([["20250612", 18000]], [txn(18000)], 19000);
+    const f = r.findings.find((x) => x.check === "export_inconsistent")!;
+    expect(f.severity).toBe("review");
+    expect(f.detail).toMatch(/19,000\.00/);
+    expect(f.detail).toMatch(/18,000\.00/);
+  });
+  it("006 fires on a summary row with zero transactions", () => {
+    const r = result([], [], 18000);
+    expect(r.findings.some((x) => x.check === "export_inconsistent" && /no transactions/.test(x.detail))).toBe(true);
+  });
+  it("007 fires when totals reconcile but residuals remain", () => {
+    const r = result(
+      [["20250612", 3000], ["20250613", 3000]],
+      [txn(3000), txn(3000, null, "20250620")],
+      6000,
+    );
+    const f = r.findings.find((x) => x.check === "unresolved_combination")!;
+    expect(f.severity).toBe("review");
+    expect(f.amount).toBe(6000);
+    expect(f.schedule!.length).toBeGreaterThanOrEqual(2);
+  });
+  it("008 fires when a party has deductions but no sale entry in the period", () => {
+    const r = result([["20250612", 18000]], [txn(18000)], 18000);
+    const f = r.findings.find((x) => x.check === "deduction_without_sale")!;
+    expect(f.severity).toBe("review");
+    expect(f.amount).toBe(18000);
+    expect(f.detail).toMatch(/no sale entry/);
+  });
+  it("every id matches the AS26 ordinal-pad shape", () => {
+    const r = result([["20250612", 18000]], [txn(18000)], 18000);
+    for (const f of r.findings) expect(f.id).toMatch(/^AS26-\d{3}-\d+$/);
+  });
+  it("totals aggregate the matched parties", () => {
+    const sales = [{ ledgerKey: NK, date: "20250612", ref: null, taxable: 18000, gross: 18000 }];
+    const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 18000 });
+    expect(r.totals).toMatchObject({ booksTax: 18000, as26Tax: 18000, partiesMatched: 1, ambiguous: 0 });
+    expect(r.skipped).toEqual({ noDate: 0, blankTax: 0, form16BCDE: 0 });
+    expect(r.recon).toHaveLength(r.totals.partiesMatched);
+  });
+});
