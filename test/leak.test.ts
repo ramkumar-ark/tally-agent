@@ -1,4 +1,5 @@
 import { readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,10 +9,13 @@ import { registerTools, type ToolRegistrar } from "../src/index.js";
 import { createSession } from "../src/review.js";
 import { writeDepreciationReport, writeFaRegisterReport } from "../src/report.js";
 import { parseDepOperatorFile } from "../src/depreciation-file.js";
+import { parsePfEsiTemplate } from "../src/pf-esi-file.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { buildWorkbook } from "../src/xlsx.js";
 import { buildTemplateWorkbook } from "../src/tds-template.js";
 import { buildWinmanFixture } from "./fixtures/winman-test-fixture.js";
+import { makeWinmanFixture } from "./fixtures/winman-fixture.js";
+import { readXlsm, partText } from "../src/xlsm.js";
 import { readWorkbook } from "../src/xlsx-read.js";
 import { entry } from "./xlsx.test.js";
 
@@ -278,14 +282,17 @@ describe("no secret leaves the gateway", () => {
       "tb_ledger_activity",
       "tb_ledger_scrutiny",
       "tb_list_companies",
+      "tb_pf_esi_review",
       "tb_review",
       "tb_tds_review",
       "tb_write_26as_report",
       "tb_write_26as_template",
+      "tb_write_3cd_pf_esi",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
       "tb_write_gst_report",
       "tb_write_ledger_report",
+      "tb_write_pf_esi_template",
       "tb_write_report",
       "tb_write_tds_report",
       "tb_write_tds_template",
@@ -340,6 +347,111 @@ describe("no secret leaves the gateway", () => {
     for (const secret of planted) {
       expect(out, `secret "${secret}" leaked via the template/Winman channel`).not.toContain(secret);
     }
+  });
+});
+
+/**
+ * PF/ESI clause-20(b) leak surfaces (plan Task 9). The fund payable ledgers,
+ * an operator challan template and a Winman 3CD workbook are three new ways a
+ * real ledger name can reach the model or a written artifact. Same additive
+ * stub pattern as the depreciation and FA blocks above: the review is fed its
+ * own small group tree, fund ledgers and salary journals so the planted
+ * secrets really enter the run.
+ */
+function pfSecretDownstream() {
+  const pfLedger = "Orchid Medical EPF Payable";
+  const esiLedger = "VMR Medical ESI Payable";
+  const salaryLedger = "Staff Wages";
+  const groups = [
+    { name: "Current Liabilities", parent: "\u0004 Primary" },
+    { name: "Indirect Expenses", parent: "\u0004 Primary" },
+  ];
+  const masters = [
+    { name: pfLedger, parent: "Current Liabilities", openingBalance: 0, closingBalance: -61150 },
+    { name: esiLedger, parent: "Current Liabilities", openingBalance: 0, closingBalance: -2642 },
+    { name: salaryLedger, parent: "Indirect Expenses", openingBalance: 0, closingBalance: 83792 },
+  ];
+  const voucher = (date: string, voucherNumber: string) => ({
+    date,
+    voucherType: "Jrnl",
+    voucherNumber,
+    partyLedgerName: "",
+    cancelled: false,
+    entries: [
+      { ledger: salaryLedger, amount: 40317 },
+      { ledger: pfLedger, amount: -30575 },
+      { ledger: esiLedger, amount: -1321 },
+    ],
+  });
+  return Object.assign(fakeDownstream(), {
+    groups: async () => groups,
+    ledgers: async () => masters,
+    vouchers: async () => [voucher("20250430", "J-101"), voucher("20250531", "J-102")],
+  } as never);
+}
+
+/** A filled operator challan sheet in the generator's exact column layout. */
+function filledPfEsiOperator(): Buffer {
+  return buildWorkbook([
+    {
+      name: "Challans",
+      columns: [
+        { header: "Fund" },
+        { header: "Wage Month" },
+        { header: "Paid On" },
+        { header: "Amount Paid" },
+      ],
+      rows: [
+        ["P.F.", "2025-04", "2025-05-14", 30575] as (string | number | null)[],
+        ["E.S.I.", "2025-04", "2025-05-18", 1321] as (string | number | null)[],
+      ],
+    },
+  ]);
+}
+
+describe("pf/esi leak surfaces", () => {
+  it("never leaks a fund ledger name or a challan amount identity into a masked finding", async () => {
+    const session = createSession(pfSecretDownstream(), EMPTY_OVERRIDES);
+    // A distinctive-but-invented challan figure rides the operator file; it
+    // may be reported (it is payments evidence the review is FOR) but it
+    // must never reach the model as a raw digit run.
+    const operator = parsePfEsiTemplate(filledPfEsiOperator());
+    const out = JSON.stringify(
+      await session.pfEsiReview({
+        fromDate: "20250401",
+        toDate: "20260331",
+        operator,
+      }),
+    );
+    expect(out).not.toContain("orchid");
+    expect(out).not.toContain("medical");
+    expect(out).not.toMatch(/\bVMR\b/);
+    // Non-vacuity: the stub's fund ledgers really entered the review (masked),
+    // and the vault really carries the planted secrets.
+    expect(out).toMatch(/Ledger \d+/);
+    expect(out).toContain("pf_esi_challan_missing");
+    expect(session.vault.entries().some((e) => e.real.toLowerCase().includes("orchid"))).toBe(true);
+    expect(session.vault.entries().some((e) => /\bVMR\b/.test(e.real))).toBe(true);
+  });
+
+  it("restores the real rows only on the written workbook", async () => {
+    const session = createSession(pfSecretDownstream(), EMPTY_OVERRIDES);
+    await session.pfEsiReview({
+      fromDate: "20250401",
+      toDate: "20260331",
+      operator: parsePfEsiTemplate(filledPfEsiOperator()),
+    });
+    const sourcePath = join(mkdtempSync(join(tmpdir(), "tally-agent-3cd-")), "PF ESI funds.xlsm");
+    const source = makeWinmanFixture();
+    writeFileSync(sourcePath, source);
+    const outDir = mkdtempSync(join(tmpdir(), "tally-agent-3cd-out-"));
+    const path = await session.write3cdPfEsi({ sourcePath, outPath: outDir });
+    // The written copy is beside the out path, never beside the operator
+    // source, which stays byte-identical.
+    expect(readFileSync(sourcePath).equals(source)).toBe(true);
+    expect(path.startsWith(outDir)).toBe(true);
+    // The real dues landed as Excel serials: due 2025-05-15 -> 45792.
+    expect(partText(readXlsm(await readFile(path)), "xl/worksheets/sheet1.xml")).toContain("45792");
   });
 });
 

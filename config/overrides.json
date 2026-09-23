@@ -3,6 +3,7 @@
   "forceClearLedgers": [],
   "forceMaskGroups": [],
   "forceClearGroups": [],
+  "pfEsiLedgers": {},
   "wrongGroup": {
     "ignoreLedgers": [],
     "keywords": {

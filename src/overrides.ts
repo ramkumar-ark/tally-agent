@@ -20,13 +20,61 @@ export function loadOverrides(path: string, warn?: (why: string) => void): Overr
     warn?.((e as NodeJS.ErrnoException)?.code ?? "unreadable");
     return EMPTY_OVERRIDES;
   }
-  const raw = JSON.parse(text) as Partial<Overrides>;
+  const raw = JSON.parse(text) as Partial<Overrides> & { pfEsiLedgers?: unknown };
   return {
     forceMaskLedgers: raw.forceMaskLedgers ?? [],
     forceClearLedgers: raw.forceClearLedgers ?? [],
     forceMaskGroups: raw.forceMaskGroups ?? [],
     forceClearGroups: raw.forceClearGroups ?? [],
+    ...(pfEsiLedgers(raw.pfEsiLedgers) ?? {}),
   };
+}
+
+/**
+ * The `pfEsiLedgers` key: `{ "pf": [...ledger names], "esi": [...] }`. An
+ * operator override believed in force must never be skipped quietly, so a
+ * malformed entry throws — and never echoes a ledger name, which may be
+ * company-internal. Empty lists are stripped: an empty list means "unset",
+ * not "this fund has no payable ledger" (that comes from the books side).
+ */
+function pfEsiLedgers(
+  raw: unknown,
+): { pfEsiLedgers: { pf: string[]; esi: string[] } } | null {
+  if (raw === undefined || raw === null) return null;
+  const out: { pf?: string[]; esi?: string[] } = {};
+  const bad = (list: string): Error =>
+    new Error(`overrides: pfEsiLedgers.${list} must be a list of ledger names from the company's books`);
+  if (typeof raw !== "object") throw bad("pf/esi");
+  for (const list of ["pf", "esi"] as const) {
+    const value = (raw as Record<string, unknown>)[list];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) throw bad(list);
+    const names = value.map((n) => String(n ?? "").trim()).filter((n) => n !== "");
+    if (names.length !== value.length) throw bad(list);
+    if (names.length === 0) continue;
+    out[list] = names;
+  }
+  return out.pf || out.esi ? { pfEsiLedgers: out as { pf: string[]; esi: string[] } } : null;
+}
+
+/**
+ * The same key read by path, for tb_pf_esi_review's optional per-call
+ * overrides channel: an unreadable path fades out (already warned about via
+ * `warn`), like loadOverrides; malformed JSON throws, like loadWrongGroup.
+ */
+export function loadPfEsiLedgers(
+  path: string,
+  warn?: (why: string) => void,
+): { pf: string[]; esi: string[] } | undefined {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e: unknown) {
+    warn?.((e as NodeJS.ErrnoException)?.code ?? "unreadable");
+    return undefined;
+  }
+  const raw = JSON.parse(text) as { pfEsiLedgers?: unknown };
+  return pfEsiLedgers(raw.pfEsiLedgers)?.pfEsiLedgers;
 }
 
 const KEYWORD_LISTS = ["expense", "income", "party", "bank", "capital", "loan", "neutral"] as const;

@@ -6,6 +6,12 @@ export interface Overrides {
   forceClearLedgers: string[];
   forceMaskGroups: string[];
   forceClearGroups: string[];
+  /**
+   * The `pfEsiLedgers` key (task 9): the fund payable ledger names per fund,
+   * replacing the liability-root name heuristic wholesale for the fund it
+   * names. Absent lists leave the heuristic in force.
+   */
+  pfEsiLedgers?: { pf: string[]; esi: string[] };
 }
 
 export const EMPTY_OVERRIDES: Overrides = {

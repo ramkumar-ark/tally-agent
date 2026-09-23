@@ -7,10 +7,12 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { buildTemplateWorkbook, templateFileName } from "./tds-template.js";
+import { buildPfEsiTemplate, pfEsiTemplateFileName } from "./pf-esi-template.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
+import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
-import { loadOverrides, loadWrongGroup } from "./overrides.js";
+import { loadOverrides, loadPfEsiLedgers, loadWrongGroup } from "./overrides.js";
 import { parseAs26Export } from "./as26-file.js";
 import {
   as26TemplateFileName,
@@ -632,6 +634,132 @@ export function registerTools(
         await writeVaultDump(cfg.reportDir, sessionId, session.vault);
       }
       return JSON.stringify(paths, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_pf_esi_template",
+    "Generate the fillable Excel PF/ESI operator template (pf-esi-operator-template-<company>-<date>.xlsx) " +
+      "into the report directory and return its path. Fill the Challans sheet in Excel - one row per " +
+      "challan or ECR payment - then pass its path to tb_pf_esi_review as templatePath; never paste its rows into chat.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+    },
+    async (args) => {
+      const outDir = args.outDir ?? cfg.reportDir;
+      const outPath = join(
+        outDir,
+        pfEsiTemplateFileName(
+          args.company,
+          new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+        ),
+      );
+      await writeFile(outPath, buildPfEsiTemplate(args.company));
+      await audit("tb_write_pf_esi_template", { company: args.company, outDir }, 0, 0);
+      return JSON.stringify({ templatePath: outPath }, null, 2);
+    },
+  );
+
+  register(
+    "tb_pf_esi_review",
+    "Winman Form 3CD clause 20(b) review - PF/ESI employees' contributions: extraction from the books, " +
+      "the strict 15th due date, s.36(1)(va) disallowance for late deposits, missing or amount-mismatched " +
+      "challans. Pass the PATH of the filled PF/ESI operator template from tb_write_pf_esi_template as " +
+      "templatePath and optionally the PATH of a day-book JSON export as dayBookPath - the day book is the " +
+      "primary books channel; never paste either file's rows into chat. Fund payable ledgers appear as " +
+      "pseudonyms such as 'Ledger 2'. Run tb_write_3cd_pf_esi afterwards to write the Winman sheets.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      templatePath: z.string().optional().describe("Path to the filled pf-esi-operator-template-*.xlsx; read inside the gateway"),
+      dayBookPath: z
+        .string()
+        .optional()
+        .describe(
+          "Optional PATH to an operator day-book JSON export for the whole period. When given, the books are " +
+            "read from that file instead of from Tally. Pass the path - never paste the file's rows into chat.",
+        ),
+      overridesPath: z
+        .string()
+        .optional()
+        .describe(
+          "Optional PATH to an overrides JSON carrying pfEsiLedgers ({ pf: [...], esi: [...] }); defaults to the gateway's config/overrides.json",
+        ),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      // Path-only channels: the file contents are parsed here, inside the
+      // gateway; what crosses back is the review result with names masked.
+      const operator = args.templatePath
+        ? parsePfEsiTemplate(await readFile(args.templatePath))
+        : EMPTY_PF_ESI;
+      const pfOverrides = args.overridesPath
+        ? loadPfEsiLedgers(args.overridesPath, (why) =>
+            console.error(`tally-agent: no per-call PF/ESI ledger overrides loaded (${why}): ${args.overridesPath}`),
+          )
+        : undefined;
+      let dayBook: DayBookInput | undefined;
+      let digest: string | undefined;
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        dayBook = readDayBook(text, {
+          company: args.company ?? cfg.defaultCompany,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        });
+        digest = createHash("sha256").update(text).digest("hex");
+      }
+      const result = await session.pfEsiReview({
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        operator,
+        dayBook,
+        pfOverrides,
+      });
+      // The files' PATHS are audited, never their contents (the M2 contract;
+      // the digest records which day book the run consumed, never its rows).
+      await audit(
+        "tb_pf_esi_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          ...(args.templatePath ? { templatePath: args.templatePath } : {}),
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+          ...(args.overridesPath ? { overridesPath: args.overridesPath } : {}),
+          ...(digest ? { dayBookDigest: digest } : {}),
+        },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_3cd_pf_esi",
+    "Write the clause 20(b) rows of the last tb_pf_esi_review into the P.F. and E.S.I. sheets of a COPY of " +
+      "the operator's Winman 3CD workbook and return the copy's path. The copy is written to the report " +
+      "directory (or outPath) as '<source stem> - filled - <date>.xlsm'; the source workbook is never modified. " +
+      "Compose nothing by hand: the sheets carry the due dates, deposit dates and amounts from the review.",
+    {
+      sourcePath: z.string().describe("Path to the operator's Winman `PF ESI funds.xlsm`; read only, never written"),
+      outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+    },
+    async (args) => {
+      const outPath = await session.write3cdPfEsi({
+        sourcePath: args.sourcePath,
+        outPath: args.outPath ?? cfg.reportDir,
+      });
+      await audit(
+        "tb_write_3cd_pf_esi",
+        { sourcePath: args.sourcePath, outPath: args.outPath ?? null },
+        0,
+        0,
+      );
+      return JSON.stringify({ outPath }, null, 2);
     },
   );
 

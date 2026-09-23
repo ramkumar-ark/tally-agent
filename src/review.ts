@@ -30,6 +30,13 @@ import { loadAs26MapFile } from "./as26-template.js";
 import type { LedgerTaxInfo } from "./downstream.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
+import { clause20b, employeeEvents, findFundLedgers, type BooksContext, type Clause20bRow, type FundLedgers } from "./pf-esi.js";
+import type { OperatorPfEsi } from "./pf-esi-file.js";
+import { lawFor, type FundKey } from "./pf-esi-law.js";
+import { basename, dirname, extname, join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readXlsm, writeXlsm } from "./xlsm.js";
+import { readSchema, readHandshake, writeSheetRows, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
 import { projectLedgerRows, type DayBookInput } from "./tds-daybook.js";
 
@@ -202,6 +209,36 @@ export interface TdsReviewResult {
     ledgersProjected: number;
     fromObserved: string;
     toObserved: string;
+    rejected: number;
+    mastersSource: "live" | "bundle" | "absent";
+  };
+}
+
+/** One masked PF/ESI finding: the engine Finding shape, ledger pseudonymed. */
+export type PfEsiMaskedFinding = Finding;
+
+/**
+ * tb_pf_esi_review's result: masked findings, the joined clause 20(b) rows as
+ * the model may see them (dates display-formatted, no names), and the fund
+ * payable ledgers as pseudonyms. The unmasked rows never leave this module —
+ * the Winman writer takes them from the cache.
+ */
+export interface PfEsiReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  counts: Record<Severity, number>;
+  findings: PfEsiMaskedFinding[];
+  rows: Array<Omit<Clause20bRow, "dueDate" | "paidOn"> & {
+    dueDate: string;
+    paidOn: string | null;
+  }>;
+  /** The fund payable ledgers found for the run, pseudonymed. */
+  funds: { pf: string[]; esi: string[] };
+  /** Which channel supplied the books (Q3: the day book is primary). */
+  booksSource: "live" | "daybook-file";
+  books?: {
+    vouchers: number;
     rejected: number;
     mastersSource: "live" | "bundle" | "absent";
   };
@@ -423,12 +460,35 @@ export interface Session {
     as26MapPath: string,
     dayBook?: DayBookInput,
   ): Promise<As26ReviewResult>;
-  /**
+     /**
    * The company's ledger master names, for the 26AS mapping template's
    * dropdown/reference list. Degrades to [] (with a warning) when masters are
    * unavailable — the template is still useful without a list.
    */
   ledgerNames(company: string | undefined): Promise<string[]>;
+  /**
+   * Winman Form 3CD clause 20(b) (design of record: docs/design/2026-09-23-
+   * winman-3cd-pf-esi-design.md). The operator challan template arrives
+   * already parsed (path-only channel at the tool layer); the books come
+   * from the operator day book when given (Q3: the primary source) or live
+   * Tally, never both — the day-book path makes no downstream call. The
+   * Winman writer takes its rows from the cached review.
+   */
+  pfEsiReview(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    operator: OperatorPfEsi;
+    dayBook?: DayBookInput;
+    /** Fund payable ledger names per fund; replaces the heuristic for that fund (Q4). */
+    pfOverrides?: Partial<FundLedgers>;
+  }): Promise<PfEsiReviewResult>;
+  /**
+   * Rewrite the `P.F.` and `E.S.I.` sheets of a Winman 3CD workbook COPY from
+   * the cached review's rows and return the written path. The source is
+   * never written to.
+   */
+  write3cdPfEsi(opts: { sourcePath: string; outPath?: string }): Promise<string>;
   vault: Vault;
 }
 
@@ -448,6 +508,8 @@ export function createSession(
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
   let lastAs26: As26ReviewResult | undefined;
+  /** Paperback of the review: unmasked clause 20(b) rows for the Winman writer. */
+  let lastPfEsi: Clause20bRow[] | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -1709,6 +1771,182 @@ export function createSession(
     };
   }
 
+  /**
+   * Clause 20(b) run (design §3, Q3): the operator day book is the primary
+   * books channel — it carries every voucher's complete entries, which the
+   * live Ledger-Vouchers report cannot, and it costs one file read instead
+   * of ~14 sequential Ledger-Vouchers calls. Live Tally is the fallback with
+   * no file in hand; it is never called alongside a day book.
+   */
+  async function pfEsiReview(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    operator: OperatorPfEsi;
+    dayBook?: DayBookInput;
+    pfOverrides?: Partial<FundLedgers>;
+  }): Promise<PfEsiReviewResult> {
+    const { company, fromDate, toDate, operator } = opts;
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    if (!operator || !Array.isArray(operator.challans)) {
+      throw new Error("the operator challan template did not parse — pass the filled template's path again");
+    }
+    lastCompany = company;
+
+    let groups: Array<{ name: string; parent: string }>;
+    let masterPairs: Array<{ name: string; parent: string }>;
+    let voucherList: VoucherRow[];
+    let mastersSource: "live" | "bundle" | "absent";
+    if (opts.dayBook) {
+      voucherList = opts.dayBook.vouchers;
+      groups = opts.dayBook.groups ?? [];
+      masterPairs = opts.dayBook.ledgers ?? [];
+      mastersSource = opts.dayBook.ledgers ? "bundle" : "absent";
+    } else {
+      const [g, m, v] = await Promise.all([
+        d.groups(company),
+        d.ledgers(company),
+        d.vouchers(company, fromDate, toDate),
+      ]);
+      groups = g;
+      masterPairs = m;
+      voucherList = v;
+      mastersSource = "live";
+    }
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const l of masterPairs) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    const groupOf = (ledger: string): string =>
+      groupOfLedger.get(canonicalKey(ledger)) ?? "";
+    const rootOf = (ledger: string): string => c.rootOf(groupOf(ledger)) ?? "";
+    const ctx: BooksContext = { groupOf, rootOf };
+
+    const funds = findFundLedgers([...masterPairs, ...groups], ctx, opts.pfOverrides);
+    const isFundLedger = new Map<string, string>();
+    for (const l of [...funds.pf, ...funds.esi]) {
+      if (l) isFundLedger.set(canonicalKey(l), l);
+    }
+    const maskFundLedger = (name: string): string => {
+      if (!name) return "";
+      const real = isFundLedger.get(canonicalKey(name));
+      if (real) return vault.pseudonym(real, "other" satisfies GroupRole);
+      return maskLedgerName(name, groupOf(name), c, vault);
+    };
+
+    const { events, findings: eventsFindings } = employeeEvents(voucherList, funds, ctx);
+    const { rows, findings: joinFindings } = clause20b(events, operator);
+    const rawFindings = [...eventsFindings, ...joinFindings];
+    // Masking: pseudonym every fund ledger first (the details quote whole
+    // ledger names), register the REAL name against the finding id for
+    // tb_ledger_activity drill-down (R-MCP-4), then sweep.
+    for (const f of rawFindings) if (f.ledger) maskFundLedger(f.ledger);
+    const findings: PfEsiMaskedFinding[] = rawFindings.map((f) => {
+      if (f.ledger && isFundLedger.has(canonicalKey(f.ledger))) {
+        realLedgerByFinding.set(f.id, f.ledger);
+      }
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        ledger: f.ledger ? maskFundLedger(f.ledger) : "",
+        group: scrubSecrets(f.group),
+        amount: f.amount,
+        side: null,
+        expected: null,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+      };
+    });
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of findings) counts[f.severity] += 1;
+
+    lastPfEsi = rows;
+    return {
+      company,
+      fromDate,
+      toDate,
+      counts,
+      findings,
+      rows: rows.map((r) => ({
+        fund: r.fund,
+        wageMonth: r.wageMonth,
+        amountCollected: r.amountCollected,
+        dueDate: displayDate(r.dueDate),
+        amountPaid: r.amountPaid,
+        paidOn: r.paidOn === null ? null : displayDate(r.paidOn),
+        delayDays: r.delayDays,
+        disallowed: r.disallowed,
+      })),
+      funds: {
+        pf: funds.pf.map(maskFundLedger),
+        esi: funds.esi.map(maskFundLedger),
+      },
+      booksSource: opts.dayBook ? "daybook-file" : "live",
+      ...(opts.dayBook
+        ? {
+            books: {
+              vouchers: voucherList.length,
+              rejected: opts.dayBook.rejected,
+              mastersSource,
+            },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Rewrite the P.F. / E.S.I. sheets of a Winman 3CD COPY from the cached
+   * review's rows (§2.3 + §3 column sourcing). The source is read once and
+   * never written; the copy lands beside `outPath` (the report directory by
+   * caller default) under `<stem> - filled - <today>.xlsm`. The sheet
+   * columns are two dates and two numbers — no vault-held name exists in
+   * them, so de-masking has nothing to restore by construction.
+   */
+  async function write3cdPfEsi(opts: { sourcePath: string; outPath?: string }): Promise<string> {
+    if (!lastPfEsi || lastPfEsi.length === 0) {
+      throw new Error("run tb_pf_esi_review first: there are no PF/ESI clause 20(b) rows to write");
+    }
+    const pkg = readXlsm(await readFile(opts.sourcePath));
+    // The handshake is the only reliable Winman discriminator; asserting it
+    // (and the form id on both writable sheets) refuses anything else loudly.
+    readHandshake(pkg);
+    for (const sheetName of ["P.F.", "E.S.I."]) {
+      const schema = readSchema(pkg, sheetName);
+      if (schema.formId !== "EmployeePFESIfunds") {
+        throw new Error(
+          `${sheetName} belongs to form "${schema.formId || "unknown"}": this tool fills the Winman EmployeePFESIfunds workbook`,
+        );
+      }
+    }
+    const byFund: Record<FundKey, WinmanRow[]> = {
+      PF: [],
+      ESI: [],
+    };
+    for (const r of [...lastPfEsi].sort((a, b) => (a.wageMonth < b.wageMonth ? -1 : 1))) {
+      byFund[r.fund].push({
+        DUEDATE: { kind: "date", ymd: r.dueDate },
+        ...(r.paidOn !== null ? { PAIDON: { kind: "date", ymd: r.paidOn } } : {}),
+        ...(r.amountPaid !== null ? { AMOUNTPAID: { kind: "number", value: r.amountPaid } } : {}),
+        AMOUNTCOLLECTED: { kind: "number", value: r.amountCollected },
+      });
+    }
+    let out = pkg;
+    for (const fund of ["PF", "ESI"] as const) {
+      if (byFund[fund].length > 0) out = writeSheetRows(out, lawFor(fund).sheet, byFund[fund]);
+    }
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const stem = basename(opts.sourcePath, extname(opts.sourcePath));
+    if (!opts.outPath) throw new Error("no output location for the filled workbook was given");
+    const target =
+      extname(opts.outPath).toLowerCase() === ".xlsm"
+        ? opts.outPath
+        : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, writeXlsm(out));
+    return target;
+  }
+
   function maskGstFinding(
     f: {
       id: string;
@@ -1816,5 +2054,7 @@ export function createSession(
     as26Review,
     depreciationReview,
     faRegister,
+    pfEsiReview,
+    write3cdPfEsi,
   };
 }
