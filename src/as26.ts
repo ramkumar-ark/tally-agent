@@ -476,25 +476,16 @@ export function analyzeAs26(
       push("as26_tax_not_in_books", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessAs26, detail);
     }
 
-    // 003 — 26AS gross vs books value: GST-exclusive (taxable) and GST-inclusive both tried
+    // 003 — 26AS gross vs books taxable: taxable-only (captain deviation; the
+    // GST-inclusive alternative is dropped from this check and re-homesteaded on
+    // the Deductors sheet, whose column totals are populated elsewhere).
     if (as26Gross > 0 && partySales.length > 0) {
       const dTok = Math.abs(round2(as26Gross - booksTaxable));
-      const dGross = Math.abs(round2(as26Gross - booksGross));
-      if (dTok > AS26_VALUE_TOLERANCE || dGross > AS26_VALUE_TOLERANCE) {
-        let basis: string;
-        if (dTok <= AS26_VALUE_TOLERANCE) {
-          basis = `the GST-exclusive (taxable) valuation matched; the GST-inclusive books gross is out by ${money(dGross)}`;
-        } else if (dGross <= AS26_VALUE_TOLERANCE) {
-          basis = `matched on the GST-inclusive value; the GST-exclusive books taxable is out by ${money(dTok)}`;
-        } else {
-          basis = dTok <= dGross
-            ? `the GST-exclusive (taxable) valuation comes closer; the GST-inclusive books gross is out by ${money(dGross)}`
-            : `the GST-inclusive valuation comes closer; the GST-exclusive books taxable is out by ${money(dTok)}`;
-        }
+      if (dTok > AS26_VALUE_TOLERANCE) {
         push(
           "assessable_value_mismatch", "warning", match.ledgerName, match.kind, summary?.section ?? null,
-          round2(Math.min(...[dTok, dGross].filter((d) => d > AS26_VALUE_TOLERANCE))),
-          `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)} and books GST-inclusive gross of ${money(booksGross)}: ${basis}.`,
+          dTok,
+          `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)}: the books taxable is out by ${money(dTok)} (tolerance ${money(AS26_VALUE_TOLERANCE)}). Bill-level rows carry the detail.`,
         );
       }
     }

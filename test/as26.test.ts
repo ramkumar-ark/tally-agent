@@ -383,20 +383,28 @@ describe("analyzeAs26 — findings 001–008", () => {
     expect(f.detail).toMatch(/F, O/);
     expect(f.amount).toBe(7000);
   });
-  it("003 says explicitly when the GST-inclusive interpretation matched", () => {
+  it("003 compares 26AS gross against books taxable only", () => {
     const sales = [{ ledgerKey: NK, date: "20250612", ref: null, taxable: 40000, gross: 47200 }];
     const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 47200 });
     const f = r.findings.find((x) => x.check === "assessable_value_mismatch")!;
     expect(f.severity).toBe("warning");
     expect(f.amount).toBe(7200);
-    expect(f.detail).toMatch(/GST-inclusive/);
+    expect(f.detail).toMatch(/books taxable of/);
+    expect(f.detail).not.toMatch(/GST-inclusive/i);
   });
-  it("003 with neither interpretation matching names the closer one", () => {
+  it("003 stays silent when the taxable comparison matches within tolerance", () => {
+    // 26AS gross 40,500 is within 1,000 of books taxable 40,000, but far from the
+    // books GST-inclusive gross 47,200 — the dropped basis must not fire.
+    const sales = [{ ledgerKey: NK, date: "20250612", ref: null, taxable: 40000, gross: 47200 }];
+    const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 40500 });
+    expect(r.findings.some((x) => x.check === "assessable_value_mismatch")).toBe(false);
+  });
+  it("003 measures the delta against books taxable, never the closer GST-inclusive gross", () => {
     const sales = [{ ledgerKey: NK, date: "20250612", ref: null, taxable: 40000, gross: 50000 }];
     const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 47200 });
     const f = r.findings.find((x) => x.check === "assessable_value_mismatch")!;
-    expect(f.amount).toBe(2800); // the smaller delta
-    expect(f.detail).toMatch(/closer/);
+    expect(f.amount).toBe(7200); // the taxable delta, even though the gross delta (2,800) is smaller
+    expect(f.detail).toMatch(/books taxable of/);
   });
   it("004 fires per mapping gap with the tax at stake", () => {
     const EMPTY = analyzeAs26(txFile([txn(18000)], 18000), facts(ledgers), { mappings: [] }, ledgers, {
