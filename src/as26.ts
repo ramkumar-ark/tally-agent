@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { canonicalKey } from "./key.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 
-export interface BooksDeduction { ledgerKey: string; kind: As26Kind; date: string; tax: number; voucherType: string; }
+export interface BooksDeduction { ledgerKey: string; kind: As26Kind; date: string; tax: number; voucherType: string; voucherNumber: string | null; reference: string | null; }
 export interface BooksSale { ledgerKey: string; date: string; ref: string | null; taxable: number; gross: number; }
 export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; }
 
@@ -162,6 +162,8 @@ export function deductionEvents(rows: LedgerVoucherRow[], kind: As26Kind): { eve
         date: r.date,
         tax: round2(r.amount),
         voucherType: r.voucherType,
+        voucherNumber: r.voucherNumber ? String(r.voucherNumber) : null,
+        reference: r.reference ? String(r.reference) : null,
       });
     } else if (r.amount < 0) {
       credits += 1;
@@ -240,7 +242,7 @@ export const AS26_VALUE_TOLERANCE = 1000.0;
 export const COMBINATION_MAX_SIZE = 4;
 export const COMBINATION_MAX_ITEMS = 40;
 
-export interface ReconItem { date: string; tax: number; }
+export interface ReconItem { date: string; tax: number; dedIdx?: number; txIdx?: number; gross?: number; status?: string | null; }
 
 export interface PartyRecon {
   match: PartyMatch;
@@ -285,14 +287,19 @@ const fits = (sum: number, target: number): boolean =>
  * fitting subset means the item stays unmatched and is counted ambiguous. */
 export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
   const keySet = new Set(match.ledgerKeys);
-  const booksItems: ReconItem[] = facts.deductions
-    .filter((d) => keySet.has(d.ledgerKey) && d.kind === match.kind)
-    .map((d) => ({ date: d.date, tax: d.tax }));
+  const booksItems: ReconItem[] = [];
+  facts.deductions.forEach((d, dedIdx) => {
+    if (keySet.has(d.ledgerKey) && d.kind === match.kind) {
+      booksItems.push({ date: d.date, tax: d.tax, dedIdx });
+    }
+  });
   const rows = file.transactions.filter((t) => t.kind === match.kind && t.nameKey === match.as26NameKey);
   const lateBookedTax = round2(rows
     .filter((t) => t.bookingDate && t.bookingDate > toDate)
     .reduce((s, t) => s + t.tax, 0));
-  const as26Items: ReconItem[] = rows.map((t) => ({ date: t.bookingDate || t.date, tax: t.tax }));
+  const as26Items: ReconItem[] = rows.map((t, txIdx) => ({
+    date: t.bookingDate || t.date, tax: t.tax, txIdx, gross: t.amount, status: t.status || null,
+  }));
 
   const booksTax = sumTax(booksItems);
   const as26Tax = sumTax(rows.map((t) => ({ date: t.date, tax: t.tax })));
