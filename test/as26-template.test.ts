@@ -169,7 +169,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
   });
 
   it("names the file as26-map-template-<company|all>-<date>.xlsx", () => {
-    expect(as26TemplateFileName("RVS Associates", "20260923")).toBe("as26-map-template-rvs-associates-20260923.xlsx");
+    expect(as26TemplateFileName("Acme Associates", "20260923")).toBe("as26-map-template-acme-associates-20260923.xlsx");
     expect(as26TemplateFileName(undefined, "20260923")).toBe("as26-map-template-all-20260923.xlsx");
   });
 });

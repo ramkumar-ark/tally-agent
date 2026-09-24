@@ -258,7 +258,7 @@ no stderr at 4 s and both `running` lines at 12 s. That is not a silent exit.
         "TALLY_HOST": "127.0.0.1",
         "TALLY_PORT": "9000",
         "TALLY_AGENT_REPORT_DIR": "/home/ram/tally-reports",
-        "TALLY_DEFAULT_COMPANY": "RVS Constructions ( Firm) - FY 25-26"
+        "TALLY_DEFAULT_COMPANY": "Example Company - FY 25-26"
       }
     }
   }

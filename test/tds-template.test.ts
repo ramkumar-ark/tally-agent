@@ -79,7 +79,7 @@ describe("the generated TDS template", () => {
   });
 
   it("names the file tds-operator-template-<company|all>-<date>.xlsx", () => {
-    expect(templateFileName("RVS Associates", "20260916")).toBe("tds-operator-template-rvs-associates-20260916.xlsx");
+    expect(templateFileName("Acme Associates", "20260916")).toBe("tds-operator-template-acme-associates-20260916.xlsx");
     expect(templateFileName(undefined, "20260916")).toBe("tds-operator-template-all-20260916.xlsx");
   });
 });
