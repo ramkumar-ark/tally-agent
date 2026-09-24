@@ -2,9 +2,10 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { buildAs26Fixture } from "./as26-fixture.js";
+import { buildAs26Fixture, defaultAs26Fixture } from "./as26-fixture.js";
 import { parseAs26Export } from "../src/as26-file.js";
 import { createSession } from "../src/review.js";
+import type { CellValue } from "../src/xlsx.js";
 import { buildAs26MapTemplate } from "../src/as26-template.js";
 import { EMPTY_OVERRIDES } from "../src/overrides.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
@@ -240,5 +241,79 @@ describe("Session.as26Review", () => {
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
     await expect(s.as26Review(undefined, "2026-04-01", "20260331", file, "/x")).rejects.toThrow(/YYYYMMDD/);
     await expect(s.as26Review(undefined, "20260401", "20250331", file, "/x")).rejects.toThrow(/YYYYMMDD/);
+  });
+
+  const anandMap = (): string => mapFile(
+    JSON.stringify({ mappings: [{ ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" }] }),
+  );
+
+  it("billRows reach the tool result masked, with row pointers on findings", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, anandMap());
+
+    // every party label is a pseudonym, never a name
+    expect(res.billRows.length).toBeGreaterThan(0);
+    for (const r of res.billRows) expect(r.party).not.toMatch(/[A-Za-z]+ Traders/);
+    const b = res.billRows.find((r) => r.sheetId === "booksded");
+    expect(b).toBeDefined();
+    expect(b && /^\d{1,2}-[A-Za-z]{3}-\d{4}$/.test(b.date)).toBe(true); // displayDate form
+    const f = res.findings.find((x) => x.check === "books_tax_not_in_26as");
+    expect(f).toBeDefined();
+    expect(f!.detail).toMatch(/see Books not in 26AS rows B\d/);
+    // a booksded row's party equals the masked label of the matching finding's party
+    expect(res.billRows.some((r) => r.sheetId === "booksded" && r.party === f!.party)).toBe(true);
+    // every row id inside a pointer is a B/D/V ordinal
+    for (const g of res.findings) {
+      for (const m of g.detail.matchAll(/see ([A-Za-z0-9 ]+?) rows ((?:[BDV]\d+(?:, )?)+)\./g)) {
+        for (const id of m[2].split(", ")) expect(id).toMatch(/^[BDV]\d+$/);
+      }
+    }
+    // nothing raw leaves the session
+    const raw = JSON.stringify(res.billRows);
+    expect(raw).not.toContain("JV/1");
+    expect(raw).not.toContain("20250612");
+    expect(raw).not.toContain("Anand Buildmart");
+  });
+
+  it("orders a party's rows booksded, as26, value and points 003 at value rows", async () => {
+    const base = defaultAs26Fixture();
+    const swap = (rows: CellValue[][], first: string, next: CellValue[]): CellValue[][] =>
+      rows.map((r) => (String(r[0]) === first ? next : r));
+    const fileV = parseAs26Export(buildAs26Fixture({
+      ...base,
+      // Anand's 26AS gross grows past the value tolerance against the books sale
+      tdsSummary: swap(base.tdsSummary, "Anand Buildmart Pvt Ltd",
+        ["Anand Buildmart Pvt Ltd", "PUNB05678F", 4600.15, 4600.15, 0, 240000, "", 240000, "194C"]),
+      tdsDetail: swap(base.tdsDetail, "ANAND BUILDMART PVT LTD",
+        ["ANAND BUILDMART PVT LTD", "09-Sep-2025", 240000.89, null, 4600.15, 4600.15, "PUNB05678F", null, "F", "15-Oct-2025", "194C"]),
+    }));
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", fileV, anandMap());
+    const label = res.recon[0].match.ledgerName;
+    const order = res.billRows.filter((r) => r.party === label).map((r) => r.sheetId);
+    expect(order).toEqual(["booksded", "booksded", "booksded", "as26", "value"]);
+    const f003 = res.findings.find((x) => x.check === "assessable_value_mismatch");
+    expect(f003).toBeDefined();
+    expect(f003!.detail).toMatch(/see Bill value mismatch rows V1\./);
+  });
+
+  it("late_booking pointers name only the out-of-window as26 rows", async () => {
+    const base = defaultAs26Fixture();
+    const fileL = parseAs26Export(buildAs26Fixture({
+      ...base,
+      // a second Anand transaction booked after the (shortened) window
+      tdsDetail: [...base.tdsDetail,
+        ["", "20-Nov-2025", 100000, null, 2000, null, "PUNB05678F", null, "F", "05-Jan-2026", "194C"]],
+    }));
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileL, anandMap());
+    const late = res.findings.find((x) => x.check === "late_booking");
+    expect(late).toBeDefined();
+    // D2 is the 05-Jan-2026 booking (outside the window); D1 (15-Oct-2025) is in-window
+    expect(late!.detail).toMatch(/see 26AS unmatched rows D2\./);
+    expect(late!.detail).not.toMatch(/D1\b/);
+    const f001 = res.findings.find((x) => x.check === "books_tax_not_in_26as");
+    expect(f001!.detail).toMatch(/see Books not in 26AS rows B1, B2\./);
+    expect(f001!.detail).not.toMatch(/26AS unmatched/);
   });
 });

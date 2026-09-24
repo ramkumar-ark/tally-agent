@@ -17,6 +17,9 @@ export interface BillRow {
   date: string; tax: number;
   voucherType: string | null; ref: string | null;
   gross: number | null; status: string | null;
+  /** booksded: the party's unique summary section, else null; as26/value:
+   * the transaction's own section. Never re-derived downstream. */
+  section: string | null;
   inWindow: boolean; linkBasis: LinkBasis;
   linked: { date: string; ref: string | null; taxable: number } | null;
   delta: number | null;
@@ -103,13 +106,14 @@ export function buildBillRows(
           .filter((s) => s.kind === r.match.kind && s.nameKey === r.match.as26NameKey)
           .map((s) => s.section),
       );
+      const section = secs.size === 1 ? [...secs][0] : null;
       const link = linkInvoice(pool, {
-        date: d.date, tax: d.tax, reference: d.reference, section: secs.size === 1 ? [...secs][0] : null,
+        date: d.date, tax: d.tax, reference: d.reference, section,
       });
       rows.push({
         kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey,
         date: d.date, tax: d.tax, voucherType: d.voucherType || null, ref: d.voucherNumber,
-        gross: null, status: null, inWindow: inWindow(d.date, opts),
+        gross: null, status: null, section, inWindow: inWindow(d.date, opts),
         linkBasis: link ? link.basis : "none",
         linked: link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null,
         delta: null,
@@ -128,7 +132,8 @@ export function buildBillRows(
       rows.push({
         kind: "as26", ledgerKey: led, nameKey: r.match.as26NameKey,
         date, tax: i.tax, voucherType: null, ref: null,
-        gross: i.gross ?? null, status: i.status ?? null, inWindow: inWindow(date, opts),
+        gross: i.gross ?? null, status: i.status ?? null, section: tx?.section ?? null,
+        inWindow: inWindow(date, opts),
         linkBasis: link ? link.basis : "none",
         linked: link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null,
         delta: null,
@@ -147,7 +152,8 @@ export function buildBillRows(
       rows.push({
         kind: "value", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey,
         date, tax: t.tax, voucherType: null, ref: null,
-        gross: t.amount, status: t.status || null, inWindow: inWindow(date, opts),
+        gross: t.amount, status: t.status || null, section: t.section,
+        inWindow: inWindow(date, opts),
         linkBasis: link.basis,
         linked: { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable },
         delta,

@@ -27,6 +27,7 @@ import {
 } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 import { loadAs26MapFile } from "./as26-template.js";
+import { buildBillRows, type BillKind, type LinkBasis } from "./as26-bill.js";
 import type { LedgerTaxInfo } from "./downstream.js";
 import { maskFinding, maskKnownNames, maskLedgerName, scrubSecrets } from "./mask.js";
 import { scrutinize, type MonthMovement } from "./scrutiny.js";
@@ -69,6 +70,7 @@ import {
   type GstKind,
   type Severity,
   type As26Finding,
+  type As26CheckId,
   type Side,
   type TbRow,
   type TdsCheckId,
@@ -277,6 +279,19 @@ export interface As26ReviewResult {
    * written report's Books Events sheet (the drill-down the deduction and
    * sale vouchers give the operator). */
   bookEvents: Array<{ party: string; source: "deduction" | "sale"; date: string; tax: number; voucherType: string; ref: string | null }>;
+  /** Bill-level drill-down rows behind the recon (masked): sheetId B = books
+   * deductions not in 26AS, D = 26AS transactions not in books, V = value
+   * mismatches. Party labels equal the findings' masked labels, so the
+   * findings' "see ... rows <ids>" pointers and these rows line up. */
+  billRows: Array<{
+    sheetId: "booksded" | "as26" | "value";
+    party: string; date: string; tax: number;
+    gross: number | null; voucherType: string | null;
+    ref: string | null; status: string | null; section: string | null;
+    inWindow: boolean; linkBasis: LinkBasis;
+    linked: { date: string; ref: string | null; taxable: number } | null;
+    delta: number | null;
+  }>;
 }
 
 /** One masked depreciation finding: the engine shape with ledger+block pseudonymed. */
@@ -982,6 +997,9 @@ export function createSession(
 
     const map = loadAs26MapFile(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
     const result = analyzeAs26(file, { deductions, sales }, map, ledgerNames, { fromDate, toDate });
+    // Bill-level drill-down (pure, unmasked): the SAME file instance the
+    // session analyzed, so the rows and the findings share one provenance.
+    const billRowsEngine = buildBillRows(result, { deductions, sales }, file, { fromDate, toDate });
 
     // --- masking (R-P-5): parties pseudonym, refs Doc N, totals untouched ---
     const isTallyLedger = new Set(masterPairs.map((l) => canonicalKey(l.name)));
@@ -1066,6 +1084,85 @@ export function createSession(
       maskLedgerName(r.name, ledgerGroupOf.get(canonicalKey(r.name)) ?? "", c, vault),
     );
 
+    // --- bill rows (masking R-P-5): the engine rows pseudonymed like the
+    // findings, so every row's party label equals its party's finding label
+    // and the row-id pointers below line up ---
+    const partyLabel = new Map(result.recon.map((r) => [r.match.as26NameKey, pseudoName(r.match.ledgerName)]));
+    const partyIndex = new Map(result.recon.map((r, i) => [r.match.as26NameKey, i]));
+    const KIND_ORDER: Record<BillKind, number> = { booksded: 0, as26: 1, value: 2 };
+    const sortedRows = [...billRowsEngine].sort((a, b) => {
+      const pa = partyIndex.get(a.nameKey) ?? Number.MAX_SAFE_INTEGER;
+      const pb = partyIndex.get(b.nameKey) ?? Number.MAX_SAFE_INTEGER;
+      if (pa !== pb) return pa - pb;
+      if (a.kind !== b.kind) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return a.tax - b.tax;
+    });
+    const billRows = sortedRows.map((r) => ({
+      party: partyLabel.get(r.nameKey) ?? pseudoKey(r.ledgerKey),
+      date: displayDate(r.date),
+      tax: r.tax,
+      gross: r.gross,
+      voucherType: r.voucherType,
+      ref: REF_MASK(r.ref),
+      status: r.status,
+      section: r.section,
+      inWindow: r.inWindow,
+      linkBasis: r.linkBasis,
+      linked: r.linked
+        ? { date: displayDate(r.linked.date), ref: REF_MASK(r.linked.ref), taxable: r.linked.taxable }
+        : null,
+      delta: r.delta,
+      sheetId: r.kind,
+    }));
+    // Row ids (D5): sequential per sheet across the whole run, grouped by
+    // masked party — B/D/V + number. late_booking points only at the party's
+    // as26 rows whose engine row fell outside the reviewed window.
+    const SHEET_PREFIX: Record<BillKind, string> = { booksded: "B", as26: "D", value: "V" };
+    const byParty = new Map<string, Map<BillKind, string[]>>();
+    const outOfWindowIds = new Set<string>();
+    for (const kind of ["booksded", "as26", "value"] as const) {
+      let n = 0;
+      for (const r of billRows) {
+        if (r.sheetId !== kind) continue;
+        n += 1;
+        const id = `${SHEET_PREFIX[kind]}${n}`;
+        const rows = byParty.get(r.party) ?? new Map();
+        const list = rows.get(kind) ?? [];
+        list.push(id);
+        rows.set(kind, list);
+        byParty.set(r.party, rows);
+        if (kind === "as26" && !r.inWindow) outOfWindowIds.add(id);
+      }
+    }
+    // Findings point at their drill-down rows. Appended after the findings'
+    // maskKnownNames pass (the ids are not known names) and before the
+    // outbound sweep; wording fixed by the task addendum (A4.4).
+    const POINTER_TO: Partial<Record<As26CheckId, { kind: BillKind; label: string }[]>> = {
+      books_tax_not_in_26as: [{ kind: "booksded", label: "Books not in 26AS" }],
+      deduction_without_sale: [{ kind: "booksded", label: "Books not in 26AS" }],
+      as26_tax_not_in_books: [{ kind: "as26", label: "26AS unmatched" }],
+      late_booking: [{ kind: "as26", label: "26AS unmatched" }],
+      unresolved_combination: [
+        { kind: "booksded", label: "Books not in 26AS" },
+        { kind: "as26", label: "26AS unmatched" },
+      ],
+      assessable_value_mismatch: [{ kind: "value", label: "Bill value mismatch" }],
+    };
+    for (const f of findings) {
+      const pointer = POINTER_TO[f.check];
+      if (!pointer) continue;
+      const parts: string[] = [];
+      for (const { kind, label } of pointer) {
+        const ids = byParty.get(f.party)?.get(kind) ?? [];
+        const shown = f.check === "late_booking" && kind === "as26"
+          ? ids.filter((id) => outOfWindowIds.has(id))
+          : ids;
+        if (shown.length > 0) parts.push(`see ${label} rows ${shown.join(", ")}`);
+      }
+      if (parts.length > 0) f.detail += ` ${parts.join("; ")}.`;
+    }
+
     const masked: As26ReviewResult = sweepStrings(
       {
         company: company ?? undefined,
@@ -1080,6 +1177,7 @@ export function createSession(
         skipped: result.skipped,
         counts: { credits, receivableLedgers: recLedgers },
         bookEvents,
+        billRows,
       },
       vault,
     ) as As26ReviewResult;
