@@ -447,6 +447,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Read `docs/design/2026-09-23-winman-3cd-pf-esi-design.md` before touching
   `src/xlsm.ts` / `src/winman3cd.ts` / `src/pf-esi*.ts` — it is the design of
   record for the Winman 3CD round-trip foundation and clause 20(b) PF/ESI.
+- The xlsm package stack (`src/xlsm.ts`) is a THIRD independent zip stack: no
+  shared code with `src/xlsx.ts` (writer) or `src/xlsx-read.ts` (reader).
+- Winman rows 1/2/6 are hidden machine state (row 1 form id = the discriminator,
+  row 2 machine keys), the first data row is row 7, and `writeSheetRows` must
+  keep rows `< firstDataRow` byte-identical or Winman re-import breaks.
+- `pfEsiLedgers` (config/overrides.json) reaches the review through both
+  channels (session default and per-call `overridesPath`); an explicit
+  per-fund empty array replaces the heuristic wholesale — only a missing key,
+  `null` or bare `{}` is unset. Evidence channel: day book primary, live
+  Tally fallback; contributions arrive as fund-ledger credits (negate-free:
+  `findFundLedgers`/`employeeEvents` take abs). V4 (Winman import click) is
+  captain-operated and recorded in the design doc §10.1.
 
 ## Maintaining this file
 
