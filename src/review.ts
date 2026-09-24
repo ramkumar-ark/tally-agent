@@ -1829,7 +1829,13 @@ export function createSession(
     const rootOf = (ledger: string): string => c.rootOf(groupOf(ledger)) ?? "";
     const ctx: BooksContext = { groupOf, rootOf };
 
-    const funds = findFundLedgers([...masterPairs, ...groups], ctx, opts.pfOverrides);
+    // The per-call overridesPath is optional; absent, the key parsed from the
+    // session's own config/overrides.json is the promised default.
+    const funds = findFundLedgers(
+      [...masterPairs, ...groups],
+      ctx,
+      opts.pfOverrides ?? overrides.pfEsiLedgers,
+    );
     const isFundLedger = new Map<string, string>();
     for (const l of [...funds.pf, ...funds.esi]) {
       if (l) isFundLedger.set(canonicalKey(l), l);

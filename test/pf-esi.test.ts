@@ -6,6 +6,10 @@ import { describe, expect, it } from "vitest";
 import { findFundLedgers, employeeEvents, clause20b, type Clause20bRow } from "../src/pf-esi.js";
 import { pfEsiSheets, writePfEsiReport, type PfEsiReportResult } from "../src/report.js";
 import type { PfEsiMaskedFinding } from "../src/review.js";
+import { createSession } from "../src/review.js";
+import { EMPTY_PF_ESI } from "../src/pf-esi-file.js";
+import { EMPTY_OVERRIDES } from "../src/classify.js";
+import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { createVault } from "../src/vault.js";
 import { entry } from "./xlsx.test.js";
 
@@ -112,7 +116,7 @@ describe("employee contribution extraction", () => {
 
 describe("clause 20(b)", () => {
   const ev = (fund: "PF" | "ESI", wageMonth: string, amount: number) =>
-    ({ fund, wageMonth, date: `${wageMonth.replace("-", "")}30`, voucherNumber: "1", ledger: "EPF Payable A/c", amount });
+    ({ fund, wageMonth, date: `${wageMonth.replace("-", "")}30`, voucherNumber: "1", ledger: "Provider PF Payable A/c", amount });
   const ch = (fund: "PF" | "ESI", wageMonth: string, paidOn: string, amountPaid: number) =>
     ({ fund, wageMonth, paidOn, amountPaid, sheet: "Challans", row: 2 });
 
@@ -169,7 +173,7 @@ describe("clause 20(b)", () => {
   it("returns nothing at all for a fund with no months", () => {
     const { rows, findings } = clause20b([ev("PF", "2025-04", 1)] as never, { challans: [] });
     expect(rows.filter((r) => r.fund === "ESI")).toHaveLength(0);
-    expect(findings.every((f) => f.ledger === "EPF Payable A/c")).toBe(true);
+    expect(findings.every((f) => f.ledger === "Provider PF Payable A/c")).toBe(true);
   });
 
   it("raises the C1 advisory when the due date is a Sunday", () => {
@@ -180,7 +184,7 @@ describe("clause 20(b)", () => {
 
 describe("clause 20(b) — review focus", () => {
   const ev = (fund: "PF" | "ESI", wageMonth: string, amount: number) =>
-    ({ fund, wageMonth, date: `${wageMonth.replace("-", "")}30`, voucherNumber: "1", ledger: "EPF Payable A/c", amount });
+    ({ fund, wageMonth, date: `${wageMonth.replace("-", "")}30`, voucherNumber: "1", ledger: "Provider PF Payable A/c", amount });
   const ch = (fund: "PF" | "ESI", wageMonth: string, paidOn: string, amountPaid: number) =>
     ({ fund, wageMonth, paidOn, amountPaid, sheet: "Challans", row: 2 });
 
@@ -262,5 +266,52 @@ describe("pfEsi workbook", () => {
     const xml = entry(await readFile(path), "xl/worksheets/sheet1.xml");
     expect(xml).toContain("Sample Staff PF Payable");
     expect(xml).not.toContain(alias);
+  });
+});
+
+// The pfEsiLedgers key of the session's own config/overrides.json is the
+// promised default for tb_pf_esi_review: a per-call overridesPath is optional,
+// so absent, the key parsed at session creation must still drive
+// findFundLedgers. Synthetic ledgers and figures only.
+describe("pfEsiLedgers default channel", () => {
+  const pfLedger = "Staff PF Payable";
+  const alternate = "Alternate PF Payable";
+  const esiLedger = "Staff ESI Payable";
+  const salaryLedger = "Staff Wages";
+  const stub = Object.assign(fakeDownstream(), {
+    groups: async () => [
+      { name: "Current Liabilities", parent: "\u0004 Primary" },
+      { name: "Indirect Expenses", parent: "\u0004 Primary" },
+    ],
+    ledgers: async () => [
+      { name: pfLedger, parent: "Current Liabilities", openingBalance: 0, closingBalance: -1000 },
+      { name: alternate, parent: "Current Liabilities", openingBalance: 0, closingBalance: -1000 },
+      { name: esiLedger, parent: "Current Liabilities", openingBalance: 0, closingBalance: -1000 },
+      { name: salaryLedger, parent: "Indirect Expenses", openingBalance: 0, closingBalance: 1000 },
+    ],
+    vouchers: async () => [
+      {
+        date: "20250430", voucherType: "Jrnl", voucherNumber: "J-1", partyLedgerName: "", cancelled: false,
+        entries: [{ ledger: salaryLedger, amount: 2000 }, { ledger: pfLedger, amount: -2000 }],
+      },
+    ],
+  } as never);
+
+  it("delivers the overrides file's pfEsiLedgers when no per-call overridesPath is passed", async () => {
+    const session = createSession(stub, {
+      ...EMPTY_OVERRIDES,
+      pfEsiLedgers: { pf: [alternate], esi: [] },
+    });
+    const result = await session.pfEsiReview({
+      fromDate: "20250401",
+      toDate: "20250630",
+      operator: EMPTY_PF_ESI,
+    });
+    // The override replaced the heuristic wholesale for both funds (Q4).
+    const reals = session.vault.entries().map((e) => e.real);
+    expect(result.funds.esi).toEqual([]);
+    expect(reals).toContain(alternate);
+    expect(reals).not.toContain(pfLedger);
+    expect(reals).not.toContain(esiLedger);
   });
 });

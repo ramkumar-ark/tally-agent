@@ -10,7 +10,7 @@ describe("pf/esi operator template", () => {
   });
 
   it("names the file after the company and date", () => {
-    expect(pfEsiTemplateFileName("R V S Constructions", "20260923")).toBe("pf-esi-operator-template-r-v-s-constructions-20260923.xlsx");
+    expect(pfEsiTemplateFileName("Northbridge Constructions", "20260923")).toBe("pf-esi-operator-template-northbridge-constructions-20260923.xlsx");
   });
 
   it("offers a Fund dropdown so the operator cannot mistype the fund", () => {

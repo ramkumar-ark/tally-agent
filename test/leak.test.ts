@@ -361,7 +361,7 @@ describe("no secret leaves the gateway", () => {
  */
 function pfSecretDownstream() {
   const pfLedger = "Orchid Medical EPF Payable";
-  const esiLedger = "VMR Medical ESI Payable";
+  const esiLedger = "Zenith Medical ESI Payable";
   const salaryLedger = "Staff Wages";
   const groups = [
     { name: "Current Liabilities", parent: "\u0004 Primary" },
@@ -426,13 +426,13 @@ describe("pf/esi leak surfaces", () => {
     );
     expect(out).not.toContain("orchid");
     expect(out).not.toContain("medical");
-    expect(out).not.toMatch(/\bVMR\b/);
+    expect(out).not.toMatch(/\bZenith\b/);
     // Non-vacuity: the stub's fund ledgers really entered the review (masked),
     // and the vault really carries the planted secrets.
     expect(out).toMatch(/Ledger \d+/);
     expect(out).toContain("pf_esi_challan_missing");
     expect(session.vault.entries().some((e) => e.real.toLowerCase().includes("orchid"))).toBe(true);
-    expect(session.vault.entries().some((e) => /\bVMR\b/.test(e.real))).toBe(true);
+    expect(session.vault.entries().some((e) => /\bZenith\b/.test(e.real))).toBe(true);
   });
 
   it("restores the real rows only on the written workbook", async () => {
