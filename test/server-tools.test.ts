@@ -47,6 +47,7 @@ describe("tool surface", () => {
       "tb_write_fixed_asset_report",
       "tb_write_gst_report",
       "tb_write_ledger_report",
+      "tb_write_pf_esi_report",
       "tb_write_pf_esi_template",
       "tb_write_report",
       "tb_write_tds_report",

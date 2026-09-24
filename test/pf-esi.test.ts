@@ -1,5 +1,13 @@
+import { readFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { findFundLedgers, employeeEvents, clause20b } from "../src/pf-esi.js";
+import { findFundLedgers, employeeEvents, clause20b, type Clause20bRow } from "../src/pf-esi.js";
+import { pfEsiSheets, writePfEsiReport, type PfEsiReportResult } from "../src/report.js";
+import type { PfEsiMaskedFinding } from "../src/review.js";
+import { createVault } from "../src/vault.js";
+import { entry } from "./xlsx.test.js";
 
 // Synthetic ledgers and amounts only: the real operator's fund ledgers, party
 // names and figures never appear in the repo (captain ruling 2026-09-23).
@@ -194,5 +202,65 @@ describe("clause 20(b) — review focus", () => {
     const { rows } = clause20b([ev("PF", "2025-06", 30000), ev("PF", "2025-06", 500)] as never, { challans: [ch("PF", "2025-06", "20250715", 30500)] });
     expect(rows).toHaveLength(1);
     expect(rows[0].amountCollected).toBe(30500);
+  });
+});
+
+// Task 10: the review workbook. Synthetic figures and names only (captain
+// ruling 2026-09-23): the working paper de-masks on disk through
+// writeWorkbook, so the de-mask test needs a vault-pseudonymed fund ledger.
+describe("pfEsi workbook", () => {
+  const rows: Clause20bRow[] = [
+    { fund: "PF", wageMonth: "2025-07", amountCollected: 24000, dueDate: "20250815", amountPaid: 24000, paidOn: "20250812", delayDays: null, disallowed: false },
+    { fund: "ESI", wageMonth: "2025-08", amountCollected: 8100, dueDate: "20250915", amountPaid: 8100, paidOn: "20250924", delayDays: 9, disallowed: true },
+  ];
+
+  const sampleResult = (findings: PfEsiMaskedFinding[] = []): PfEsiReportResult => ({
+    company: "Sample Co",
+    fromDate: "20250401",
+    toDate: "20260331",
+    findings,
+    rows,
+  });
+
+  it("builds a Findings sheet and a Clause 20(b) working paper with the named columns", () => {
+    const sheets = pfEsiSheets(sampleResult());
+    expect(sheets.map((s) => s.name)).toEqual(["Findings", "Clause 20(b)"]);
+    const clause = sheets[1];
+    expect(clause.columns.map((c) => c.header)).toEqual([
+      "Fund", "Wage Month", "Amount Collected", "Due Date", "Amount Paid", "Paid On", "Delay (days)", "Disallowed",
+    ]);
+    expect(clause.rows).toEqual([
+      ["PF", "2025-07", 24000, "20250815", 24000, "20250812", null, "no"],
+      ["ESI", "2025-08", 8100, "20250915", 8100, "20250924", 9, "yes"],
+    ]);
+  });
+
+  it("formats the two date columns as dates and the amounts as money", () => {
+    const clause = pfEsiSheets(sampleResult())[1];
+    expect(clause.columns[3].format).toBe("date");
+    expect(clause.columns[5].format).toBe("date");
+    expect(clause.columns[2].format).toBe("money");
+    expect(clause.columns[4].format).toBe("money");
+  });
+
+  it("writePfEsiReport de-masks the fund ledger names on disk", async () => {
+    const vault = createVault();
+    const alias = vault.pseudonym("Sample Staff PF Payable", "other");
+    const dir = await mkdtemp(join(tmpdir(), "pfesi-wb-"));
+    const result = sampleResult([{
+      id: "PF-001-1",
+      check: "pf_esi_paid_late",
+      severity: "critical",
+      ledger: alias,
+      group: "Current Liabilities",
+      amount: 8100,
+      side: null,
+      expected: null,
+      detail: `${alias}: the employees' contribution for ESI was paid late`,
+    }]);
+    const { workbookPath: path } = await writePfEsiReport({ reportDir: dir, result, vault });
+    const xml = entry(await readFile(path), "xl/worksheets/sheet1.xml");
+    expect(xml).toContain("Sample Staff PF Payable");
+    expect(xml).not.toContain(alias);
   });
 });

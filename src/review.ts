@@ -489,6 +489,12 @@ export interface Session {
    * never written to.
    */
   write3cdPfEsi(opts: { sourcePath: string; outPath?: string }): Promise<string>;
+  /**
+   * The cached clause 20(b) rows from the last pfEsiReview, with raw dates —
+   * the report writer (tb_write_pf_esi_report) consumes them unchanged; the
+   * review result's own rows are display-formatted for the model.
+   */
+  pfEsiRows(): Clause20bRow[] | undefined;
   vault: Vault;
 }
 
@@ -2084,5 +2090,6 @@ async function realPathId(p: string): Promise<string> {
     faRegister,
     pfEsiReview,
     write3cdPfEsi,
+    pfEsiRows: () => lastPfEsi,
   };
 }

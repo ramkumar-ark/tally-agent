@@ -4,7 +4,8 @@ import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
 import { count, money, displayDate } from "./format.js";
 import { round2, type BlockResult, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
-import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding, As26ReviewResult } from "./review.js";
+import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding, PfEsiMaskedFinding, As26ReviewResult } from "./review.js";
+import type { Clause20bRow } from "./pf-esi.js";
 import type { Vault } from "./vault.js";
 
 /**
@@ -876,6 +877,86 @@ export async function writeFaRegisterReport(opts: {
   });
 
   return { markdownPath, csvPath, workbookPath };
+}
+
+/**
+ * Task 9's PF/ESI review as the workbook writer consumes it: the findings
+ * already masked (de-masking is writeWorkbook's), and the clause 20(b) rows
+ * from the cached review with their raw dates — a date-formatted cell needs
+ * the YYYYMMDD form to become an Excel date.
+ */
+export interface PfEsiReportResult {
+  company?: string;
+  fromDate?: string;
+  toDate?: string;
+  findings: PfEsiMaskedFinding[];
+  rows: Clause20bRow[];
+}
+
+/**
+ * The clause 20(b) working paper: the auditor sees the delay and the
+ * disallowance Winman will compute for itself, before importing. Masked in,
+ * masked out: writeWorkbook de-masks. One row per fund per wage month (C5),
+ * date-formatted dates and money-formatted amounts.
+ */
+export function pfEsiSheets(result: PfEsiReportResult): Sheet[] {
+  const findings = findingsSheet(
+    result.findings.map((f) => ({
+      id: f.id, check: f.check, severity: f.severity,
+      ledger: f.ledger, group: f.group, amount: f.amount, detail: f.detail,
+    })),
+  );
+  const clause: Sheet = {
+    name: "Clause 20(b)",
+    title: [
+      `PF/ESI employees' contributions, ${displayDate(result.fromDate ?? "")} to ${displayDate(result.toDate ?? "")}`,
+      `Due dates are the strict 15th (C1); a deposit after the due date is disallowed under s.36(1)(va). Rows shown: ${result.rows.length}.`,
+      `Wage months: ${new Set(result.rows.map((r) => r.wageMonth)).size}; funds: ${new Set(result.rows.map((r) => r.fund)).size}; disallowed rows: ${result.rows.filter((r) => r.disallowed).length}.`,
+    ],
+    columns: [
+      textCol("Fund", 14),
+      textCol("Wage Month", 12),
+      moneyCol("Amount Collected", 18),
+      dateCol("Due Date"),
+      moneyCol("Amount Paid", 14),
+      dateCol("Paid On"),
+      { header: "Delay (days)", width: 12, format: "text" },
+      { header: "Disallowed", width: 11, format: "text" },
+    ],
+    rows: [...result.rows]
+      .sort((a, b) => (a.wageMonth < b.wageMonth ? -1 : a.wageMonth > b.wageMonth ? 1 : a.fund < b.fund ? -1 : 1))
+      .map((r) => [
+        r.fund,
+        r.wageMonth,
+        r.amountCollected,
+        r.dueDate,
+        r.amountPaid,
+        r.paidOn ?? "",
+        r.delayDays,
+        r.disallowed ? "yes" : "no",
+      ]),
+  };
+  return [findings, clause];
+}
+
+/**
+ * The clause 20(b) workbook (R-R-4): a Findings sheet and the Clause 20(b)
+ * working paper, de-masked on the way to disk by writeWorkbook.
+ */
+export async function writePfEsiReport(opts: {
+  reportDir: string;
+  result: PfEsiReportResult;
+  vault: Vault;
+}): Promise<{ workbookPath: string }> {
+  const stem = `${slug(opts.result.company ?? "pf-esi")}-${opts.result.fromDate ?? ""}-${opts.result.toDate ?? ""}`;
+  const workbookPath = join(opts.reportDir, `pf-esi-review-${stem}.xlsx`);
+  await writeWorkbook({
+    reportDir: opts.reportDir,
+    fileName: `pf-esi-review-${stem}.xlsx`,
+    sheets: pfEsiSheets(opts.result),
+    vault: opts.vault,
+  });
+  return { workbookPath };
 }
 
 /** 26AS recon report (R-R-4): de-masked markdown plus the four-sheet

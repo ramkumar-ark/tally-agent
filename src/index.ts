@@ -28,6 +28,7 @@ import {
   writeLedgerReport,
   writeReport,
   writeAs26Report,
+  writePfEsiReport,
   writeTdsReport,
   writeVaultDump,
 } from "./report.js";
@@ -38,6 +39,7 @@ import {
   type FaReviewResult,
   type GstMismatchResult,
   type LedgerScrutinyResult,
+  type PfEsiReviewResult,
   type ReviewResult,
   type Session,
   type TdsReviewResult,
@@ -114,6 +116,7 @@ export function registerTools(
   let lastDayBookMeta: { bytes: number; digest: string } | undefined;
   let lastDep: DepReviewResult | undefined;
   let lastFa: FaReviewResult | undefined;
+  let lastPfEsi: PfEsiReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -718,6 +721,7 @@ export function registerTools(
         dayBook,
         pfOverrides,
       });
+      lastPfEsi = result;
       // The files' PATHS are audited, never their contents (the M2 contract;
       // the digest records which day book the run consumed, never its rows).
       await audit(
@@ -763,6 +767,42 @@ export function registerTools(
     },
   );
 
+  register(
+    "tb_write_pf_esi_report",
+    "Write the PF/ESI clause 20(b) review workbook to disk: a Findings sheet and the Clause 20(b) " +
+      "working paper (fund, wage month, amount collected, due date, amount paid, paid on, delay, " +
+      "disallowed) so the auditor sees the s.36(1)(va) disallowance before importing. Real names are " +
+      "restored on write; compose nothing by hand - it is generated from the last tb_pf_esi_review.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+    },
+    async (args) => {
+      if (!lastPfEsi) throw new Error("run tb_pf_esi_review first: there are no PF/ESI findings to write");
+      const paths = await writePfEsiReport({
+        reportDir: cfg.reportDir,
+        result: {
+          company: args.company ?? lastPfEsi.company,
+          fromDate: lastPfEsi.fromDate,
+          toDate: lastPfEsi.toDate,
+          findings: lastPfEsi.findings,
+          // The working paper's date cells come from the cached raw rows;
+          // the review result's own rows are display-formatted.
+          rows: session.pfEsiRows() ?? [],
+        },
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_pf_esi_report",
+        { company: args.company ?? lastPfEsi.company ?? null },
+        lastPfEsi.findings.length,
+        maskedCount(lastPfEsi.findings),
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
   register(
     "tb_depreciation_review",
     "Income Tax Act depreciation per block of assets for a year, against what the books charged, " +
