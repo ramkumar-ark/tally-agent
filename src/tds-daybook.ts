@@ -248,10 +248,6 @@ export function readDayBook(
   ): DayBookLedgerPair[] | null => {
     const v = envelope[key];
     if (!Array.isArray(v)) return null;
-    const normUpper = (v: unknown): string | null => {
-      const s = typeof v === "string" ? v.trim().toUpperCase() : "";
-      return s !== "" ? s : null;
-    };
     return v
       .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
       .map((x) => ({
@@ -261,8 +257,8 @@ export function readDayBook(
         // older bundles parse identically.
         ...(key === "ledgers"
           ? {
-              pan: normUpper(x.pan),
-              gstin: normUpper(x.gstin),
+              pan: normTaxId(x.pan),
+              gstin: normTaxId(x.gstin),
               address:
                 typeof x.address === "string" && x.address.trim() !== ""
                   ? x.address.trim()
@@ -324,6 +320,22 @@ export function readDayBookLedgerNames(text: string, company?: string): string[]
  * template generator needs groups + parents to compute the Exempt pre-fill.
  * Mirrors readDayBookLedgerNames' envelope checks; not a bundle ⇒ nulls.
  */
+/** 4d (2026-09-26): PAN/GSTIN arrive from Tally with un-decoded XML escapes
+ * ("AMCPK6481D&#13;&#10;" in a real export); strip literal entity runs and
+ * control characters, then trim/uppercase — or PAN_SHAPE rejects the value
+ * and the party's PAN cell renders blank. */
+export function normTaxId(v: unknown): string | null {
+  const s =
+    typeof v === "string"
+      ? v
+          .replace(/&#(?:\d+|x[0-9a-fA-F]+);/g, "")
+          .replace(/[\u0000-\u001F\u007F]/g, "")
+          .trim()
+          .toUpperCase()
+      : "";
+  return s !== "" ? s : null;
+}
+
 export function readDayBookMasterPairs(
   text: string,
   company?: string,
@@ -353,14 +365,8 @@ export function readDayBookMasterPairs(
         parent: String(x.parent ?? "").trim(),
         ...(key === "ledgers"
           ? {
-              pan:
-                typeof x.pan === "string" && x.pan.trim() !== ""
-                  ? x.pan.trim().toUpperCase()
-                  : null,
-              gstin:
-                typeof x.gstin === "string" && x.gstin.trim() !== ""
-                  ? x.gstin.trim().toUpperCase()
-                  : null,
+              pan: normTaxId(x.pan),
+              gstin: normTaxId(x.gstin),
               address:
                 typeof x.address === "string" && x.address.trim() !== ""
                   ? x.address.trim()

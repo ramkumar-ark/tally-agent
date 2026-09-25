@@ -458,6 +458,18 @@ describe("day-book reader carries pan/gstin/address/openingBalance additively", 
     ]);
   });
 
+  it("strips un-decoded XML escapes from pan/gstin (4d)", () => {
+    const env = readDayBookMasterPairs(
+      bundle([
+        { name: "Khicha Lender", parent: "Loans (Liability)", pan: "AMCPK6481D&#13;&#10;", gstin: "33AMCPK6481D1Z5&#10;" },
+      ]),
+      "RVS Constructions",
+    );
+    expect(env.ledgers).toEqual([
+      { name: "Khicha Lender", parent: "Loans (Liability)", pan: "AMCPK6481D", gstin: "33AMCPK6481D1Z5", address: null, openingBalance: null },
+    ]);
+  });
+
   it("an old bundle without the fields still loads", () => {
     const env = readDayBookMasterPairs(
       bundle([{ name: "Nirosha - Loan A/c", parent: "Unsecured Loans" }]),
