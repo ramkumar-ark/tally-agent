@@ -12,7 +12,6 @@ import { buildWorkbook } from "./xlsx.js";
 import {
   buildLoansTemplateWorkbook,
   loansTemplateFileName,
-  parseLoansTemplate,
 } from "./loans-file.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";

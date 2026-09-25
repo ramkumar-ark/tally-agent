@@ -26,7 +26,7 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the twenty-six approved tools", () => {
+  it("exposes exactly the twenty-seven approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",

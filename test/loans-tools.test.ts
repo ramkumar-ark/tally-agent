@@ -123,12 +123,32 @@ describe("check ordinals 19-26 are the loans checks and are stable", () => {
     for (const [check, ordinal] of expected) {
       expect((CHECK_ORDINAL as Record<string, number>)[check]).toBe(ordinal);
     }
-    // Landed tables untouched.
-    expect(CHECK_ORDINAL.pf_esi_due_date_not_working_day).toBe(14);
-    for (const [check, ordinal] of Object.entries(CHECK_ORDINAL)) {
-      if (check.startsWith("loans_")) continue;
-      expect((CHECK_ORDINAL as Record<string, number>)[check]).toBe(ordinal);
+    // Landed tables untouched: the trial-balance block 1-8 and the PF/ESI
+    // block 9-14, pinned verbatim (the pre-Task-8 renumber history compacted).
+    const landed: Array<[string, number]> = [
+      ["out_of_balance", 1],
+      ["suspense_balance", 2],
+      ["negative_cash", 3],
+      ["wrong_side_balance", 4],
+      ["overdrawn_bank", 5],
+      ["ledger_under_primary_group", 6],
+      ["dormant_balance", 7],
+      ["ledger_in_wrong_group", 8],
+      ["pf_esi_unclassified_contribution", 9],
+      ["pf_esi_late_deposit", 10],
+      ["pf_esi_challan_missing", 11],
+      ["pf_esi_challan_unmatched", 12],
+      ["pf_esi_amount_mismatch", 13],
+      ["pf_esi_due_date_not_working_day", 14],
+    ];
+    for (const [check, ordinal] of landed) {
+      expect(CHECK_ORDINAL[check as keyof typeof CHECK_ORDINAL]).toBe(ordinal);
     }
+    // Nothing else sits in CHECK_ORDINAL beyond these fourteen lands and the
+    // eight loans pins above (22 total): a newly inserted check — including
+    // the clause-44 lane's future 15-18 — must not mint ids silently; pinning
+    // the total forces this test to be revisited when CheckId grows.
+    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(22);
   });
 });
 
