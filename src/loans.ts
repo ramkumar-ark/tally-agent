@@ -5,6 +5,7 @@ import {
   DEFAULT_BANK_MODE,
   LOANS_LIMIT,
   NARRATION_MODE_HINTS,
+  S269ST_LIMIT,
   type NonAcMode,
   type ReceiptMode,
 } from "./loans-law.js";
@@ -198,6 +199,11 @@ export interface LoansOperator {
   defaultBankMode?: ReceiptMode;
   /** C2/Task 5: sheet-2 rows are operator-only; the books never invent figures. */
   specifiedSums?: LoansSheetRow[];
+  /**
+   * Task 5: sheet-7 rows (bearer cheque/DD character) are operator-only too;
+   * the books never invent one. Absent ⇒ no sheet-7 rows.
+   */
+  st26Declarations?: LoansSheetRow[];
 }
 
 /** Degrades a session wiring with no operator file (missing-file warn upstream). */
@@ -529,4 +535,188 @@ export function buildLoansRows(
   }
 
   return res;
+}
+
+/**
+ * Part 3 of the loans engine — the s.269ST register (sheets 6/7) and the
+ * `loans_269st_receipt` / `loans_269st_payment` findings.
+ *
+ * Candidate rule (voucher-level): a voucher carrying a cash-ancestry leg whose
+ * external counter amount (the magnitudes of non-cash non-bank entries on the
+ * OPPOSITE side — cash↔bank contra and cash↔cash transfers cancel to zero and
+ * are excluded) reaches the limit is a candidate. WHICH cash side is a receipt
+ * follows money flow, not the brief's rule-1 parenthetical, which contradicts
+ * the same brief's rule 6 (a cash loan ACCEPTANCE — the day-book voucher
+ * Dr Cash / Cr LoanLedger — "is also a 269ST receipt"): money coming in is a
+ * cash-ancestry DEBIT under positive = debit (R-MCP-5), so
+ *
+ *   cash-ancestry DEBIT (amount > 0) + external counter credited => Receipts
+ *   cash-ancestry CREDIT (amount < 0) + external counter debited => Payments
+ *
+ * Receipts => `loans_269st_receipt` CRITICAL (s.271DA exposure); payments =>
+ * `loans_269st_payment` WARNING (269ST penalises receipts only — reporting).
+ * The limit is "Rs 2,00,000 or more": >= S269ST_LIMIT, never the clause-31
+ * strict-> helper.
+ *
+ * Same-day same-party same-TYPE aggregation (rule 3): ALL voucher-level
+ * externals are summed per (canonical party, day, type) — including vouchers
+ * individually below the limit — and one row/finding fires for a group whose
+ * sum reaches the limit. A same-day pair of sub-limit vouchers therefore still
+ * reports, as one aggregated row citing the aggregate.
+ *
+ * Sheet 7 (bearer cheque/DD, C5) carries rows ONLY from operator declarations
+ * (`st26Declarations`, Task 5).
+ *
+ * `priorCashEvents` (optional 4th param; Task 6 wires it): the Task-3
+ * loanLedgerEvents output (or its cash subset). When a group's party+date
+ * matches a prior CASH-mode event of the matching direction (accepted =>
+ * Receipts / repaid => Payments), the finding detail carries a dedupe note —
+ * the event is also a 269ST receipt/payment and both scans run independently.
+ */
+export function scan269St(
+  vouchers: V[],
+  ctx: LoansBooksCtx,
+  operator: LoansOperator,
+  priorCashEvents?: LoanEvent[],
+): { sheet6: LoansSheetRow[]; sheet7: LoansSheetRow[]; findings: Finding[] } {
+  const findings: Finding[] = [];
+  let ordinal = 0;
+  const nextId = (check: CheckId): string => {
+    ordinal += 1;
+    return findingId(check, ordinal);
+  };
+  const finding = (
+    check: CheckId,
+    severity: Finding["severity"],
+    party: string,
+    amount: number,
+    detail: string,
+  ): Finding => ({
+    id: nextId(check),
+    check,
+    severity,
+    ledger: party,
+    group: "",
+    amount,
+    side: null,
+    expected: null,
+    detail,
+  });
+
+  interface Group {
+    party: string;
+    date: string;
+    type: "Receipts" | "Payments";
+    total: number;
+    voucherCount: number;
+    narration: string;
+  }
+  const groups = new Map<string, Group>();
+
+  for (const v of vouchers) {
+    if (!v || v.isCancelled) continue;
+    const entries = realEntries(v);
+    if (entries.length === 0) continue;
+    const date = String(v.date ?? "");
+    const narration = String(v.narration ?? "");
+
+    for (const dir of [
+      { cashSide: 1, type: "Receipts" as const },
+      { cashSide: -1, type: "Payments" as const },
+    ]) {
+      // The cash-ancestry leg must itself be on the candidate side.
+      const cashLegs = entries.filter(
+        (e) =>
+          ctx.isCashLedger(e.ledger) &&
+          (dir.cashSide === 1 ? e.amount > 0 : e.amount < 0),
+      );
+      if (cashLegs.length === 0) continue;
+
+      // External counter: real, non-cash, non-bank entries on the OPPOSITE
+      // side. Contra legs (cash/bank on the opposite side) contribute nothing
+      // and a voucher without any external counter yields 0 — excluded.
+      const externals = entries.filter(
+        (e) =>
+          !ctx.isCashLedger(e.ledger) &&
+          !ctx.isBankLedger(e.ledger) &&
+          (dir.cashSide === 1 ? e.amount < 0 : e.amount > 0),
+      );
+      const external = externals.reduce((s, e) => s + Math.abs(e.amount), 0);
+      if (externals.length === 0 || external <= 0) continue;
+
+      // Party = the external counter ledger (original case); the largest leg
+      // names the counter when a voucher has more than one.
+      const party = externals.reduce((a, b) =>
+        Math.abs(b.amount) > Math.abs(a.amount) ? b : a,
+      ).ledger;
+
+      const key = `${canonicalKey(party)}|${date}|${dir.type}`;
+      const group = groups.get(key) ?? {
+        party,
+        date,
+        type: dir.type,
+        total: 0,
+        voucherCount: 0,
+        narration: "",
+      };
+      group.total += external;
+      group.voucherCount += 1;
+      if (!group.narration && narration) group.narration = narration;
+      groups.set(key, group);
+    }
+  }
+
+  const cashByPartyDate = (
+    party: string,
+    date: string,
+    direction: "accepted" | "repaid",
+  ): boolean =>
+    (priorCashEvents ?? []).some(
+      (p) =>
+        p.mode === "cash" &&
+        p.direction === direction &&
+        canonicalKey(p.party) === canonicalKey(party) &&
+        String(p.date) === date,
+    );
+
+  const sheet6: LoansSheetRow[] = [];
+  for (const g of groups.values()) {
+    if (g.total < S269ST_LIMIT - ZERO) continue;
+
+    sheet6.push({
+      party: g.party,
+      amount: g.total,
+      type: g.type,
+      date: g.date,
+      ...(g.narration ? { nature: g.narration } : {}),
+    });
+
+    const isReceipt = g.type === "Receipts";
+    const dedupe = cashByPartyDate(g.party, g.date, isReceipt ? "accepted" : "repaid")
+      ? ` The same party and date appear as a cash loan event already reported under s.269SS/T; the two scans run independently and are not duplicate findings.`
+      : "";
+    const detail = isReceipt
+      ? `${g.voucherCount > 1 ? `Same-day aggregate of ${moneyCount(g.voucherCount)} cash receipts` : "Cash receipt"} of ${money(g.total)} from ${g.party} on ${displayDate(g.date)} reaches s.269ST ("Rs 2,00,000 or more" in respect of a loan); receiving it otherwise than through an account-payee cheque/DD/electronic channel is penalised s.271DA.${dedupe}`
+      : `${g.voucherCount > 1 ? `Same-day aggregate of ${moneyCount(g.voucherCount)} cash payments` : "Cash payment"} of ${money(g.total)} to ${g.party} on ${displayDate(g.date)} crosses the s.269ST register threshold; s.269ST (penalty s.271DA) reaches receipts, so this row is reporting-only with no receipt-penalty exposure.${dedupe}`;
+
+    findings.push(
+      finding(
+        isReceipt ? "loans_269st_receipt" : "loans_269st_payment",
+        isReceipt ? "critical" : "warning",
+        g.party,
+        g.total,
+        detail,
+      ),
+    );
+  }
+
+  const byAmount = (a: LoansSheetRow, b: LoansSheetRow) =>
+    b.amount - a.amount || (a.party < b.party ? -1 : a.party > b.party ? 1 : 0);
+  sheet6.sort(byAmount);
+
+  return {
+    sheet6,
+    sheet7: [...(operator.st26Declarations ?? [])],
+    findings,
+  };
 }
