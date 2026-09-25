@@ -18,6 +18,7 @@ import { DEFAULT_BLOCK_LISTS } from "./dep3cd-law.js";
 import { parseRateFromGroup } from "./depreciation.js";
 import { readXlsm } from "./xlsm.js";
 import { readListValues } from "./winman3cd.js";
+import { buildNotdsTemplate, notdsTemplateFileName } from "./notds-template.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
 import { buildGst44Template, gst44TemplateFileName } from "./gst44-template.js";
@@ -1065,6 +1066,99 @@ let lastGst44: Gst44ReviewResult | undefined;
   );
 
   register(
+    "tb_write_notds_template",
+    "Generate the fillable Excel No-TDS operator template (notds-operator-template-<company>-<date>.xlsx) " +
+      "out of a cached tb_tds_review's clause 21(b) candidate rows, into the report directory, and return its " +
+      "PATH. Fill the Include / Residency / NR Section / Nature / PAN columns in Excel - one row per candidate, " +
+      "manual rows on the Manual Rows sheet - then pass its PATH to tb_notds_review as templatePath; never " +
+      "paste its rows into chat. Requires tb_tds_review to have run first.",
+    {
+      company: z.string().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+    },
+    async (args) => {
+      // The template seed is the cached TDS review's books candidates, not a
+      // live call: the template restates what the cached review saw.
+      const candidates = session.notdsCandidates();
+      if (!candidates) {
+        throw new Error("run tb_tds_review first: it caches the books the clause 21(b) template seeds from");
+      }
+      const outDir = args.outDir ?? cfg.reportDir;
+      const outPath = join(
+        outDir,
+        notdsTemplateFileName(
+          args.company,
+          new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+        ),
+      );
+      await writeFile(outPath, buildNotdsTemplate({
+        company: args.company,
+        candidates,
+        generatedOn: new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+      }));
+      await audit("tb_write_notds_template", { company: args.company, outDir }, candidates.length, 0);
+      return JSON.stringify({ templatePath: outPath }, null, 2);
+    },
+  );
+
+  register(
+    "tb_notds_review",
+    "Clause 21(b) (No TDS Disallowance) review: merge the clause 21(b) candidates of the last tb_tds_review " +
+      "with the operator's decisions workbook (Pass the PATH of the filled notds-operator-template-*.xlsx as " +
+      "templatePath; never paste its rows into chat). Include=N rows vanish with their cure reason restated; " +
+      "an NR mark routes a row to the non-resident sheet under the operator's NR section spelling. Names appear " +
+      "as pseudonyms; no PAN anywhere. Run tb_write_3cd_notds afterwards to fill the Winman sheets.",
+    {
+      templatePath: z.string().optional().describe("Path to the filled notds-operator-template-*.xlsx; read inside the gateway"),
+    },
+    async (args) => {
+      const result = await session.noTdsReview({
+        ...args,
+      });
+      await audit(
+        "tb_notds_review",
+        {
+          company: result.company ?? null,
+          fromDate: result.fromDate,
+          toDate: result.toDate,
+          ...(args.templatePath ? { templatePath: args.templatePath } : {}),
+        },
+        result.findings.length,
+        maskedCountNotds(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_3cd_notds",
+    "Write the clause 21(b) rows of the last tb_notds_review into the four No-TDS sheets of a COPY of the " +
+      "operator's `No TDS Disallowance.xlsm` and return the copy's path and per-sheet row counts. The copy is " +
+      "written to the report directory (or outPath) as '<source stem> - filled - <date>.xlsm'; the source " +
+      "workbook is never modified. Compose nothing by hand: the sheets carry the payment facts from the review.",
+    {
+      sourcePath: z.string().describe("Path to the operator's Winman `No TDS Disallowance.xlsm`; read only, never written"),
+      outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+    },
+    async (args) => {
+      const written = await session.write3cdNoTds({
+        sourcePath: args.sourcePath,
+        outPath: args.outPath ?? cfg.reportDir,
+      });
+      await audit(
+        "tb_write_3cd_notds",
+        { sourcePath: args.sourcePath, outPath: args.outPath ?? null },
+        Object.values(written.rowsBySheet).reduce((a, b) => a + b, 0),
+        0,
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(written, null, 2);
+    },
+  );
+
+  register(
     "tb_write_pf_esi_report",
     "Write the PF/ESI clause 20(b) review workbook to disk: a Findings sheet and the Clause 20(b) " +
       "working paper (fund, wage month, amount collected, due date, amount paid, paid on, delay, " +
@@ -1658,6 +1752,9 @@ function maskedCountAs26(findings: Array<{ party: string }>): number {
   return findings.filter((f) => /^(\w+) \d+$/.test(f.party)).length;
 }
 
+function maskedCountNotds(findings: Array<{ party: string }>): number {
+  return findings.filter((f) => f.party !== "" && /^(\w+) \d+$/.test(f.party)).length;
+}
 /** Kept separate so the tool handler stays synchronous to read. */
 async function sessionCompanies(session: Session): Promise<string[]> {
   return session.listCompanies();

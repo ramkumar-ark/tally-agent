@@ -26,7 +26,7 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the thirty-three approved tools", () => {
+  it("exposes exactly the forty approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",
@@ -40,6 +40,7 @@ describe("tool surface", () => {
       "tb_ledger_scrutiny",
       "tb_list_companies",
       "tb_loans_review",
+      "tb_notds_review",
       "tb_pf_esi_review",
       "tb_review",
       "tb_tds_review",
@@ -48,6 +49,7 @@ describe("tool surface", () => {
       "tb_write_3cd_depreciation",
       "tb_write_3cd_gst44",
       "tb_write_3cd_loans",
+      "tb_write_3cd_notds",
       "tb_write_3cd_pf_esi",
       "tb_write_3cd_tds_tcs",
       "tb_write_dep3cd_report",
@@ -61,6 +63,7 @@ describe("tool surface", () => {
       "tb_write_ledger_report",
       "tb_write_loans_report",
       "tb_write_loans_template",
+      "tb_write_notds_template",
       "tb_write_pf_esi_report",
       "tb_write_pf_esi_template",
       "tb_write_report",
