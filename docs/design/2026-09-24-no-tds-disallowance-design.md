@@ -174,13 +174,48 @@ To be completed by the implementing run, against the live company, in the
 shape of the PF/ESI design doc's §10 (and §18.1 of the depreciation
 verification design before it).
 
-The round trip is verified mechanically as far as V3 — V1 structural (every
-non-target package entry byte-identical), V2 Excel opens the workbook clean,
-and V3 Winman's own `ValidateMandatoryFields` gate passes — by
-`scripts/verify-winman-roundtrip.mjs` (`--notds` mode) and the vitest suites.
+### 10.1 What the implementing run found
+
+**V2 verified against the real workbook; V3 unverifiable from COM (2026-09-25).**
+`scripts/verify-winman-roundtrip.mjs --notds` was run against the real
+`No TDS Disallowance.xlsm` (18 sheets, AY 2025-2026) — the source was read
+only; a scratch copy was filled, one invented sample row into each of the
+four sheets at the engine-predicted positions (first data rows 7/7/7/8), and
+Excel 16.0 for Windows opened the **filled copy** with no repair prompt:
+
+```
+wrote 1 sample row into "40(a)(ia) to resident" (first data row 7, prototype 6)
+wrote 1 sample row into "40(a)(i) to non-resident" (first data row 7, prototype 6)
+wrote 1 sample row into "40(a)(ib) - Equalisation Levy" (first data row 7, prototype 6)
+wrote 1 sample row into "40(a)(iii)" (first data row 8, prototype 7)
+PASS  V2 sheet count >= 5 (four data sheets + INTER + extras)
+PASS  <each sheet>: V3 visible after WorkBook_UnhideSheets
+WARN  <each sheet>: V3 ValidateMandatoryFields  (macro not runnable — Cannot run the macro ...)
+PASS  <each sheet>: V2/V3 lastRow == prototype + rows (7/7/7/8)
+ROUNDTRIP_OK V2 (V3 unverifiable — validation macro not runnable from COM; V4 import click is the captain boundary)
+```
+
+`WorkBook_UnhideSheets` runs fine, but `Application.Run('ValidateMandatoryFields', …)`
+fails with "macro may not be available in this workbook or all macros may be
+disabled" against this workbook — while the same call works on the PF/ESI
+one. Its VBA project is locked for viewing (`Protection = 1`), so the real
+procedure name cannot be enumerated from here; `ValidateMandatoryFields` was
+transcribed from the PF/ESI workbook and may simply be spelled or placed
+differently here. The script treats that specifically as a **WARN**: V2 and
+the structural suites still stand, the per-sheet WARN is printed, and the
+final verdict names V3 unverified rather than silently passing or failing.
+
+**Synthetic-fixture ceiling:** `makeNotdsFixture()` fills all four sheets
+correctly (the V1 evidence lives in `test/notds-write.test.ts`), but real
+Excel cannot open the fixture package — its placeholder `vbaProject.bin`
+bytes are not a real VBA project. The synthetic workbook is therefore
+V1-structural evidence only; Excel-open checks need the real workbook, and
+they were run against a copy under `/tmp` (the operator's file itself was
+never written to).
+
 **V4 — the Winman import click — is captain-operated and pending** exactly as
-with PF/ESI: the operator opens the filled workbook from disk, clicks Copy on a
-clause 21(b) sheet and pastes into Winman, then confirms the rows land. Until
-that happens the round trip is verified only as far as V1–V3 — a real but
+with PF/ESI: the operator opens the filled workbook from disk, clicks Copy on
+a clause 21(b) sheet and pastes into Winman, then confirms the rows land. Until
+that happens the round trip is verified only as far as V1–V2 — a real but
 incomplete guarantee. Record the observed result (date, workbook, sheet, rows
 landed, any Winman validation message) here once V4 runs.
