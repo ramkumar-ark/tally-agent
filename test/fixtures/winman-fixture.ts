@@ -72,6 +72,137 @@ export function makeWinmanFixture(opts: { esiSheet?: boolean } = {}): Buffer {
   return zipOf([...parts.map(([n, b]) => [n, b, 8] as const), ...bins]);
 }
 
+/**
+ * A synthetic Winman Loans & Deposits workbook: the same self-describing shape
+ * as `makeWinmanFixture`, with the three clause-31 data sheets (Sec.269SS
+ * Loans & Deposits, Sec.269T Repayments Others, Sec.269ST_others), the hidden
+ * INTER handshake (AY 2026-2027, validation on) and one hidden machinery
+ * sheet. Every name, PAN-shaped string and amount is invented.
+ */
+const LOANS_SS = [
+  /* 0 */ "269SS/269T_LoansAc/RpinCash",
+  /* 1 */ "Sec.269SS Loans & Deposits",
+  /* 2 */ "8",
+  /* 3 */ "4.07.70.30.*.00",
+  /* 4 */ "NAME",
+  /* 5 */ "PANORAADHAAR",
+  /* 6 */ "AMOUNT",
+  /* 7 */ "SQUAREDUP",
+  /* 8 */ "MAXAMOUNT",
+  /* 9 */ "RECEIPT",
+  /* 10 */ "RECIEPTNONAC",
+  /* 11 */ "ADDRESS",
+  /* 12 */ "Loans and deposits received",
+  /* 13 */ "269SS",
+  /* 14 */ "-",
+  /* 15 */ "Party Alpha",
+  /* 16 */ "ABCDE1234F",
+  /* 17 */ "12 Synthetic Street",
+  /* 18 */ "Sec.269T Repayments Others",
+  /* 19 */ "4.07.80.50.*.00",
+  /* 20 */ "Repayments of loans and deposits",
+  /* 21 */ "269T",
+  /* 22 */ "34 Invented Road",
+  /* 23 */ "Sec.269ST_others",
+  /* 24 */ "4.07.90.10.*.00",
+  /* 25 */ "TYPEOFTRANSACTION",
+  /* 26 */ "DATE",
+  /* 27 */ "NATUREOFTRANSACTION",
+  /* 28 */ "Receipts in cash",
+  /* 29 */ "269ST",
+  /* 30 */ "Other receipts",
+  /* 31 */ "CASH",
+  /* 32 */ "01-Apr-2025",
+  /* 33 */ "Loan received",
+  /* 34 */ "$WiNsArAlXlImPoRt2$",
+  /* 35 */ "9.6.1",
+  /* 36 */ "1623",
+  /* 37 */ "2026-2027",
+  /* 38 */ "F",
+  /* 39 */ "internal machinery - do not edit",
+  /* 40 */ "junk cell",
+  /* 41 */ "Party Beta",
+  /* 42 */ "FGHIJ2345K",
+  /* 43 */ "9",
+];
+
+const loansRow1 = (formId: number, sheetKey: number, firstDataRow: number, fieldPath: number) =>
+  `<row r="1" hidden="1"><c r="A1" s="78" t="s"><v>${formId}</v></c><c r="B1" s="78" t="s"><v>${sheetKey}</v></c><c r="C1" s="82" t="s"><v>${firstDataRow}</v></c><c r="D1" s="82" t="s"><v>${fieldPath}</v></c></row>`;
+
+const loansPrototype = (row: number, lastCol: string) => {
+  const styles = ["88", "88", "89", "89", "90", "93", "90", "93"];
+  const cols = ["A", "B", "C", "D", "E", "F", "G", "H"];
+  const n = cols.indexOf(lastCol) + 1;
+  return `<row r="${row}" hidden="1">${cols.slice(0, n).map((c, i) => `<c r="${c}${row}" s="${styles[i]}" t="s"><v>14</v></c>`).join("")}</row>`;
+};
+
+const LOANS_269SS_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:H9"/><sheetData>
+${loansRow1(0, 1, 2, 3)}
+<row r="2" hidden="1"><c r="A2" s="78" t="s"><v>4</v></c><c r="B2" s="78" t="s"><v>5</v></c><c r="C2" s="82" t="s"><v>6</v></c><c r="D2" s="82" t="s"><v>7</v></c><c r="E2" s="82" t="s"><v>8</v></c><c r="F2" s="82" t="s"><v>9</v></c><c r="G2" s="82" t="s"><v>10</v></c><c r="H2" s="82" t="s"><v>11</v></c></row>
+<row r="4"><c r="A4" s="87" t="s"><v>12</v></c></row>
+<row r="5"><c r="A5" s="81" t="s"><v>13</v></c></row>
+${loansPrototype(7, "H")}
+<row r="8"><c r="A8" t="s"><v>15</v></c><c r="B8" t="s"><v>16</v></c><c r="C8"><v>12345.67</v></c><c r="H8" t="s"><v>17</v></c></row>
+<row r="9"><c r="A9" t="s"><v>41</v></c><c r="B9" t="s"><v>42</v></c><c r="C9"><v>5432.10</v></c><c r="H9" t="s"><v>22</v></c></row>
+</sheetData></worksheet>`;
+
+const LOANS_269T_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G9"/><sheetData>
+${loansRow1(0, 18, 2, 19)}
+<row r="2" hidden="1"><c r="A2" s="78" t="s"><v>4</v></c><c r="B2" s="78" t="s"><v>5</v></c><c r="C2" s="82" t="s"><v>6</v></c><c r="G2" s="82" t="s"><v>11</v></c></row>
+<row r="4"><c r="A4" s="87" t="s"><v>20</v></c></row>
+<row r="5"><c r="A5" s="81" t="s"><v>21</v></c></row>
+${loansPrototype(7, "G")}
+<row r="8"><c r="A8" t="s"><v>41</v></c><c r="B8" t="s"><v>42</v></c><c r="C8"><v>5432.10</v></c><c r="G8" t="s"><v>22</v></c></row>
+<row r="9"><c r="A9" t="s"><v>15</v></c><c r="B9" t="s"><v>16</v></c><c r="C9"><v>12345.67</v></c><c r="G9" t="s"><v>17</v></c></row>
+</sheetData></worksheet>`;
+
+const LOANS_269ST_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G10"/><sheetData>
+${loansRow1(0, 23, 43, 24)}
+<row r="2" hidden="1"><c r="A2" s="78" t="s"><v>4</v></c><c r="B2" s="78" t="s"><v>5</v></c><c r="C2" s="82" t="s"><v>6</v></c><c r="D2" s="82" t="s"><v>25</v></c><c r="E2" s="82" t="s"><v>26</v></c><c r="F2" s="82" t="s"><v>27</v></c><c r="G2" s="82" t="s"><v>11</v></c></row>
+<row r="4"><c r="A4" s="87" t="s"><v>28</v></c></row>
+<row r="5"><c r="A5" s="81" t="s"><v>29</v></c></row>
+<row r="7"><c r="A7" s="87" t="s"><v>30</v></c></row>
+${loansPrototype(8, "G")}
+<row r="9"><c r="A9" t="s"><v>15</v></c><c r="B9" t="s"><v>16</v></c><c r="C9"><v>12345.67</v></c><c r="D9" t="s"><v>31</v></c><c r="E9" t="s"><v>32</v></c><c r="F9" t="s"><v>33</v></c><c r="G9" t="s"><v>17</v></c></row>
+<row r="10"><c r="A10" t="s"><v>41</v></c><c r="B10" t="s"><v>42</v></c><c r="C10"><v>5432.10</v></c><c r="D10" t="s"><v>31</v></c><c r="E10" t="s"><v>32</v></c><c r="F10" t="s"><v>33</v></c><c r="G10" t="s"><v>22</v></c></row>
+</sheetData></worksheet>`;
+
+const LOANS_INTER_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G1"/><sheetData>
+<row r="1"><c r="A1" t="s"><v>34</v></c><c r="B1" t="s"><v>35</v></c><c r="C1" t="s"><v>36</v></c><c r="D1" t="s"><v>37</v></c><c r="E1" t="s"><v>38</v></c><c r="G1"><v>1</v></c></row>
+</sheetData></worksheet>`;
+
+const LOANS_JUNK_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B1"/><sheetData>
+<row r="1"><c r="A1" t="s"><v>39</v></c><c r="B1" t="s"><v>40</v></c></row>
+</sheetData></worksheet>`;
+
+export function makeLoansWinmanFixture(): Buffer {
+  const parts = [
+    part("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>`),
+    part("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
+    // sheetId deliberately disagrees with the part number, as in makeWinmanFixture.
+    part("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sec.269SS Loans &amp; Deposits" sheetId="2" state="hidden" r:id="rId1"/><sheet name="Sec.269T Repayments Others" sheetId="3" state="hidden" r:id="rId2"/><sheet name="Sec.269ST_others" sheetId="4" state="hidden" r:id="rId3"/><sheet name="INTER" sheetId="9" state="hidden" r:id="rId4"/><sheet name="WinmanSys" sheetId="10" state="hidden" r:id="rId5"/></sheets></workbook>`),
+    part("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/></Relationships>`),
+    part("xl/worksheets/sheet1.xml", LOANS_269SS_SHEET),
+    part("xl/worksheets/sheet2.xml", LOANS_269T_SHEET),
+    part("xl/worksheets/sheet3.xml", LOANS_269ST_SHEET),
+    part("xl/worksheets/sheet4.xml", LOANS_INTER_SHEET),
+    part("xl/worksheets/sheet5.xml", LOANS_JUNK_SHEET),
+    part("xl/styles.xml", STYLES),
+    part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${LOANS_SS.length}" uniqueCount="${LOANS_SS.length}">${LOANS_SS.map((s) => `<si><t>${s.replace(/&/g, "&amp;")}</t></si>`).join("")}</sst>`),
+  ];
+  const bins: Array<readonly [string, Buffer, 0 | 8]> = [
+    ["xl/media/image1.jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]), 0],
+    ["xl/vbaProject.bin", Buffer.from("MACRO\u0000\u0001BYTES", "binary"), 8],
+    ["xl/vbaProjectSignature.bin", Buffer.from("SIG\u0000\u00ff", "binary"), 8],
+  ];
+  return zipOf([...parts.map(([n, b]) => [n, b, 8] as const), ...bins]);
+}
+
 function zipOf(files: ReadonlyArray<readonly [string, Buffer, 0 | 8]>): Buffer {
   const locals: Buffer[] = []; const central: Buffer[] = []; let off = 0;
   for (const [name, raw, method] of files) {
