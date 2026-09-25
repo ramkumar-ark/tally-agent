@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { buildTemplateWorkbook, templateFileName } from "./tds-template.js";
 import { buildPfEsiTemplate, pfEsiTemplateFileName } from "./pf-esi-template.js";
+import { buildWorkbook } from "./xlsx.js";
+import {
+  buildLoansTemplateWorkbook,
+  loansTemplateFileName,
+  parseLoansTemplate,
+} from "./loans-file.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
@@ -44,6 +50,7 @@ import {
   type Session,
   type TdsReviewResult,
 } from "./review.js";
+import type { LoansReviewResult } from "./loans.js";
 import { loadDayBookText, readDayBook, readDayBookLedgerNames, type DayBookInput } from "./tds-daybook.js";
 
 export type ToolRegistrar = (
@@ -117,6 +124,7 @@ export function registerTools(
   let lastDep: DepReviewResult | undefined;
   let lastFa: FaReviewResult | undefined;
   let lastPfEsi: PfEsiReviewResult | undefined;
+  let lastLoans: LoansReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -803,6 +811,187 @@ export function registerTools(
       return JSON.stringify(paths, null, 2);
     },
   );
+
+  register(
+    "tb_write_loans_template",
+    "Generate the fillable Excel loans operator template (loans-operator-template-<company>-<date>.xlsx) " +
+      "for Form 3CD clause 31 (l.269SS/l.269T) and l.269ST into the report directory and return its path. " +
+      "It pre-fills the Parties sheet with the ledger list (from the day-book export when dayBookPath is " +
+      "given, else live Tally masters) and back-fills the ledger dropdowns from its hidden Ledgers sheet. " +
+      "Fill Parties, Specified Sums and 269ST in Excel, then pass its path to tb_loans_review as " +
+      "templatePath - never paste its rows into chat.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+      dayBookPath: z.string().optional()
+        .describe(
+          "Optional PATH to an operator day-book JSON export; when given its ledger list fills the " +
+            "template's Parties/Ledgers sheet instead of live Tally masters.",
+        ),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+    },
+    async (args) => {
+      let ledgerList: string[] = [];
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        ledgerList = readDayBookLedgerNames(text, args.company ?? cfg.defaultCompany);
+      }
+      // Degrade honestly: a template without a list is still useful (the
+      // operator types party names by hand); the warning says so.
+      if (ledgerList.length === 0) {
+        ledgerList = await session.ledgerNames(args.company ?? cfg.defaultCompany);
+      }
+      if (ledgerList.length === 0) {
+        console.error(
+          "tally-agent: no ledger names available (no day-book list and live masters unavailable) — " +
+            "writing the loans template with an empty party list",
+        );
+      }
+      const outDir = args.outDir ?? cfg.reportDir;
+      const outPath = join(
+        outDir,
+        loansTemplateFileName(args.company, new Date().toISOString().slice(0, 10).replace(/-/g, "")),
+      );
+      const { sheets } = buildLoansTemplateWorkbook(ledgerList.map((n) => ({ name: n })), {});
+      await writeFile(outPath, buildWorkbook(sheets));
+      await audit(
+        "tb_write_loans_template",
+        {
+          company: args.company,
+          outDir,
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+        },
+        ledgerList.length,
+        0,
+      );
+      return JSON.stringify({ templatePath: outPath, ledgers: ledgerList.length }, null, 2);
+    },
+  );
+
+  register(
+    "tb_loans_review",
+    "Winman Form 3CD clause 31 (l.269SS/l.269T) and l.269ST loans review: cash acceptances and cash " +
+      "repayments breaching the Rs 20,000 mode limits (ss.269SS/269T; penalty exposure ss.271D/271E), " +
+      "movements whose mode cannot be read from the books, same-day splitting under the thresholds, the " +
+      "s.269ST register of Rs 2,00,000-or-more cash receipts (penalty s.271DA) and payments (reporting), " +
+      "and estimate honesty flags when the day-book carries no masters. Parties appear as pseudonyms such " +
+      "as 'Ledger 2'. Optionally pass the PATH of the filled loans operator template from " +
+      "tb_write_loans_template as templatePath (its mode overrides, PANs/Aadhaars and 269ST declarations " +
+      "are read inside the gateway, never pasted into chat). The books come from ONE channel: live Tally " +
+      "(default) or an operator day-book export by dayBookPath - not both. Run tb_write_3cd_loans " +
+      "afterwards to write the Winman sheets.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      dayBookPath: z
+        .string()
+        .optional()
+        .describe(
+          "PATH to an operator day-book JSON export for the whole period. When given, the books are read " +
+            "from that file INSTEAD OF from Tally. Pass the path - never paste the file's rows into chat.",
+        ),
+      templatePath: z.string().optional()
+        .describe("Path to the filled loans-operator-template-*.xlsx; read inside the gateway, only the path is audited"),
+      overridesPath: z.string().optional()
+        .describe("Optional PATH to an overrides JSON; kept for interface parity, warns when no loans key applies"),
+      live: z
+        .boolean()
+        .optional()
+        .describe(
+          "Explicitly request the live Tally fetch. Give dayBookPath OR live: true, never both - the books " +
+            "come from one channel. When neither is given the books come from live Tally.",
+        ),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      // Day book vs live are mutually exclusive by contract (Task 8 owns it at
+      // the tool layer; the session honours whichever the paths say): an
+      // explicit live fetch alongside a day-book path is a refused run, never
+      // a silent winner.
+      if (args.dayBookPath && args.live) {
+        throw new Error(
+          "give dayBookPath (operator day-book export) or live: true, not both - the books come from one channel",
+        );
+      }
+      let dayBookDigest: string | undefined;
+      if (args.dayBookPath) {
+        // Path-only channel: validate the file (size ceiling, period coverage,
+        // company match) inside the gateway and record its digest, exactly as
+        // the other review tools do. Session.loansReview re-reads the path.
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        readDayBook(text, {
+          company: args.company ?? cfg.defaultCompany,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        });
+        dayBookDigest = createHash("sha256").update(text).digest("hex");
+      }
+      const result = await session.loansReview({
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        dayBookPath: args.dayBookPath,
+        templatePath: args.templatePath,
+        overridesPath: args.overridesPath,
+      });
+      lastLoans = result;
+      // The files' PATHS are audited, never their contents (the M2 contract).
+      await audit(
+        "tb_loans_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+          ...(args.templatePath ? { templatePath: args.templatePath } : {}),
+          ...(args.overridesPath ? { overridesPath: args.overridesPath } : {}),
+          ...(args.live ? { live: true } : {}),
+          ...(dayBookDigest ? { dayBookDigest } : {}),
+        },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_3cd_loans",
+    "Write the clause 31 and 269ST rows of the last tb_loans_review into the Sec.269SS/269T/269ST sheets " +
+      "of a COPY of the operator's Winman 3CD loans workbook and return the copy's path. The copy is written " +
+      "to the report directory (or outPath) as '<source stem> - filled - <date>.xlsm'; the source workbook is " +
+      "never modified. Compose nothing by hand: the sheets carry the review's names, amounts and dates.",
+    {
+      sourcePath: z.string().describe("Path to the operator's Winman loans workbook (.xlsm); read only, never written"),
+      outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+    },
+    async (args) => {
+      const { written } = await session.write3cdLoans({
+        sourcePath: args.sourcePath,
+        outPath: args.outPath ?? cfg.reportDir,
+      });
+      await audit("tb_write_3cd_loans", { sourcePath: args.sourcePath, outPath: args.outPath ?? null }, 0, 0);
+      return JSON.stringify({ outPath: written }, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_loans_report",
+    "Write the clause 31 / 269ST loans review report workbook to disk from the last tb_loans_review. " +
+      "Real names are restored on write; compose nothing by hand - it is generated from the cached review.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+    },
+    async (args) => {
+      if (!session.loansRows()) {
+        throw new Error("run tb_loans_review first: there are no clause-31/269ST rows to write");
+      }
+      // Placeholder: the report workbook itself (writeLoansReport in
+      // src/report.ts) lands in Task 9, which replaces this throw.
+      throw new Error("the loans report workbook lands in Task 9");
+    },
+  );
+
   register(
     "tb_depreciation_review",
     "Income Tax Act depreciation per block of assets for a year, against what the books charged, " +

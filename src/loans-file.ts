@@ -469,3 +469,9 @@ export const EMPTY_LOANS_TEMPLATE: LoansTemplateParsed = {
   specifiedSums: [],
   st26Declarations: [],
 };
+
+/** The file name the generator tool writes; blank company means "all". */
+export function loansTemplateFileName(company: string | undefined, date: string): string {
+  const name = (company ?? "all").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return `loans-operator-template-${name}-${date}.xlsx`;
+}
