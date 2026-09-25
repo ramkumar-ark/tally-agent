@@ -14,7 +14,15 @@ export type CheckId =
   | "pf_esi_challan_missing"
   | "pf_esi_challan_unmatched"
   | "pf_esi_amount_mismatch"
-  | "pf_esi_due_date_not_working_day";
+  | "pf_esi_due_date_not_working_day"
+  | "loans_cash_acceptance"
+  | "loans_cash_repayment"
+  | "loans_mode_unknown"
+  | "loans_269st_receipt"
+  | "loans_269st_payment"
+  | "loans_splitting_suspect"
+  | "loans_max_amount_estimated"
+  | "loans_party_unmastered";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const CHECK_ORDINAL: Record<CheckId, number> = {
@@ -32,6 +40,16 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   pf_esi_challan_unmatched: 12,
   pf_esi_amount_mismatch: 13,
   pf_esi_due_date_not_working_day: 14,
+  // Loans clause-31/269S checks (captain ruling: ordinals 15-18 belong to the
+  // concurrent clause-44 lane; loans occupy 19-26). Never renumber.
+  loans_cash_acceptance: 19,
+  loans_cash_repayment: 20,
+  loans_mode_unknown: 21,
+  loans_269st_receipt: 22,
+  loans_269st_payment: 23,
+  loans_splitting_suspect: 24,
+  loans_max_amount_estimated: 25,
+  loans_party_unmastered: 26,
 };
 
 export type GstCheckId =
