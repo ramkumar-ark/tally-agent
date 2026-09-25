@@ -529,8 +529,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   boundary) so they match Finance/Financial; a whole-token guard never would.
 - Two identity/openings channels are additive next to `{name,parent}` in day-book
   bundles: ledgers may carry `pan`/`gstin`/`address` (PAN/gstin uppercased,
-  address keep-case) and `openingBalance` (raw tally sign, flipped ONCE at the
-  boundary into `buildLoansRows`' `openings` map as outstanding, positive=owed).
+  address keep-case) and `openingBalance` — **the bundle value rides the RAW
+  Tally master sign (credit positive = loan outstanding); it is NOT already
+  gateway-flipped, so the bundle path sets `openings` with the raw value and
+  callers must not negate it again**, while the live trial-balance path keeps
+  `-row.balance` (TbRows are gateway-flipped positive=debit, one more negation
+  to outstanding). Double-negating the bundle value costs exactly 2× opening in
+  MAXAMOUNT (009 fix, 2026-09-26, commit 724d366).
   Precedence: template PAN/address > master PAN/GSTIN-derived > master address;
   `maskRow` stays the single vaulting point. Openings never enter the 269SS/T
   crossing test (MAXAMOUNT only). The `loans_max_amount_estimated` gate is
