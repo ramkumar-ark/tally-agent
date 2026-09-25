@@ -2113,8 +2113,14 @@ export function createSession(
     // DIFFERENT loan party than its own, and maskKnownNames only substitutes
     // names vaulted so far, so vaulting inside maskRow would let a later
     // party's real name leak through an already-swept string.
+    // Parties with NO movements too: the quoted ledger can own no vouchers
+    // whatsoever, but it is still a loan ledger in the masters — vault every
+    // loan-ledger master the ctx can identify.
     for (const real of loanPartyReal.values()) {
       vault.pseudonym(real, "other" satisfies GroupRole);
+    }
+    for (const m of masterPairs) {
+      if (ctx.isLoanLedger(m.name)) vault.pseudonym(m.name, "other" satisfies GroupRole);
     }
 
     // Order matters: PSEUDONYM FIRST (party names quoted whole in details),

@@ -304,15 +304,18 @@ describe("Session.loansReview — narrations on the day-book path", () => {
 });
 
 describe("Session.loansReview — narration quoting a different loan party", () => {
-  // maskLoans pre-vaults EVERY loan party before any sweep (pfEsi pattern);
-  // without it, a row built before another party was vaulted would leak that
-  // party's real name through its narration. Neither party gets a finding
-  // here (mode overrides keep every row an a/c-payee row).
+  // maskRow pre-vaults EVERY loan party before any sweep (pfEsi pattern).
+  // The leak surfaces on a sheet-6 row's `nature`, the only masked field that
+  // carries narration text: each narrating voucher is a ≥ 2,00,000 cash
+  // receipt (a loans_269st_receipt candidate whose row keeps the narration),
+  // while the QUOTED party owns no movements at all — so without the
+  // pre-vault loop the row's own party is vaulted but the quoted party's
+  // real name rides straight into the masked result.
   const PARTIES = ["Trust A", "Trust B", "Trust C"];
-  const narrationParties: { name: string; parent: string }[] = [
+  const quotedButSilent: { name: string; parent: string }[] = [
     ...PARTIES.map((n) => ({ name: n, parent: "Loans (Liability)" })),
+    { name: "Axle Client", parent: "Sundry Debtors" },
     { name: "Cash", parent: "Cash-in-Hand" },
-    { name: "Axis Bank", parent: "Bank Accounts" },
   ];
 
   async function crossNamingBundle(): Promise<string> {
@@ -322,19 +325,19 @@ describe("Session.loansReview — narration quoting a different loan party", () 
       tallyAgentExport: true,
       company: "Sample Co",
       groups: GROUPS,
-      ledgers: narrationParties,
+      ledgers: quotedButSilent,
       vouchers: [
-        // Voucher 1: Trust B's narration quotes Trust C and Trust A.
         {
           date: "2025-08-15", voucherType: "Journal", voucherNumber: "J-1",
           narration: "loan visible to Trust A settled like Trust C",
-          entries: [{ LEDGERNAME: "Cash", AMOUNT: -25000 }, { LEDGERNAME: "Trust B", AMOUNT: 25000 }],
+          entries: [{ LEDGERNAME: "Cash", AMOUNT: -205000 }, { LEDGERNAME: "Axle Client", AMOUNT: 205000 }],
         },
-        // Voucher 2: Trust C itself, other order — vault-order independence.
+        // Voucher 2: quote Trust A too but in the opposite order, and pull a
+        // bank counter in, so the class differs from voucher 1.
         {
           date: "2025-09-15", voucherType: "Journal", voucherNumber: "J-2",
           narration: "loan visible to Trust B",
-          entries: [{ LEDGERNAME: "Cash", AMOUNT: -25000 }, { LEDGERNAME: "Trust C", AMOUNT: 25000 }],
+          entries: [{ LEDGERNAME: "Cash", AMOUNT: -205000 }, { LEDGERNAME: "Axle Client", AMOUNT: 205000 }],
         },
       ],
     }), "utf8");
@@ -347,6 +350,10 @@ describe("Session.loansReview — narration quoting a different loan party", () 
       fromDate: "20250401", toDate: "20260331",
       dayBookPath: await crossNamingBundle(),
     });
+    // The narrations must actually surface: two sheet-6 rows carry the nature.
+    const sheet6 = result.rows.filter((r) => r.type === "Receipts");
+    expect(sheet6).toHaveLength(2);
+    expect(sheet6[0].nature).toMatch(/loan visible to/);
     const text = JSON.stringify(result);
     for (const name of PARTIES) expect(text).not.toContain(name);
   });
@@ -371,8 +378,9 @@ describe("Session.loansReview — mastersSource tri-state and grouped counts", (
 
   it("groups the voucher count in loans_party_unmastered (scrubDigits-safe)", async () => {
     const session = createSession(fakeDownstream(), EMPTY_OVERRIDES);
-    // A six-digit voucher count is cheap to synthesise: one entry object is
-    // shared by reference in JSON.stringify (written once) — dedupe on dump.
+    // A six-digit voucher count is cheap to synthesise: all 1,00,000 entries
+    // are the SAME object — JSON.stringify repeats it (no reference dedupe
+    // on dump), so write output stays ~10 MB, not smaller.
     const vouchers = Array.from({ length: 1_00_000 }, () => VOUCHERS[0]);
     const dir = await mkdtemp(join(tmpdir(), "loans-count-"));
     const p = join(dir, "daybook.json");
