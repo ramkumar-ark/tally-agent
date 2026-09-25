@@ -6,6 +6,16 @@
  * No law rates live here — see src/tds-law.ts for the law table.
  */
 
+import { canonicalKey } from "./key.js";
+import {
+  TDS_TOLERANCE,
+  type TdsDeposit,
+  type TdsDeduction,
+  type TdsEvents,
+  type TdsLiability,
+} from "./tds.js";
+import { depositDue } from "./tds-law.js";
+
 export const NOTDS_FORM_ID = "3cdNoTDS";
 
 export type NotdsSheetKey =
@@ -103,4 +113,78 @@ export function depositedKeyOf(sheet: NotdsSheetKey): "TDSDEPOSITED" | "LEVYDEPO
 
 export function amountKeyOf(sheet: NotdsSheetKey): "EXPENSEAMOUNT" | "AMOUNT" {
   return sheet === "40(a)(iii)" ? "AMOUNT" : "EXPENSEAMOUNT";
+}
+
+export interface NoTdsCandidateRow {
+  key: string;              // `${canonicalKey(party)}|${date}|${voucherNumber}|${section}` — stable template↔parse join
+  party: string;            // real name, unmasked; session + disk only
+  date: string;             // YYYYMMDD (booking date)
+  voucherNumber: string;    // auditor trace, never written to the workbook
+  gross: number;            // full payment (C13 default)
+  tdsDone: number;          // deduction tax, 0 when none
+  tdsDeposited: number;     // deposit tax, 0 when none
+  depositDate: string | null;
+  section: string;          // law key
+  liability: number;        // engine figure, review prose only
+  pan: string | null;       // real PAN in-session; written to disk; NEVER outbound
+  panFromGstin: boolean;
+}
+
+/**
+ * The clause 21(b) books projection: the engine's per-booking liability facts
+ * (`TdsLiability`, never re-derived here) projected to the candidate rows the
+ * four sheets are filled from. A booking is a candidate when it carries a
+ * liability beyond `TDS_TOLERANCE` and either nothing was deducted, the
+ * deduction fell short of the liability beyond tolerance, or no deposit
+ * joined it by the Rule 30 deposit due date (`depositDue` — the same
+ * lateness the engine's `tds_late_deposit` finding measures). A deposit that
+ * joined but arrived after that date still supplies the row's deposit facts;
+ * whether it nevertheless cures the disallowance under the s.139(1) provisos
+ * is the operator's call, not the engine's. Compliant deducted-and-deposited
+ * rows are not candidates. Pure: no I/O, no vault, no masking.
+ */
+export function booksCandidates(
+  events: TdsEvents,
+  liabilities: readonly TdsLiability[],
+  panOf: (party: string) => string | null,
+  panDerivedFromGstinOf: (party: string) => boolean,
+): NoTdsCandidateRow[] {
+  // Deposit facts are indexed once by the deduction object reference (the
+  // Global Constraints perf rule — no per-candidate find): joinEvents joins
+  // at most one deposit per deduction, so the first deposit carrying a
+  // `.deduction` back-reference wins.
+  const depositByDeduction = new Map<TdsDeduction, TdsDeposit>();
+  for (const dep of events.deposits) {
+    if (dep.deduction && !depositByDeduction.has(dep.deduction)) {
+      depositByDeduction.set(dep.deduction, dep);
+    }
+  }
+
+  const rows: NoTdsCandidateRow[] = [];
+  for (const l of liabilities) {
+    if (l.liability <= TDS_TOLERANCE) continue; // the engine filters these too; kept as the predicate's first arm
+    const ded = l.deduction;
+    const dep = ded === null ? undefined : depositByDeduction.get(ded);
+    const depositedOnTime = ded !== null && dep !== undefined && dep.date <= depositDue(ded.date);
+    const shortDeducted = ded !== null && ded.tax < l.liability - TDS_TOLERANCE;
+    // Candidate arms: no deduction OR short deduction OR no deposit joined in
+    // time. Compliant (deducted within tolerance and deposited on time) falls
+    // through as the only exclusion.
+    if (ded !== null && !shortDeducted && depositedOnTime) continue;
+    rows.push({
+      key: `${canonicalKey(l.booking.party)}|${l.booking.date}|${l.booking.voucherNumber}|${l.section}`,
+      party: l.booking.party,
+      date: l.booking.date,
+      voucherNumber: l.booking.voucherNumber,
+      gross: l.booking.gross,
+      tdsDone: ded?.tax ?? 0,
+      tdsDeposited: dep?.tax ?? 0,
+      depositDate: dep?.date ?? null,
+      section: l.section,
+      liability: l.liability,
+      pan: panOf(l.booking.party),
+      panFromGstin: panDerivedFromGstinOf(l.booking.party),
+    });
+  }
+  return rows;
 }

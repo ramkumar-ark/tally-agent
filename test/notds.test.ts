@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { LedgerVoucherRow } from "../src/downstream.js";
+import { canonicalKey } from "../src/key.js";
 import {
   NOTDS_FORM_ID,
   NR_SECTIONS,
   RESIDENT_SECTIONS,
   amountKeyOf,
+  booksCandidates,
   depositedKeyOf,
   doneKeyOf,
   isNrSectionSpelling,
@@ -11,6 +14,9 @@ import {
   winmanSectionOf,
   type NotdsSheetKey,
 } from "../src/notds.js";
+import { analyzeTds, type TdsCtx, type TdsLedgerRows } from "../src/tds.js";
+import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
+import { stdOperator, tdsCtx } from "./tds.test.js";
 
 /**
  * Pins the No TDS Disallowance presentation law verbatim: Winman's
@@ -132,5 +138,187 @@ describe("3cdNoTDS presentation law", () => {
     expect(amountKeyOf(nr)).toBe("EXPENSEAMOUNT");
     expect(amountKeyOf(levy)).toBe("EXPENSEAMOUNT");
     expect(amountKeyOf(salary)).toBe("AMOUNT");
+  });
+});
+
+/**
+ * booksCandidates — the clause 21(b) books projection. Rides the real engine
+ * (analyzeTds) over the same fictional ledger universe as test/tds.test.ts so
+ * the joins (deduction→booking, deposit→deduction) are the engine's own, never
+ * re-staged by hand.
+ */
+
+const dutyLedger = "TDS Contractors";
+const expenseLedger = "Site Repairs Contract";
+const partyA = "Sample Builders LLP";
+const partyB = "Sample Consultants";
+
+const row = (date: string, voucher: string, amount: number, counterparty: string): LedgerVoucherRow => ({
+  date,
+  voucherType: "Purchase",
+  voucherNumber: voucher,
+  reference: "",
+  counterparty,
+  // Signed for the queried ledger: positive = debit.
+  amount,
+  matchStatus: "matched",
+  tax: null,
+});
+
+const panOfA = (party: string): string | null => (party === partyA ? "TaxId 101" : null);
+
+const project = (
+  duty: TdsLedgerRows[],
+  expense: TdsLedgerRows[],
+  opts: {
+    operator?: OperatorFile;
+    over?: Partial<TdsCtx>;
+    panOf?: (party: string) => string | null;
+    panDerived?: (party: string) => boolean;
+  } = {},
+): { rows: ReturnType<typeof booksCandidates>; out: ReturnType<typeof analyzeTds> } => {
+  const out = analyzeTds(duty, expense, [], tdsCtx(opts.operator, opts.over));
+  return {
+    out,
+    rows: booksCandidates(out.events, out.liabilities, opts.panOf ?? panOfA, opts.panDerived ?? (() => false)),
+  };
+};
+
+describe("booksCandidates (clause 21(b) candidate rows)", () => {
+  it("excludes a compliant deducted-and-deposited booking (deposit inside the due window)", () => {
+    const { out, rows } = project(
+      [
+        { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250705", "P/12", 5000, "Bank Alpha")] },
+      ],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
+    );
+    // The engine did compute the liability with both joins made — the
+    // exclusion is the predicate's doing, not empty engine output.
+    expect(out.liabilities).toEqual([
+      expect.objectContaining({ section: "194C", liability: 5000, deduction: expect.objectContaining({ tax: 5000 }) }),
+    ]);
+    expect(out.events.deposits[0].deduction).toBe(out.liabilities[0].deduction);
+    expect(rows).toEqual([]);
+  });
+
+  it("includes a not-deducted booking with tdsDone 0", () => {
+    const { rows } = project(
+      [],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
+    );
+    expect(rows).toEqual([
+      {
+        key: `${canonicalKey(partyA)}|20250510|P/12|194C`,
+        party: partyA,
+        date: "20250510",
+        voucherNumber: "P/12",
+        gross: 250000,
+        tdsDone: 0,
+        tdsDeposited: 0,
+        depositDate: null,
+        section: "194C",
+        liability: 5000,
+        pan: "TaxId 101",
+        panFromGstin: false,
+      },
+    ]);
+  });
+
+  it("includes a short-deducted booking, and a within-tolerance deduction is not short", () => {
+    const expense = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
+    const { rows } = project(
+      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -4998, partyA)] }],
+      expense,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ voucherNumber: "P/12", tdsDone: 4998, liability: 5000, tdsDeposited: 0, depositDate: null });
+    // 4999 is within the 1.0 tolerance of the 5000 liability: not short, and
+    // deposited on time ⇒ compliant ⇒ no candidate.
+    const within = project(
+      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -4999, partyA), row("20250705", "P/12", 4999, "Bank Alpha")] }],
+      expense,
+    );
+    expect(within.rows).toEqual([]);
+  });
+
+  it("includes a deducted-but-never-deposited booking with tdsDeposited 0", () => {
+    const { rows } = project(
+      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] }],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tdsDone: 5000, tdsDeposited: 0, depositDate: null });
+  });
+
+  it("includes a deducted-and-deposited-late booking WITH the deposit facts (Focus: s.139(1) cure is the operator's call)", () => {
+    const expense = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
+    // depositDue(20250628) = 20250707 (Rule 30): the 15-Aug deposit is late.
+    const { rows } = project(
+      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] }],
+      expense,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tdsDone: 5000, tdsDeposited: 5000, depositDate: "20250815" });
+    // The same books with the deposit one day inside the window are compliant.
+    const onTime = project(
+      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250707", "P/12", 5000, "Bank Alpha")] }],
+      expense,
+    );
+    expect(onTime.rows).toEqual([]);
+  });
+
+  it("yields nothing from a 194Q-suppressed run (Focus #1)", () => {
+    const operator: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [{ ledger: "Purchase - Domestic", section: "194Q" }],
+      section194QApplicable: false,
+    };
+    const { rows } = project(
+      [],
+      [{
+        ledger: "Purchase - Domestic",
+        rows: [
+          row("20250410", "G/1", 3000000, partyB),
+          row("20250510", "G/2", 3000000, partyB),
+        ],
+      }],
+      { operator, over: { dutySectionOf: () => null, panKeyOf: () => "TaxId 999" } },
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("carries pan: null for a party with no PAN, and flags a GSTIN-derived PAN (Focus #5)", () => {
+    const expense = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
+    const noPan = project([], expense, { panOf: () => null });
+    expect(noPan.rows).toHaveLength(1);
+    expect(noPan.rows[0].pan).toBeNull();
+    expect(noPan.rows[0].panFromGstin).toBe(false);
+
+    const derived = project([], expense, { panOf: () => "TaxId 101", panDerived: () => true });
+    expect(derived.rows[0].pan).toBe("TaxId 101");
+    expect(derived.rows[0].panFromGstin).toBe(true);
+  });
+
+  it("keys are stable and unique per booking", () => {
+    const expense = [{
+      ledger: expenseLedger,
+      rows: [
+        row("20250510", "P/12", 250000, partyA),
+        row("20250610", "P/13", 250000, partyA),
+        row("20250710", "P/14", 250000, partyB),
+      ],
+    }];
+    const { out, rows } = project([], expense);
+    expect(rows).toHaveLength(3);
+    const keys = rows.map((r) => r.key);
+    expect(new Set(keys).size).toBe(3);
+    expect(keys).toEqual([
+      `${canonicalKey(partyA)}|20250510|P/12|194C`,
+      `${canonicalKey(partyA)}|20250610|P/13|194C`,
+      `${canonicalKey(partyB)}|20250710|P/14|194C`,
+    ]);
+    // Stable: the pure projection over the same inputs returns the same keys.
+    const again = booksCandidates(out.events, out.liabilities, panOfA, () => false);
+    expect(again.map((r) => r.key)).toEqual(keys);
   });
 });
