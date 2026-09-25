@@ -516,12 +516,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   loanLedgerEvents entirely — OD "loans" never row on sheets 1/3 even though they
   sit under Loans (Liability).
 - The clause-31 auto-exempt map: `loanAutoExemptNames` (bank-name match on an
-  NBFC-guarded token list — guard `Financ/Capital/Fincorp` first, "HDFC Bank"
-  not "HDFC") → check `loans_auto_exempt` ordinal **27** (19–26 never renumbered;
-  test/loans-tools.test.ts pins the CHECK_ORDINAL total at 23). Operator Y/N always
-  wins; blank ≠ exempt at parse time; review-time auto-exemption must be flagged
-  with the exact detail `auto-exempt: bank name match` / `auto-exempt: bank OD/OCC
-  ancestry`. Template pre-fill happens ONLY at generation (tb_write_loans_template).
+  NBFC-guarded token list; reason order **OD/OCC ancestry > bank name match >
+  secured-loan ancestry**) → check `loans_auto_exempt` ordinal **27** (19–26
+  never renumbered; test/loans-tools.test.ts pins the CHECK_ORDINAL total at
+  23). Operator Y/N always wins; blank ≠ exempt at parse time; review-time
+  auto-exemption must be flagged with the exact detail `auto-exempt: bank name
+  match` / `auto-exempt: bank OD/OCC ancestry` / `auto-exempt: secured loan`
+  (Secured Loans ancestry exempting, `isSecuredLoanLedger`). Template pre-fill
+  happens ONLY at generation (tb_write_loans_template). `UB` is a whole-word
+  token — a bank-lender name must clear BOTH the NBFC stem guard AND a bank
+  token: the guard regexes are stems (`(?:^|[^a-z0-9])Financ` with no trailing
+  boundary) so they match Finance/Financial; a whole-token guard never would.
 - Two identity/openings channels are additive next to `{name,parent}` in day-book
   bundles: ledgers may carry `pan`/`gstin`/`address` (PAN/gstin uppercased,
   address keep-case) and `openingBalance` (raw tally sign, flipped ONCE at the
