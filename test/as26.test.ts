@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { EMPTY_AS26_MAP, loadAs26Map, matchParties, type BooksFacts } from "../src/as26.js";
+import { EMPTY_AS26_MAP, assignFdLedgers, bankShortForms, isFdLedgerName, loadAs26Map, matchParties, type BooksFacts } from "../src/as26.js";
 import { parseAs26Export } from "../src/as26-file.js";
 import { buildAs26Fixture } from "./as26-fixture.js";
 import { canonicalKey } from "../src/key.js";
@@ -604,5 +604,102 @@ describe("analyzeAs26 — totals-only reconciliation (design §12)", () => {
     const f = r.findings.find((x) => x.check === "as26_totals_mismatch")!;
     expect(f.severity).toBe("review");
     expect(f.detail).toMatch(/names this bank but none of its interest income or FD ledgers/);
+  });
+});
+
+describe("FD ledger auto-detection and assignment (addendum 3/3a)", () => {
+  it("isFdLedgerName: FD tokens whole and case-insensitive; EMD/security/retention are not FDs", () => {
+    expect(isFdLedgerName("FD - 123456")).toBe(true);
+    expect(isFdLedgerName("fd 123")).toBe(true);
+    expect(isFdLedgerName("fix.?. F.D 77")).toBe(true);
+    expect(isFdLedgerName("FD A 123")).toBe(true);
+    expect(isFdLedgerName("FIXED DEPOSIT 22/2025")).toBe(true);
+    expect(isFdLedgerName("EMD - 12345678")).toBe(false);
+    expect(isFdLedgerName("SECURITY DEPOSIT - 990")).toBe(false);
+    expect(isFdLedgerName("RETENTION MONEY A/c")).toBe(false);
+  });
+
+  it("bankShortForms: UBI, UB (the before-'of' initials), punctuation-normalised", () => {
+    expect(bankShortForms("Union Bank of India")).toEqual(
+      expect.arrayContaining(["UBI", "UB"]),
+    );
+    // branch/city suffix words are ignored
+    expect(bankShortForms("Union Bank of India (Ro Chennai)")).toEqual(
+      expect.arrayContaining(["UBI", "UB"]),
+    );
+    expect(bankShortForms("State Bank of India")).toEqual(expect.arrayContaining(["SBI"]));
+    expect(bankShortForms("Indian Overseas Bank")).toEqual(expect.arrayContaining(["IOB"]));
+  });
+
+  it("rule 3a: a distinctive token of exactly one bank assigns by name match", () => {
+    const [canara, ubi, punct] = assignFdLedgers(
+      ["FD - 12345 CANARA", "Deposit 555 Union Bank", "FD - 700 - U.B.I"],
+      ["CANARA BANK", "Union Bank of India"],
+    );
+    expect(canara.bank).toBe("CANARA BANK");
+    expect(canara.rule).toBe("name-match");
+    expect(ubi.bank).toBe("Union Bank of India");
+    expect(ubi.rule).toBe("name-match");
+    expect(punct.bank).toBe("Union Bank of India");
+    expect(punct.rule).toBe("name-match");
+  });
+
+  it("rule 3a: the two-letter short form UB matches only as a standalone token", () => {
+    const standalone = assignFdLedgers(["FD UB OD 123"], ["Union Bank of India"]);
+    expect(standalone[0].bank).toBe("Union Bank of India");
+    const insideWord = assignFdLedgers(["FD PUBLICBANK 123"], ["Union Bank of India"]);
+    // PUBLICBANK is one whole token; UB never matches inside it, and with no
+    // name match the single listed bank still takes it by fallback.
+    expect(insideWord[0].bank).toBe("Union Bank of India");
+    expect(insideWord[0].rule).toBe("only-bank");
+  });
+  it("rule 3a: a short form fitting two listed banks does not match", () => {
+    const [unassigned] = assignFdLedgers(
+      ["FD - 3412 - UBI"],
+      ["Union Bank of India", "United Bank of India"],
+    );
+    expect(unassigned.bank).toBeUndefined();
+    expect(assignFdLedgers(["FD - 3412 - UBI"], ["Union Bank of India", "United Bank of India", "CANARA BANK"])[0].bank).toBeUndefined();
+  });
+
+  it("rule 3b: exactly one listed bank takes the unattributable FD ledgers", () => {
+    const [only] = assignFdLedgers(["FD - 100099222"], ["Union Bank of India"]);
+    expect(only.bank).toBe("Union Bank of India");
+    expect(only.rule).toBe("only-bank");
+  });
+
+  it("rule 3c: several banks and no name match — unassigned", () => {
+    const [none] = assignFdLedgers(["FD - 100099222"], ["CANARA BANK", "Union Bank of India"]);
+    expect(none.bank).toBeUndefined();
+    expect(none.rule).toBeUndefined();
+  });
+
+  it("the engine emits AS26-011 for the unassigned remainder, counts and money only", () => {
+    const file = tx194("194A", [tx194n(3000, "194A", "20250801", null, 30000)], 3000, 30000);
+    const factsAuto: BooksFacts = {
+      deductions: [], sales: [],
+      fdAuto: { rows: [{ ledger: "FD - 100099221" }], unassigned: ["FD - 100099222", "FD - 100099"], interest: 10050.5 },
+    };
+    const r = analyzeAs26(file, factsAuto, mapper, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    const f = r.findings.find((x) => x.check === "fd_ledgers_unassigned")!;
+    expect(f).toBeTruthy();
+    expect(f.id).toBe("AS26-011-1");
+    expect(f.severity).toBe("review");
+    expect(f.detail).toMatch(/2 fixed-deposit ledger\(s\)/);
+    expect(f.detail).toMatch(/10,050\.50/);
+    expect(f.detail).not.toMatch(/1000992/);
+  });
+
+  it("the result's fdAuto audit rows carry only assigned rows, ledger/bank/rule", () => {
+    const file = tx194("194A", [], 0, 0);
+    const factsRows: BooksFacts = {
+      deductions: [], sales: [],
+      fdAuto: {
+        rows: [{ ledger: "FD - 100099222 A", bank: "Union Bank of India", rule: "name-match" }, { ledger: "FD - 100099222 B" }],
+        unassigned: ["FD - 100099222 B"], interest: 0,
+      },
+    };
+    const r = analyzeAs26(file, factsRows, mapper, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    expect(r.fdAuto).toEqual([{ ledger: "FD - 100099222 A", bank: "Union Bank of India", rule: "name-match" }]);
   });
 });

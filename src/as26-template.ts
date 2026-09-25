@@ -100,6 +100,9 @@ const instructions = (company: string | undefined, hasLedgers: boolean): Sheet =
     [
       "Banks: some banks deduct TDS on fixed-deposit interest. On the 'Bank Interest' sheet, write one row per ledger — the bank's name exactly as it appears in 26AS, then its interest income ledger and/or FD ledger. Presence on that sheet marks the 26AS name a bank: its 194A entries then reconcile on TOTALS (never bill by bill). Leave the sheet empty if no bank interest is involved.",
     ],
+    [
+      "The FD ledger column is OPTIONAL. Fixed-deposit ledgers under the Deposits (Asset) group are detected automatically (an FD token in the ledger name) and assigned to a bank by its name — a distinctive word or short form of the bank's name inside the FD ledger name (e.g. UBI, UB, SBI), or, when the Bank Interest sheet lists exactly one bank, that bank. An explicit FD ledger here still wins. Ledger names appear on the report's 'FD ledger auto-assign' sheet with the rule that fired.",
+    ],
     ["Worked example (invented names only):"],
     ["Mapping | Sample Builders LLP | tds | 12,000.00 | Sample Builders"],
   ],

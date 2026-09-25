@@ -45,6 +45,16 @@ them:
   in "26AS name (bank)", and its **Interest income ledger** and/or **FD
   ledger** in the next columns. Repeat the bank's name on extra rows for
   further ledgers; leave a column blank when that side does not apply.
+- **The FD ledger column is optional.** Fixed-deposit ledgers under the
+  Deposits (Asset) group are detected automatically (an FD token in the
+  ledger name) and assigned to a listed bank by name — a distinctive word
+  (e.g. "Canara") or a short form (e.g. UBI, UB, SBI; two-letter forms only
+  as a standalone token) inside the FD ledger name, or, when this sheet
+  lists exactly one bank, that bank. An explicit FD ledger here still wins.
+  The report's **"FD ledger auto-assign"** sheet shows every auto-assigned
+  ledger with the rule that fired; FD ledgers that resolved to no bank
+  raise one review finding (counts and amounts only) — map them explicitly
+  if they belong to a bank.
 - **Presence on this sheet is the bank mark.** A 26AS name listed here
   reconciles its 194A entries on **totals** (interest vs 26AS amount, TDS vs
   26AS tax) — never bill by bill, and its entries stay off the "Books not in

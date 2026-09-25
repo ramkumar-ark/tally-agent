@@ -1300,6 +1300,21 @@ export async function writeAs26Report(opts: {
     ],
   };
 
+  const fdAutoSheet: Sheet = {
+    name: "FD ledger auto-assign",
+    columns: [
+      { header: "row", width: 8, format: "text" },
+      { header: "FD ledger", width: 40, format: "text" },
+      { header: "assigned bank", width: 26, format: "text" },
+      { header: "rule", width: 12, format: "text" },
+    ],
+    rows: [
+      ...(opts.result.fdAuto ?? []).map((a, i) => [
+        `FAS-${i + 1}`, a.ledger, a.bank, a.rule,
+      ]),
+    ],
+  };
+
   await writeFile(
     markdownPath,
     demaskText(opts.markdown, opts.vault) + "\n",
@@ -1308,7 +1323,7 @@ export async function writeAs26Report(opts: {
   await writeWorkbook({
     reportDir: opts.reportDir,
     fileName: `as26-review-${stem}.xlsx`,
-    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet, fd20Sheet],
+    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet, fd20Sheet, fdAutoSheet],
     vault: opts.vault,
   });
   return { markdownPath, workbookPath };

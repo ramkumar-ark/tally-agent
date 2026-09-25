@@ -134,7 +134,7 @@ describe("tb_write_26as_report", () => {
     const names = wb.map((s) => s.name);
     expect(names).toEqual([
       "Findings", "Deductors", "Books Events", "Mapping",
-      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS", "FD ledger auto-assign",
     ]);
     const deductors = wb.find((s) => s.name === "Deductors")!;
     const cells = [...deductors.rows.values()].flatMap((r) => [...r.cells.values()].map((c) => String(c.value)));
@@ -203,7 +203,7 @@ describe("tb_write_26as_report", () => {
     const names = wb.map((s) => s.name);
     expect(names).toEqual([
       "Findings", "Deductors", "Books Events", "Mapping",
-      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS", "FD ledger auto-assign",
     ]);
 
     // data row n (1-based) is rows[n] — Excel row 1 is the header row

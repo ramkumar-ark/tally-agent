@@ -17,8 +17,10 @@ import { count, dayBefore, displayDate, displayMonth } from "./format.js";
 import { canonicalKey } from "./key.js";
 import {
   analyzeAs26,
+  assignFdLedgers,
   booksSales,
   deductionEvents,
+  isFdLedgerName,
   receivableLedgers,
   type BooksDeduction,
   type PartyMatch,
@@ -26,6 +28,7 @@ import {
   type As26Result,
   type BankBooks,
   type BankBooksEvent,
+  type FdAssignment,
 } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 import { loadAs26MapFile } from "./as26-template.js";
@@ -280,6 +283,9 @@ export interface As26ReviewResult {
   /** FD-interest books entries taxed at ~20% — not expected in 26AS
    * (design §12.4); party labels masked like the findings'. */
   fd20: Array<{ party: string; date: string; interest: number; tax: number }>;
+  /** Auto-assigned FD ledgers (addendum 3), masked; the written workbook
+   * de-masks. ledger/bank pseudonymised here, rule as fired. */
+  fdAuto: Array<{ ledger: string; bank: string; rule: string }>;
   /** Every books evidence row behind the recon, party-pseudonymed: the
    * written report's Books Events sheet (the drill-down the deduction and
    * sale vouchers give the operator). */
@@ -1003,6 +1009,59 @@ export function createSession(
     }
 
     const map = loadAs26MapFile(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
+    // Addendum 3: FD ledgers are auto-detected, not hand-mapped — candidates
+    // sit under a Deposits (Asset) group AND carry an FD token in the name.
+    // Explicit Bank Interest FD rows win. Assignment order: a distinctive
+    // name token/short form of exactly one listed bank, else the single
+    // listed bank, else unassigned (one review finding).
+    let fdAuto: { rows: FdAssignment[]; unassigned: string[]; interest: number } = {
+      rows: [], unassigned: [], interest: 0,
+    };
+    if (masterPairs.length > 0) {
+      const fdParentOf = new Map<string, string>();
+      for (const l of masterPairs) fdParentOf.set(canonicalKey(l.name), l.parent);
+      for (const g of groups) fdParentOf.set(canonicalKey(g.name), g.parent);
+      const underDepositsAsset = (name: string): boolean => {
+        const seen = new Set<string>();
+        let p: string | undefined = fdParentOf.get(canonicalKey(name));
+        while (p && !seen.has(p)) {
+          seen.add(p);
+          if (canonicalKey(p) === "deposits (asset)") return true;
+          p = fdParentOf.get(canonicalKey(p));
+        }
+        return false;
+      };
+      const claimed = new Set(
+        (map.banks ?? []).flatMap((b) => [...b.interestLedgers, ...b.fdLedgers]).map(canonicalKey),
+      );
+      const fdCandidates = masterPairs
+        .filter((l) => !claimed.has(canonicalKey(l.name)) && underDepositsAsset(l.name) && isFdLedgerName(l.name))
+        .map((l) => l.name);
+      const banksListed = (map.banks ?? []).map((b) => b.as26Name);
+      const fdAssign = assignFdLedgers(fdCandidates, banksListed);
+      for (const a of fdAssign) {
+        if (!a.bank || !a.rule) continue;
+        const bankName = a.bank;
+        const b = (map.banks ?? []).find((x) => canonicalKey(x.as26Name) === canonicalKey(bankName));
+        if (b && !b.fdLedgers.some((l) => canonicalKey(l) === canonicalKey(a.ledger))) b.fdLedgers.push(a.ledger);
+      }
+      const unassignedFd = fdAssign.filter((a) => !a.bank);
+      let fdInterest = 0;
+      if (unassignedFd.length > 0) {
+        const unKeys = new Set(unassignedFd.map((a) => canonicalKey(a.ledger)));
+        for (const v of voucherList) {
+          if (v.cancelled) continue;
+          for (const e of v.entries) {
+            if (unKeys.has(canonicalKey(e.ledger)) && e.amount < 0) fdInterest += -e.amount;
+          }
+        }
+      }
+      fdAuto = {
+        rows: fdAssign,
+        unassigned: unassignedFd.map((a) => a.ledger),
+        interest: round2(fdInterest),
+      };
+    }
     // Bank-194A books side (design §12.2): the operator's Bank Interest sheet
     // names each bank's interest income and FD ledgers. One event per voucher
     // touching a bank's own ledgers: interest credited on the interest
@@ -1032,7 +1091,7 @@ export function createSession(
       }
       if (events.length > 0) bankEvents.push({ nameKey: canonicalKey(b.as26Name), events });
     }
-    const result = analyzeAs26(file, { deductions, sales, bankEvents }, map, ledgerNames, { fromDate, toDate });
+    const result = analyzeAs26(file, { deductions, sales, bankEvents, fdAuto }, map, ledgerNames, { fromDate, toDate });
     // Bill-level drill-down (pure, unmasked): the SAME file instance the
     // session analyzed, so the rows and the findings share one provenance.
     const billRowsEngine = buildBillRows(result, { deductions, sales, bankEvents }, file, { fromDate, toDate });
@@ -1207,6 +1266,11 @@ export function createSession(
       interest: e.interest,
       tax: e.tax,
     }));
+    const fdAutoMasked = (result.fdAuto ?? []).map((a) => ({
+      ledger: pseudoName(a.ledger),
+      bank: pseudoName(a.bank),
+      rule: a.rule,
+    }));
     const masked: As26ReviewResult = sweepStrings(
       {
         company: company ?? undefined,
@@ -1223,6 +1287,7 @@ export function createSession(
         bookEvents,
         billRows,
         fd20,
+        fdAuto: fdAutoMasked,
       },
       vault,
     ) as As26ReviewResult;

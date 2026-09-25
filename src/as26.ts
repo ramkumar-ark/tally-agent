@@ -9,7 +9,7 @@ export interface BooksSale { ledgerKey: string; date: string; ref: string | null
  * ledger in the same voucher, FD principal debited (carried, not compared). */
 export interface BankBooksEvent { nameKey: string; date: string; interest: number; tax: number; fdDebit: number; }
 export interface BankBooks { nameKey: string; events: BankBooksEvent[]; }
-export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; bankEvents?: BankBooks[]; }
+export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; bankEvents?: BankBooks[]; /** Addendum 3: FD auto-detection outcome computed by the caller (owner of the group tree): auto-assigned rows for the workbook audit, and the unassigned remainder with its interest-side credit total. */ fdAuto?: { rows: FdAssignment[]; unassigned: string[]; interest: number }; }
 
 /** The Bank Interest sheet's parsed rows (design §12.5): presence marks the
  * 26AS name a bank; its interest income and FD ledgers feed the bank-194A
@@ -291,6 +291,129 @@ export const isFd20 = (interest: number, tax: number): boolean =>
 /** Punctuation/case-insensitive section token (`194I(a)` -> `194ia`). */
 export const sectionToken = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
+// --- FD ledger auto-detection and bank assignment (addendum 3/3a, 2026-09-26) ---
+
+/** FD ledger name tokens: whole-token, case-insensitive, punctuation-normalised.
+ * A ledger like "FD - 123456" or "F.D 789" qualifies; "EMD - 5" does not.
+ * (The Deposits (Asset) ancestry check is the caller's, which owns the group tree.) */
+export const isFdLedgerName = (name: string): boolean => {
+  const t = tokensOf(name);
+  for (let i = 0; i < t.length; i += 1) {
+    if (t[i] === "FD") return true;
+    if (t[i] === "F" && t[i + 1] === "D") return true;
+    if (t[i] === "FIXED" && t[i + 1] === "DEPOSIT") return true;
+  }
+  return false;
+};
+
+/** Whole tokens of a name, punctuation-normalised: "U.B.I / FD 123" -> ["U","B","I","FD","123"]. */
+export const tokensOf = (name: string): string[] =>
+  name.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+
+/** Generic bank-name words, NOT counted as distinctive tokens. Extend this
+ * list (e.g. more city names) when a real bank misfires. */
+export const BANK_GENERIC_WORDS = new Set([
+  "BANK", "OF", "INDIA", "LTD", "LIMITED", "BRANCH", "THE", "RO", "CO",
+  "CHENNAI", "MUMBAI", "DELHI", "KOLKATA", "BANGALORE", "BENGALURU", "HYDERABAD",
+  "MADURAI", "SALEM", "COIMBATORE", "TRICHY", "TIRUCHIRAPPALLI", "ERODE",
+]);
+
+/** Curated short forms of Indian banks (whole 26AS names; extend by adding a
+ * row — the derived-initial rules below cover unlisted names). */
+const BANK_CURATED_SHORTFORMS: Array<{ name: string; forms: string[] }> = [
+  { name: "Union Bank of India", forms: ["UBI", "UB"] },
+  { name: "State Bank of India", forms: ["SBI"] },
+  { name: "Indian Overseas Bank", forms: ["IOB"] },
+  { name: "Bank of Baroda", forms: ["BOB"] },
+  { name: "Punjab National Bank", forms: ["PNB"] },
+  { name: "Bank of India", forms: ["BOI"] },
+  { name: "City Union Bank", forms: ["CUB"] },
+  { name: "Karur Vysya Bank", forms: ["KVB"] },
+  { name: "Tamilnad Mercantile Bank", forms: ["TMB"] },
+  // Indian Bank: "IB" is left out of the table deliberately — a two-letter
+  // form that could name several banks matches only when unambiguous (the
+  // multi-bank rejection below), and only as a standalone token.
+];
+
+/** Short forms of one bank's 26AS name: curated rows first, then derived
+ * initialisms — initial of every word (UBI/BOB), of every word but the
+ * "of"s, and of only the words before the "of". Branch/city suffixes
+ * (generic words) are stripped from the trailing end first so
+ * "Union Bank of India (Ro Chennai)" still yields UBI and UB. */
+export function bankShortForms(as26Name: string): string[] {
+  const out = new Set<string>();
+  for (const c of BANK_CURATED_SHORTFORMS) {
+    if (canonicalKey(c.name) === canonicalKey(as26Name)) for (const f of c.forms) out.add(f);
+  }
+  const raw = tokensOf(as26Name);
+  const ofIdx = raw.lastIndexOf("OF");
+  // Drop branch/city suffix words that FOLLOW the last "of" — "Union Bank
+  // of India (Ro Chennai)" keeps its India/Union initials, loses Ro/Chennai.
+  const tail = raw.slice(ofIdx + 1);
+  while (tail.length > 1 && BANK_GENERIC_WORDS.has(tail[tail.length - 1])) tail.pop();
+  const ws = ofIdx === -1 ? [...tail.length > 0 ? tail : raw] : [...raw.slice(0, ofIdx + 1), ...tail];
+  const initials = (list: string[]): string | null => {
+    const s = list.map((w) => w[0]).join("");
+    return list.length === 0 || s.length < 2 ? null : s;
+  };
+  for (const f of [
+    initials(ws),
+    initials(ws.filter((w) => w !== "OF")),
+    initials(raw.slice(0, ofIdx === -1 ? raw.length : ofIdx)),
+  ]) {
+    if (f) out.add(f);
+  }
+  return [...out];
+}
+
+/** Distinctive whole-name tokens of one bank (generic words dropped). */
+const bankDistinctiveTokens = (as26Name: string): string[] =>
+  tokensOf(as26Name).filter((w) => !BANK_GENERIC_WORDS.has(w));
+
+/** Does an FD ledger name match this bank via a distinctive token or a short
+ * form? Two-letter forms and all short forms match only as a standalone
+ * token (whole token, never inside a word or account number). A run of
+ * single-letter tokens is additionally joined — "U.B.I" tokenises as
+ * U/B/I, the way initials are punctuated. */
+const bankMatchesFdName = (as26Name: string, fdTokens: string[]): boolean => {
+  const candidates = new Set(fdTokens);
+  let run = "";
+  for (const t of fdTokens) {
+    if (t.length === 1) {
+      run += t;
+    } else {
+      if (run.length >= 2) candidates.add(run);
+      run = "";
+    }
+  }
+  if (run.length >= 2) candidates.add(run);
+  for (const tok of bankDistinctiveTokens(as26Name)) {
+    if (candidates.has(tok)) return true;
+  }
+  for (const f of bankShortForms(as26Name)) {
+    if (f.length >= 2 && candidates.has(f)) return true;
+  }
+  return false;
+};
+
+export type FdRule = "name-match" | "only-bank";
+export interface FdAssignment { ledger: string; bank?: string; rule?: FdRule; }
+
+/** Addendum-3 rules, applied in order (pure): a) a whole distinctive token or
+ * short form of exactly ONE listed bank appearing in the FD ledger name;
+ * b) else exactly one listed bank overall; c) else unassigned (caller emits
+ * the review finding). A form that fits more than one listed bank never
+ * matches, and explicit operator mappings win (input already excludes them). */
+export function assignFdLedgers(fdLedgerNames: string[], banks: string[]): FdAssignment[] {
+  return fdLedgerNames.map((ledger) => {
+    const t = tokensOf(ledger);
+    const fitting = banks.filter((b) => bankMatchesFdName(b, t));
+    if (fitting.length === 1) return { ledger, bank: fitting[0], rule: "name-match" as const };
+    if (banks.length === 1) return { ledger, bank: banks[0], rule: "only-bank" as const };
+    return { ledger };
+  });
+}
+
 export interface ReconItem { date: string; tax: number; dedIdx?: number; txIdx?: number; gross?: number; status?: string | null; }
 
 export interface PartyRecon {
@@ -540,6 +663,9 @@ export interface As26Result {
    * some banks deduct (no PAN on file). Excluded from the totals comparison;
    * reported, never expected in 26AS (design §12.4). */
   fd20: BankBooksEvent[];
+  /** Auto-assigned FD ledgers (addendum 3): audit rows for the workbook —
+   * ledger, assigned bank, and which rule fired. Names on disk only. */
+  fdAuto: { ledger: string; bank: string; rule: FdRule }[];
 }
 
 import { as26FindingId, type As26CheckId, type As26Finding, type As26ScheduleRow } from "./types.js";
@@ -757,6 +883,17 @@ export function analyzeAs26(
     }
   }
 
+  // Addendum 3 — FD ledgers that could not be auto-assigned to any Bank
+  // Interest bank: one review finding, counts and amounts only; the ledger
+  // names appear on the workbook's auto-assignment sheet, never here.
+  if (facts.fdAuto && facts.fdAuto.unassigned.length > 0) {
+    push("fd_ledgers_unassigned", "review", "FD ledgers (unassigned)", "tds", null, facts.fdAuto.interest,
+      `${facts.fdAuto.unassigned.length} fixed-deposit ledger(s) under Deposits (Asset) could not be assigned to any ` +
+      `bank on the Bank Interest sheet (interest-side credit ${money(facts.fdAuto.interest)}): neither a distinctive ` +
+      "name token nor a single listed bank resolved them. Listed on the 'FD ledger auto-assign' sheet with the rule " +
+      "that fired for the assigned ones — map them explicitly there if they belong to a bank.");
+  }
+
   // 004 — mapping gaps: no money checks ran for these parties
   for (const g of gaps) {
     const where = g.reason === "ledger-absent"
@@ -813,5 +950,5 @@ export function analyzeAs26(
     combinationExplained: recons.reduce((s, r) => s + r.combinations.length, 0),
     ambiguous: recons.reduce((s, r) => s + r.ambiguous, 0),
   };
-  return { findings, recon: recons, gaps, totals, skipped: file.skipped, fd20: fd20All };
+  return { findings, recon: recons, gaps, totals, skipped: file.skipped, fd20: fd20All, fdAuto: (facts.fdAuto?.rows ?? []).filter((r) => r.bank && r.rule).map((r) => ({ ledger: r.ledger, bank: r.bank as string, rule: r.rule as FdRule })) };
 }
