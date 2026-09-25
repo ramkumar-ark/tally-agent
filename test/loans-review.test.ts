@@ -242,6 +242,39 @@ describe("Session.loansRows — raw cache for the Winman writer", () => {
   });
 });
 
+describe("Session.loansReview — opening-balance sign (009 fix)", () => {
+  // The bundle's openingBalance rides the RAW Tally master sign (negative =
+  // debit), so a loan's credit opening is POSITIVE in the file. Bank-mode
+  // repayment Dr loan / Cr bank reduces the outstanding; MAXAMOUNT is the
+  // peak of (opening + movements) and the opening owns it here. Mirrors the
+  // real-books complaint without real names (009, 2026-09-26).
+  it("applies a positive raw credit opening as outstanding, not its negation", async () => {
+    const stub = Object.assign(fakeDownstream(), {
+      groups: rejectWith("no live tally"),
+      ledgers: rejectWith("no live tally"),
+    } as never);
+    const session = createSession(stub, EMPTY_OVERRIDES);
+    const dir = await mkdtemp(join(tmpdir(), "loans-openings-"));
+    const p = join(dir, "daybook.json");
+    await writeFile(p, JSON.stringify({
+      tallyAgentExport: true,
+      company: "Sample Co",
+      groups: GROUPS,
+      ledgers: [
+        ...LEDGERS,
+        { name: "Metro Finance", parent: "Loans (Liability)", openingBalance: 2_000_000 },
+      ],
+      vouchers: VOUCHERS,
+    }), "utf8");
+    await session.loansReview({ ...PHASE, dayBookPath: p });
+    const cached = session.loansRows()!;
+    // Peak = opening 20,00,000 + the April cash acceptance 25,000 (the Feb
+    // repayment dips below it); under the inverted sign it degenerated to a
+    // movement-scale figure.
+    expect(cached.sheets.sheet3[0].maxAmount).toBe(2_025_000);
+  });
+});
+
 describe("Session.loansReview — narrations on the day-book path", () => {
   // Narrations survive readDayBook -> VoucherRow (fix round): C4 mode hints
   // and sheet-6 nature text ride the file channel, not just live runs.

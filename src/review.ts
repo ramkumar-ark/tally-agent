@@ -2085,21 +2085,34 @@ export function createSession(
 
     // Addendum 3 (2026-09-26): opening balances feed MAXAMOUNT. The caller
     // resolves each loan ledger's opening into the loan-liability OUTSTANDING
-    // (positive = money owed): the gateway/bundle convention is positive =
-    // debit, so a liability's credit opening arrives negative and is
-    // negated here — the single flip at this seam.
+    // (positive = money owed) with the flip at this seam. The BUNDLE carries
+    // the raw Tally master sign (negative = debit, the M1 convention — a
+    // liability's credit opening is therefore POSITIVE here), so the
+    // outstanding is the raw value itself (fix 2026-09-26, 009: negating it
+    // inverted every opening and understated MAXAMOUNT by 2× the opening).
+    // The LIVE trial balance row is already gateway-flipped (positive =
+    // debit), so a credit balance arrives negative and IS negated here.
     const openings = new Map<string, number>();
-    const putOpening = (name: string, openingDebit: number | null | undefined): void => {
-      if (typeof openingDebit !== "number" || !Number.isFinite(openingDebit)) return;
+    const openingKeyOf = (name: string): string => {
       const key = canonicalKey(name);
-      if (key === "" || ctx.isBankOdLoan(name) || !ctx.isLoanLedger(name)) return;
-      openings.set(key, -openingDebit);
+      if (key === "" || ctx.isBankOdLoan(name) || !ctx.isLoanLedger(name)) return "";
+      return key;
     };
-    for (const l of masterPairs) putOpening(l.name, l.openingBalance);
+    for (const l of masterPairs) {
+      if (typeof l.openingBalance !== "number" || !Number.isFinite(l.openingBalance)) continue;
+      const key = openingKeyOf(l.name);
+      if (key === "") continue;
+      openings.set(key, l.openingBalance);
+    }
     if (!opts.dayBookPath) {
       try {
         const tb = await d.trialBalance(company, dayBefore(fromDate));
-        for (const row of tb.rows) putOpening(row.name, row.balance);
+        for (const row of tb.rows) {
+          if (typeof row.balance !== "number" || !Number.isFinite(row.balance)) continue;
+          const key = openingKeyOf(row.name);
+          if (key === "") continue;
+          openings.set(key, -row.balance);
+        }
       } catch {
         console.error("tally-agent: opening trial balance unavailable for loans MAXAMOUNT (degraded, estimated)");
       }
