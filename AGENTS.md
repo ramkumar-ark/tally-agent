@@ -507,6 +507,36 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   defined-but-empty text value (`bearer: ""`) omits the cell rather than
   writing an empty inlineStr.
 
+## Sharp edges found adding the loans 269SS/T addenda (2026-09-26)
+
+- **OD/OCC-ancestry ledgers are BANK for loans review** (`bank od a/c`/`bank occ a/c`
+  anywhere in the ancestry chain, canonical match; `isBankOdLedger`/`isBankOdLoan`
+  in `buildLoansCtx`). They are bank for mode inference and 269ST externals (so OD
+  cash withdrawals/contra transfers leave sheet6), AND they are excluded from
+  loanLedgerEvents entirely — OD "loans" never row on sheets 1/3 even though they
+  sit under Loans (Liability).
+- The clause-31 auto-exempt map: `loanAutoExemptNames` (bank-name match on an
+  NBFC-guarded token list — guard `Financ/Capital/Fincorp` first, "HDFC Bank"
+  not "HDFC") → check `loans_auto_exempt` ordinal **27** (19–26 never renumbered;
+  test/loans-tools.test.ts pins the CHECK_ORDINAL total at 23). Operator Y/N always
+  wins; blank ≠ exempt at parse time; review-time auto-exemption must be flagged
+  with the exact detail `auto-exempt: bank name match` / `auto-exempt: bank OD/OCC
+  ancestry`. Template pre-fill happens ONLY at generation (tb_write_loans_template).
+- Two identity/openings channels are additive next to `{name,parent}` in day-book
+  bundles: ledgers may carry `pan`/`gstin`/`address` (PAN/gstin uppercased,
+  address keep-case) and `openingBalance` (raw tally sign, flipped ONCE at the
+  boundary into `buildLoansRows`' `openings` map as outstanding, positive=owed).
+  Precedence: template PAN/address > master PAN/GSTIN-derived > master address;
+  `maskRow` stays the single vaulting point. Openings never enter the 269SS/T
+  crossing test (MAXAMOUNT only). The `loans_max_amount_estimated` gate is
+  per-party `openings.has(key)` when the caller passed a map, else legacy
+  `mastersPresent` — don't collapse the two.
+- The upstream `tally_prime_mcp_server` needed a verbose `IncomeTaxNumber` → `pan`
+  field (patched + built 2026-09-26; needs a server restart); it does NOT fetch
+  Tally's Address (a list field in masters). PAN/address on real data stays
+  not-yet-exercised until the operator re-exports the day book with the updated
+  `scripts/export-daybook.mjs` (which now runs `tally_get_ledgers` verbose:true).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
