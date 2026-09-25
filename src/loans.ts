@@ -212,15 +212,16 @@ export const EMPTY_LOANS_OPERATOR: LoansOperator = { parties: [] };
 export interface LoansSheetRow {
   /** Real ledger name (raw cache); masked copy for the model. */
   party: string;
-  /** Vault alias, never the raw PAN. Two channels ride this field:
-   * - books rows (buildLoansRows): the party's operator PAN/Aadhaar is
-   *   vaulted (`vault.pseudonym(.., "tax_id")`) at buildLoansRows time and
-   *   the value carried here from then on is the pseudonym;
-   * - template rows (parseLoansTemplate -> LoansTemplateParsed.specifiedSums,
-   *   Task 6 wiring): the field TEMPORARILY carries the raw OPERATOR value
-   *   straight from the operator file — Session.loansReview MUST vault it
-   *   (`vault.pseudonym(.., "tax_id")`) before any row reaches the model.
-   *   The privacy contract is not waived by the transient raw value. */
+  /**
+   * Vault alias, never the raw PAN. Two channels ride this field; BOTH carry
+   * the raw canonical PAN/Aadhaar through the engine, and Session.loansReview's
+   * maskRow is the SINGLE vaulting point (`vault.pseudonym(.., "tax_id")`)
+   * before any row reaches the model. The privacy contract never deputises
+   * the engine — it must never repaint the raw value as a pseudonym itself:
+   * - books rows (buildLoansRows): the party's operator PAN/Aadhaar;
+   * - template rows (parseLoansTemplate -> LoansTemplateParsed.specifiedSums):
+   *   the operator value straight from the operator file.
+   */
   panAlias?: string;
   /** FY aggregate for the (party, direction, mode-class) bucket. */
   amount: number;

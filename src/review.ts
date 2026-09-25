@@ -1993,7 +1993,7 @@ export function createSession(
       voucherList = dayBook.vouchers;
       groups = dayBook.groups ?? [];
       masterPairs = dayBook.ledgers ?? [];
-      mastersSource = dayBook.ledgers ? "bundle" : "absent";
+      mastersSource = dayBook.ledgers?.length ? "bundle" : "absent";
     } else {
       const [g, m, v] = await Promise.all([
         d.groups(company),
@@ -2061,7 +2061,7 @@ export function createSession(
             expected: null,
             detail:
               `The day-book export carries no ledger masters, so loan-ledger discovery and ` +
-              `cash/bank ancestry are unavailable: ${voucherList.length} vouchers were read and the ` +
+              `cash/bank ancestry are unavailable: ${count(voucherList.length)} vouchers were read and the ` +
               `clause-31/269ST scans could not identify any loan ledger. Re-export the day book ` +
               `with its groups and ledgers and run again.`,
           }
@@ -2107,6 +2107,15 @@ export function createSession(
       if (real) return vault.pseudonym(real, "other" satisfies GroupRole);
       return maskLedgerName(name, groupOf(name), c, vault);
     };
+
+    // PSEUDONYM EVERY LOAN PARTY FIRST — the pfEsi "mask every fund ledger
+    // before any sweep" pattern: a row's narration/nature can quote a
+    // DIFFERENT loan party than its own, and maskKnownNames only substitutes
+    // names vaulted so far, so vaulting inside maskRow would let a later
+    // party's real name leak through an already-swept string.
+    for (const real of loanPartyReal.values()) {
+      vault.pseudonym(real, "other" satisfies GroupRole);
+    }
 
     // Order matters: PSEUDONYM FIRST (party names quoted whole in details),
     // then the whole-token sweep over free text, then scrubSecrets behind it.

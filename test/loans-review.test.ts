@@ -302,3 +302,87 @@ describe("Session.loansReview — narrations on the day-book path", () => {
     expect(sheet6[0].nature).toContain("cash against truck hire deposit");
   });
 });
+
+describe("Session.loansReview — narration quoting a different loan party", () => {
+  // maskLoans pre-vaults EVERY loan party before any sweep (pfEsi pattern);
+  // without it, a row built before another party was vaulted would leak that
+  // party's real name through its narration. Neither party gets a finding
+  // here (mode overrides keep every row an a/c-payee row).
+  const PARTIES = ["Trust A", "Trust B", "Trust C"];
+  const narrationParties: { name: string; parent: string }[] = [
+    ...PARTIES.map((n) => ({ name: n, parent: "Loans (Liability)" })),
+    { name: "Cash", parent: "Cash-in-Hand" },
+    { name: "Axis Bank", parent: "Bank Accounts" },
+  ];
+
+  async function crossNamingBundle(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "loans-crossname-"));
+    const p = join(dir, "daybook-bundle.json");
+    await writeFile(p, JSON.stringify({
+      tallyAgentExport: true,
+      company: "Sample Co",
+      groups: GROUPS,
+      ledgers: narrationParties,
+      vouchers: [
+        // Voucher 1: Trust B's narration quotes Trust C and Trust A.
+        {
+          date: "2025-08-15", voucherType: "Journal", voucherNumber: "J-1",
+          narration: "loan visible to Trust A settled like Trust C",
+          entries: [{ LEDGERNAME: "Cash", AMOUNT: -25000 }, { LEDGERNAME: "Trust B", AMOUNT: 25000 }],
+        },
+        // Voucher 2: Trust C itself, other order — vault-order independence.
+        {
+          date: "2025-09-15", voucherType: "Journal", voucherNumber: "J-2",
+          narration: "loan visible to Trust B",
+          entries: [{ LEDGERNAME: "Cash", AMOUNT: -25000 }, { LEDGERNAME: "Trust C", AMOUNT: 25000 }],
+        },
+      ],
+    }), "utf8");
+    return p;
+  }
+
+  it("pre-vaults every party so no raw name survives the sweep", async () => {
+    const session = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const result = await session.loansReview({
+      fromDate: "20250401", toDate: "20260331",
+      dayBookPath: await crossNamingBundle(),
+    });
+    const text = JSON.stringify(result);
+    for (const name of PARTIES) expect(text).not.toContain(name);
+  });
+});
+
+describe("Session.loansReview — mastersSource tri-state and grouped counts", () => {
+  it("treats a present-but-empty ledgers array as absent", async () => {
+    const session = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const dir = await mkdtemp(join(tmpdir(), "loans-empty-ledgers-"));
+    const p = join(dir, "daybook.json");
+    await writeFile(p, JSON.stringify({
+      tallyAgentExport: true,
+      company: "Sample Co",
+      groups: GROUPS,
+      ledgers: [], // present but EMPTY — degrades to absent, not "bundle"
+      vouchers: VOUCHERS,
+    }), "utf8");
+    const result = await session.loansReview({ fromDate: "20250401", toDate: "20260331", dayBookPath: p });
+    expect(result.mastersSource).toBe("absent");
+    expect(result.findings.map((f) => f.check)).toContain("loans_party_unmastered");
+  });
+
+  it("groups the voucher count in loans_party_unmastered (scrubDigits-safe)", async () => {
+    const session = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    // A six-digit voucher count is cheap to synthesise: one entry object is
+    // shared by reference in JSON.stringify (written once) — dedupe on dump.
+    const vouchers = Array.from({ length: 1_00_000 }, () => VOUCHERS[0]);
+    const dir = await mkdtemp(join(tmpdir(), "loans-count-"));
+    const p = join(dir, "daybook.json");
+    await writeFile(p, JSON.stringify({
+      tallyAgentExport: true, company: "Sample Co", vouchers,
+    }), "utf8");
+    const result = await session.loansReview({ fromDate: "20250401", toDate: "20260331", dayBookPath: p });
+    const unmastered = result.findings.find((f) => f.check === "loans_party_unmastered")!;
+    // count() groups the digit run; the bare "100000" run must be absent.
+    expect(unmastered.detail).toContain("1,00,000");
+    expect(unmastered.detail).not.toMatch(/1\d{5} vouchers/);
+  });
+});
