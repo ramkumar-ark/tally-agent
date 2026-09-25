@@ -84,7 +84,7 @@ import { parseNotdsTemplate, EMPTY_NOTDS_OPERATOR, type NotdsOperatorFile } from
 import {
   booksCandidates, doneKeyOf, depositedKeyOf, amountKeyOf, isNrSectionSpelling, winmanSectionOf,
   NOTDS_FORM_ID,
-  type NoTdsRow, type NotdsSheetKey,
+  type NoTdsCandidateRow, type NoTdsRow, type NotdsSheetKey,
 } from "./notds.js";
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
 const DAY_BOOK_FINDING = "(day-book file)";
@@ -832,6 +832,12 @@ export interface Session {
    * names and PANs, raw dates. The Winman writer (Task 8) consumes them.
    */
   notdsRows(): NoTdsRow[] | undefined;
+  /**
+   * The clause 21(b) books candidates from the cached tb_tds_review, before
+   * any operator decisions — the seed of the fillable No-TDS template
+   * (tb_write_notds_template). Undefined before a TDS review has run.
+   */
+  notdsCandidates(): NoTdsCandidateRow[] | undefined;
   /**
    * The cached clause 20(b) rows from the last pfEsiReview, with raw dates —
    * the report writer (tb_write_pf_esi_report) consumes them unchanged; the
@@ -4635,6 +4641,10 @@ async function realPathId(p: string): Promise<string> {
     tds3cdResult: () => lastTds3cd,
     noTdsReview,
     notdsRows: () => lastNoTds,
+    notdsCandidates: () =>
+      lastTdsBooks
+        ? booksCandidates(lastTdsBooks.events, lastTdsBooks.liabilities, lastTdsBooks.panOf, lastTdsBooks.panDerivedFromGstinOf)
+        : undefined,
     write3cdNoTds,
   };
 }
