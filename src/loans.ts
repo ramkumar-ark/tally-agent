@@ -200,8 +200,11 @@ export interface LoansOperator {
   /** C2/Task 5: sheet-2 rows are operator-only; the books never invent figures. */
   specifiedSums?: LoansSheetRow[];
   /**
-   * Task 5: sheet-7 rows (bearer cheque/DD character) are operator-only too;
-   * the books never invent one. Absent ⇒ no sheet-7 rows.
+   * Task 5: 269ST operator declarations are operator-only too; the books
+   * never invent one. Routing (fix 2026-09-25): a declaration carrying
+   * `bearer: "Y"` files into sheet 7 (the bearer cheque/DD family); a
+   * declaration with blank/absent bearer files into sheet 6 (the
+   * otherwise-than family). Absent ⇒ neither sheet gains rows.
    */
   st26Declarations?: LoansSheetRow[];
 }
@@ -481,8 +484,9 @@ export function buildLoansRows(
     // honest rule, stated in the fix report.
     const breachCheck: CheckId =
       bucket.direction === "accepted" ? "loans_cash_acceptance" : "loans_cash_repayment";
-    // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment
-    // (declaration rows are reporting, independent of the 20k threshold).
+    // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment.
+    // That gate is on `ov`, NOT on `stat.crossed`: declaration rows are
+    // reporting (operator-declared) and ride regardless of the threshold.
     if (bucket.direction === "repaid" && ov === "Cash-breach-declared") res.sheet4.push(row);
 
     // Reviewer fix: a critical s.269SS/T breach is claimed only when THIS
@@ -618,8 +622,10 @@ export interface LoansReviewResult {
  * sum reaches the limit. A same-day pair of sub-limit vouchers therefore still
  * reports, as one aggregated row citing the aggregate.
  *
- * Sheet 7 (bearer cheque/DD, C5) carries rows ONLY from operator declarations
- * (`st26Declarations`, Task 5).
+ * Sheets 6/7 carry operator declarations routed on the bearer flag (C5, Task
+ * 5): a bearer "Y" declaration files into sheet 7 (bearer cheque/DD family),
+ * a blank/absent-bearer declaration into sheet 6 (otherwise-than family).
+ * The books scan itself never emits a declaration row.
  *
  * `priorCashEvents` (optional 4th param; Task 6 wires it): the Task-3
  * loanLedgerEvents output (or its cash subset). When a group's party+date
@@ -768,9 +774,20 @@ export function scan269St(
     b.amount - a.amount || (a.party < b.party ? -1 : a.party > b.party ? 1 : 0);
   sheet6.sort(byAmount);
 
+  // Operator declarations route on the bearer flag: a "Y" declaration is a
+  // bearer cheque/DD (sheet 7's family); a blank/absent one is an
+  // otherwise-than cash receipt/payment (sheet 6's family). Declarations are
+  // their own rows and the books scan above only emits money-own books
+  // vouchers — no declaration row ever carries books voucher data, so there
+  // is no party+day+type aggregation across the two sources and no double
+  // counting. Declarations ride after the books rows, already sorted.
+  const allDeclarations = operator.st26Declarations ?? [];
+  const declarationsSheet7 = allDeclarations.filter((d) => d.bearer === "Y");
+  const declarationsSheet6 = allDeclarations.filter((d) => d.bearer !== "Y");
+
   return {
-    sheet6,
-    sheet7: [...(operator.st26Declarations ?? [])],
+    sheet6: [...sheet6, ...declarationsSheet6],
+    sheet7: declarationsSheet7,
     findings,
   };
 }

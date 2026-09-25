@@ -432,12 +432,12 @@ export function dateCell(ref: CellRef, cell: GridCell | undefined): string {
     const month = Number(slash[2]);
     const year = slash[3].length <= 2 ? 2000 + Number(slash[3]) : Number(slash[3]);
     if (day <= 12 && month <= 12) {
-      throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): date is ambiguous — Excel read both parts as day and month; type it as 16-Jan-2026`);
+      throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): date is ambiguous — Excel read both parts as day and month; type it as 2026-01-16 or 20260116`);
     }
     const p = (x: number) => String(x).padStart(2, "0");
     return `${year}${p(month)}${p(day)}`;
   }
-  throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): not a date — type it as 16-Jan-2026 or 2026-01-16`);
+  throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): not a date — type it as 2026-01-16 or 20260116`);
 }
 
 export function amountCell(ref: CellRef, cell: GridCell | undefined): number {

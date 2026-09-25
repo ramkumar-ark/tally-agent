@@ -4,7 +4,7 @@
  *
  * Limits:
  * - l.269SS / l.269T: no accepting or repaying any loan/deposit/specified sum
- *   of Rs. 20,000 or more otherwise than by an account-payee cheque/DD/ECS.
+ *   of more than Rs. 20,000 otherwise than by an account-payee cheque/DD/ECS.
  *   Receipt penalty: s.271D; repayment penalty: s.271E.
  * - l.269ST: no receiving Rs. 2,00,000 or more in the aggregate in respect of
  *   a loan (or a instalment thereof) — receipted in cash disobedience is

@@ -243,23 +243,70 @@ describe("scan269St", () => {
     expect(f?.detail).not.toContain("269SS/T");
   });
 
-  it("rule 5: sheet7 rows come only from operator.st26Declarations (default [])", () => {
-    const decl: LoansSheetRow = {
+  it("rule 5: sheet7 comes only from bearer-Y declarations; blank-bearer declarations file into sheet6 after the books rows", () => {
+    const bearerDecl: LoansSheetRow = {
       party: "Declared Party",
       amount: 300_000,
       type: "Receipts",
       date: "20250501",
       nature: "bearer cheque",
+      bearer: "Y",
+    };
+    const blankDecl: LoansSheetRow = {
+      party: "Blank Bearer Party",
+      amount: 210_000,
+      type: "Receipts",
+      date: "20250502",
     };
     const declared = scan269St(
       [],
       ctx,
-      { ...EMPTY_LOANS_OPERATOR, st26Declarations: [decl] },
+      { ...EMPTY_LOANS_OPERATOR, st26Declarations: [bearerDecl, blankDecl] },
     );
-    expect(declared.sheet7).toEqual([decl]);
+    expect(declared.sheet7).toEqual([bearerDecl]);
+    expect(declared.sheet6).toEqual([blankDecl]);
+
+    // A declaration with an explicit empty bearer also rides sheet 6.
+    const emptyBearer = scan269St(
+      [],
+      ctx,
+      { ...EMPTY_LOANS_OPERATOR, st26Declarations: [{ ...bearerDecl, bearer: "" }] },
+    );
+    expect(emptyBearer.sheet7).toEqual([]);
+    expect(emptyBearer.sheet6).toHaveLength(1);
 
     const bare = scan269St([], ctx, EMPTY_LOANS_OPERATOR);
     expect(bare.sheet7).toEqual([]);
+    expect(bare.sheet6).toEqual([]);
+  });
+
+  it("rule 5: declarations never double-count — books vouchers emit their own sheet6 rows and declarations ride after them, unaggregated", () => {
+    const books = scan269St(
+      [
+        mk("20250415", [
+          { ledger: "Cash", amount: 205_000 },
+          { ledger: "Acme Traders", amount: -205_000 },
+        ]),
+      ],
+      ctx,
+      {
+        ...EMPTY_LOANS_OPERATOR,
+        st26Declarations: [
+          {
+            party: "Acme Traders",
+            amount: 205_000,
+            type: "Receipts" as const,
+            date: "20250415",
+          },
+        ],
+      },
+    );
+    // Two independent rows: the books-scan row first, then the declaration.
+    expect(books.sheet6).toHaveLength(2);
+    expect(books.sheet6[0]).toMatchObject({ party: "Acme Traders", amount: 205_000, date: "20250415" });
+    expect(books.sheet6[1]).toMatchObject({ party: "Acme Traders", amount: 205_000, date: "20250415" });
+    // The books scan's own finding count is unchanged (1, from the voucher).
+    expect(books.findings.filter((x) => x.check === "loans_269st_receipt")).toHaveLength(1);
   });
 
   it("sheet6 is unmarked for cancelled vouchers and non-cash movements", () => {
