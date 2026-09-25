@@ -241,3 +241,64 @@ describe("Session.loansRows — raw cache for the Winman writer", () => {
     expect(session.loansRows()).toBeUndefined();
   });
 });
+
+describe("Session.loansReview — narrations on the day-book path", () => {
+  // Narrations survive readDayBook -> VoucherRow (fix round): C4 mode hints
+  // and sheet-6 nature text ride the file channel, not just live runs.
+  async function narratedBundlePath(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "loans-narration-"));
+    const p = join(dir, "daybook-bundle.json");
+    await writeFile(p, JSON.stringify({
+      tallyAgentExport: true,
+      company: "Sample Co",
+      groups: GROUPS,
+      ledgers: LEDGERS,
+      vouchers: [
+        // Object narration reads empty (never "[object Object]") → default ECS.
+        {
+          date: "2025-08-15", voucherType: "Payment", voucherNumber: "P-2",
+          narration: { rich: "object narration" },
+          entries: [{ LEDGERNAME: "Neighbour Trust", AMOUNT: -30000 }, { LEDGERNAME: "Axis Bank", AMOUNT: 30000 }],
+        },
+        // RTGS hint overrides the ECS default (C4).
+        {
+          date: "2025-09-15", voucherType: "Payment", voucherNumber: "P-3",
+          narration: "settled through RTGS transfer",
+          entries: [{ LEDGERNAME: "Colony Trust", AMOUNT: -40000 }, { LEDGERNAME: "Axis Bank", AMOUNT: 40000 }],
+        },
+        // Plain narration on a bank repayment — ECS default.
+        {
+          date: "2025-10-15", voucherType: "Payment", voucherNumber: "P-4",
+          narration: "loan repayment",
+          entries: [{ LEDGERNAME: "Metro Finance", AMOUNT: -50000 }, { LEDGERNAME: "Axis Bank", AMOUNT: 50000 }],
+        },
+        // Cash receipt candidate whose narration carries the sheet-6 nature.
+        {
+          date: "2025-11-01", voucherType: "Receipt", voucherNumber: "R-2",
+          narration: "cash against truck hire deposit",
+          entries: [{ LEDGERNAME: "Cash", AMOUNT: -205000 }, { LEDGERNAME: "Wholesale Client", AMOUNT: 205000 }],
+        },
+      ],
+    }), "utf8");
+    return p;
+  }
+
+  it("carries narration hints into modes and the 269ST nature", async () => {
+    const session = createSession(fakeDownstream(), EMPTY_OVERRIDES);
+    const result = await session.loansReview({
+      fromDate: "20250401", toDate: "20260331",
+      dayBookPath: await narratedBundlePath(),
+    });
+    // One bank-class repayment row per party, all crossed > 20,000.
+    const repaid = result.rows.filter((r) => r.mode !== undefined);
+    expect(repaid).toHaveLength(3);
+    const modes = repaid.map((r) => r.mode).sort();
+    expect(modes).toEqual(["ECS", "ECS", "RTGS"]);
+    expect(JSON.stringify(result)).not.toContain("[object Object]");
+
+    // Sheet-6 nature carries the narration text.
+    const sheet6 = result.rows.filter((r) => r.type === "Receipts");
+    expect(sheet6).toHaveLength(1);
+    expect(sheet6[0].nature).toContain("cash against truck hire deposit");
+  });
+});

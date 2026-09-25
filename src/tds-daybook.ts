@@ -96,6 +96,7 @@ function normalizeTallyRow(v: unknown): unknown {
     date: row.date,
     voucherType: row.vouchertypename,
     voucherNumber: row.vouchernumber,
+    narration: row.narration,
     partyLedgerName: row.partyledgername,
     isCancelled: truthy(row.iscancelled) || truthy(row.isdeleted),
     entries: [

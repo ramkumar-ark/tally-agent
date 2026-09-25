@@ -34,6 +34,8 @@ export interface VoucherRow {
   voucherNumber: string;
   partyLedgerName: string;
   cancelled: boolean;
+  /** Narration text when the source voucher carries it (live + day-book). Empty when absent. */
+  narration?: string;
   entries: VoucherEntry[];
 }
 
@@ -206,6 +208,7 @@ export function parseVoucherRows(
       voucherNumber: String(row.voucherNumber ?? ""),
       partyLedgerName: String(row.partyLedgerName ?? "").trim(),
       cancelled: truthy(row.isCancelled),
+      ...(text(row.narration) ? { narration: text(row.narration) } : {}),
       entries,
     });
   }
