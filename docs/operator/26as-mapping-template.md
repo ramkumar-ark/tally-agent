@@ -35,6 +35,34 @@ Excel template, the same way the TDS review takes a filled TDS template.
 4. **Pass the filled file back.** Give its path to `tb_26as_review` as
    `as26MapPath` and re-run. Repeat until the gaps close.
 
+## Bank interest (s.194A) and fixed deposits
+
+Some banks/deductors report interest in many small amounts that can never be
+matched bill by bill. The template's **Bank Interest** sheet is the input for
+them:
+
+- One row per ledger. Write the bank's name **exactly as it appears in 26AS**
+  in "26AS name (bank)", and its **Interest income ledger** and/or **FD
+  ledger** in the next columns. Repeat the bank's name on extra rows for
+  further ledgers; leave a column blank when that side does not apply.
+- **Presence on this sheet is the bank mark.** A 26AS name listed here
+  reconciles its 194A entries on **totals** (interest vs 26AS amount, TDS vs
+  26AS tax) — never bill by bill, and its entries stay off the "Books not in
+  26AS" / "26AS unmatched" sheets.
+- Non-bank 194A deductors keep the ordinary bill-level reconciliation; nothing
+  on this sheet affects them.
+- Interest entries where the books show TDS of **about 20%** of the interest
+  (the bank deducted the higher rate, often for a missing PAN) are **left out
+  of the totals comparison** because they will not reflect in 26AS. They are
+  listed separately on the report's **"FD interest 20% TDS"** sheet, with a
+  count, interest and TDS totals, and a finding noting they are not expected
+  in 26AS.
+- If you name a bank but fill no ledgers, the review says so (and does not
+  pretend a zero-books comparison is valid): fill the ledger names and re-run.
+- A bank not on this sheet at all does not change anything: leave the sheet
+  empty when no bank interest is involved, and older filled templates remain
+  valid.
+
 ## Notes
 
 - The file carries company and party names. **Never paste its rows into chat.**

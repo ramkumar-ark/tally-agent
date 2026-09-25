@@ -110,6 +110,9 @@ export function buildBillRows(
   const rows: BillRow[] = [];
 
   for (const r of result.recon) {
+    // Totals-only parties (design §12.1) get no drill-down rows: their
+    // entries stay off "Books not in 26AS" / "26AS unmatched" / value rows.
+    if (r.totalsOnly) continue;
     const pool = poolOf(r.match.ledgerKeys);
 
     for (const i of r.unmatchedBooks) {
@@ -156,6 +159,7 @@ export function buildBillRows(
   }
 
   for (const r of result.recon) {
+    if (r.totalsOnly) continue;
     const pool = poolOf(r.match.ledgerKeys);
     for (const t of partyTxsOf(file, r.match.kind, r.match.as26NameKey)) {
       const date = t.bookingDate || t.date;

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { buildWorkbook, type Sheet } from "./xlsx.js";
 import { readWorkbook, type GridRow, type GridSheet } from "./xlsx-read.js";
 import { canonicalKey } from "./key.js";
-import { loadAs26Map, round2, EMPTY_AS26_MAP, type As26Map, type As26MapEntry } from "./as26.js";
+import { loadAs26Map, round2, EMPTY_AS26_MAP, type As26Map, type As26MapEntry, type BankInterestMapping } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 
 /**
@@ -97,6 +97,9 @@ const instructions = (company: string | undefined, hasLedgers: boolean): Sheet =
         : "The Ledgers sheet lists this company's ledger names for reference — copy a name into the Tally ledger column.",
     ],
     ["Do not rename the sheets or the header columns; the parser binds by header text, never by position."],
+    [
+      "Banks: some banks deduct TDS on fixed-deposit interest. On the 'Bank Interest' sheet, write one row per ledger — the bank's name exactly as it appears in 26AS, then its interest income ledger and/or FD ledger. Presence on that sheet marks the 26AS name a bank: its 194A entries then reconcile on TOTALS (never bill by bill). Leave the sheet empty if no bank interest is involved.",
+    ],
     ["Worked example (invented names only):"],
     ["Mapping | Sample Builders LLP | tds | 12,000.00 | Sample Builders"],
   ],
@@ -107,6 +110,27 @@ const ledgerReferenceSheet = (ledgers: string[]): Sheet => ({
   columns: [{ header: "Tally ledger", width: 40, format: "text" }],
   rows: ledgers.map((l) => [l]),
 });
+
+/** The Bank Interest mapping sheet (design §12.5): presence on it marks the
+ * 26AS name a bank and names the interest income and FD ledgers belonging to
+ * it. Blank so the operator fills it; the columns reuse the Ledgers-backed
+ * dropdown range. */
+export const BANK_SHEET = "Bank Interest";
+
+function bankInterestSheet(ledgers: string[]): Sheet {
+  const validation = ledgers.length > 0
+    ? { formula: ledgerRange(ledgers.length + 1) }
+    : undefined;
+  return {
+    name: BANK_SHEET,
+    columns: [
+      { header: "26AS name (bank)", width: 34, format: "text" },
+      { header: "Interest income ledger", width: 34, format: "text", ...(validation ? { validation } : {}) },
+      { header: "FD ledger", width: 34, format: "text", ...(validation ? { validation } : {}) },
+    ],
+    rows: [],
+  };
+}
 
 export function buildAs26MapTemplate(opts: {
   company?: string;
@@ -151,6 +175,7 @@ export function buildAs26MapTemplate(opts: {
   return buildWorkbook([
     instructions(opts.company, ledgers.length > 0),
     mapping,
+    bankInterestSheet(ledgers),
     ledgerReferenceSheet(ledgers),
   ]);
 }
@@ -219,7 +244,82 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
     seenLedger.add(lk);
     mappings.push({ ledger, as26Name });
   }
-  return { mappings };
+  const banks = parseBankInterestSheet(sheets);
+  return { mappings, banks };
+}
+
+const BANK_TOKENS = {
+  name: "26asnamebank",
+  interest: "interestincomeledger",
+  fd: "fdledger",
+} as const;
+
+/** The optional Bank Interest sheet (design §12.5). Rows group by canonical
+ * 26AS name into one bank entry; a ledger named twice refuses (row number
+ * only, never a value). A missing sheet is normal: no bank marked. */
+function parseBankInterestSheet(sheets: GridSheet[]): BankInterestMapping[] {
+  const sheet = sheets.find((s) => normHeader(s.name) === "bankinterest");
+  if (!sheet) return [];
+  const header: GridRow | undefined = sheet.rows[0];
+  const byHeader = new Map<string, number>();
+  for (const [idx, c] of header?.cells ?? []) {
+    if (typeof c.value !== "string") continue;
+    const k = normHeader(c.value);
+    if (!byHeader.has(k)) byHeader.set(k, idx);
+  }
+  if (byHeader.get(BANK_TOKENS.name) === undefined) {
+    throw new Error(
+      "as26-map template: the 'Bank Interest' sheet needs an \"26AS name (bank)\" header column" +
+        ` — found headers: ${[...byHeader.keys()].join(", ") || "none"}`,
+    );
+  }
+  const interestCol = byHeader.get(BANK_TOKENS.interest) ?? byHeader.get("interestledger");
+  const fdCol = byHeader.get(BANK_TOKENS.fd);
+  const banks = new Map<string, BankInterestMapping>();
+  const seenLedger = new Set<string>();
+  for (const r of sheet.rows.slice(1)) {
+    const cell = (col: number | undefined, headerName: string): string | undefined => {
+      if (col === undefined) return undefined;
+      const c = r.cells.get(col);
+      if (!c || c.value === null || String(c.value).trim() === "") return undefined;
+      if (typeof c.value !== "string") {
+        throw new Error(
+          `as26-map template row ${r.row}, column ${colLetter(col)} (${headerName}): cell is numeric — retype it as text`,
+        );
+      }
+      return String(c.value).trim();
+    };
+    const name = cell(byHeader.get(BANK_TOKENS.name), "26AS name (bank)");
+    const interest = cell(interestCol, "Interest income ledger");
+    const fd = cell(fdCol, "FD ledger");
+    if (!name && !interest && !fd) continue;
+    if (!name) {
+      throw new Error(
+        `as26-map template row ${r.row} on the Bank Interest sheet: ledgers are filled but "26AS name (bank)" is blank`,
+      );
+    }
+    const nk = canonicalKey(name);
+    let bank = banks.get(nk);
+    if (!bank) {
+      bank = { as26Name: name, interestLedgers: [], fdLedgers: [] };
+      banks.set(nk, bank);
+    }
+    for (const [led, list, headerName] of [
+      [interest, bank.interestLedgers, "Interest income ledger"],
+      [fd, bank.fdLedgers, "FD ledger"],
+    ] as Array<[string | undefined, string[], string]>) {
+      if (!led) continue;
+      const lkey = canonicalKey(led);
+      if (seenLedger.has(lkey)) {
+        throw new Error(
+          `as26-map template row ${r.row} on the Bank Interest sheet: names a ledger already named earlier on the sheet`,
+        );
+      }
+      seenLedger.add(lkey);
+      list.push(led);
+    }
+  }
+  return [...banks.values()];
 }
 
 /** The template loader: a missing file degrades to empty with a warning, like the JSON map. */

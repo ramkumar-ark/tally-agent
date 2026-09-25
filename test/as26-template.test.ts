@@ -69,6 +69,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     const buf = buildAs26MapTemplate({ company: "Sample Company", deductors, map, ledgers });
     expect(parseAs26MapTemplate(buf)).toEqual({
       mappings: [{ ledger: "Alpha Traders Ledger", as26Name: "Alpha Traders" }],
+      banks: [],
     });
     const mapping = sheetOf(buf, "Mapping")!;
     const cell = (row: number, col: number) =>
@@ -83,7 +84,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
     ]};
     const buf = buildAs26MapTemplate({ deductors, map: multi, ledgers: ["Alpha Site Ledger", "Alpha Head Office"] });
-    expect(parseAs26MapTemplate(buf)).toEqual(multi);
+    expect(parseAs26MapTemplate(buf)).toEqual({ ...multi, banks: [] });
     const mapping = sheetOf(buf, "Mapping")!;
     const nameAt = (row: number) => mapping.rows[row].cells.get(0)?.value;
     const ledgerAt = (row: number) => mapping.rows[row].cells.get(3)?.value;
@@ -100,7 +101,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     ]))).toEqual({ mappings: [
       { ledger: "Alpha Site Ledger", as26Name: "Alpha Traders" },
       { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
-    ]});
+    ], banks: [] });
   });
 
   it("skips fully blank rows and pre-filled rows with no ledger yet", () => {
@@ -108,7 +109,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       ["Alpha Traders", "tds", 12000, ""],
       [null, null, null, null],
       ["Beta Minerals", "tcs", 500, "Beta Minerals Ledger"],
-    ]))).toEqual({ mappings: [{ ledger: "Beta Minerals Ledger", as26Name: "Beta Minerals" }] });
+    ]))).toEqual({ mappings: [{ ledger: "Beta Minerals Ledger", as26Name: "Beta Minerals" }], banks: [] });
   });
 
   it("refuses a ledger mapped twice (even to different 26AS names) citing the row number only", () => {
@@ -183,6 +184,7 @@ describe("loadAs26MapFile", () => {
     });
     expect(loadAs26MapFile(tmpFile("map.xlsx", buf))).toEqual({
       mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }],
+      banks: [],
     });
   });
 
@@ -195,5 +197,68 @@ describe("loadAs26MapFile", () => {
     const warns: string[] = [];
     expect(loadAs26MapFile("/nonexistent/as26-map.xlsx", (w) => warns.push(w))).toEqual(EMPTY_AS26_MAP);
     expect(warns).toHaveLength(1);
+  });
+});
+
+// --- addendum 2: the Bank Interest sheet (design §12.5) ---
+
+const BANK_COLUMNS = [
+  { header: "26AS name (bank)" },
+  { header: "Interest income ledger" },
+  { header: "FD ledger" },
+];
+const rawBank = (rows: Array<Array<string | number | null>>): Buffer =>
+  buildWorkbook([
+    { name: "Mapping", columns: MAPPING_COLUMNS, rows: [] },
+    { name: "Bank Interest", columns: BANK_COLUMNS, rows },
+  ]);
+
+describe("Bank Interest mapping sheet", () => {
+  it("the generated template contains the blank Bank Interest sheet", () => {
+    const buf = buildAs26MapTemplate({ company: "Sample", deductors: [], map: { mappings: [] }, ledgers: [] });
+    const sheet = sheetOf(buf, "Bank Interest");
+    expect(sheet).toBeDefined();
+    const header = [...sheet!.rows[0].cells.entries()].map(([c, cell]) => `${c}:${cell.value}`).join("|");
+    expect(header).toContain("26AS name (bank)");
+    expect(header).toContain("Interest income ledger");
+    expect(header).toContain("FD ledger");
+  });
+  it("groups rows by 26AS name into one bank entry with interest and FD ledgers", () => {
+    const map = parseAs26MapTemplate(rawBank([
+      ["Sample Bank", "Sample Bank FD Int A/c", null],
+      ["Sample Bank", null, "Sample Bank FD A/c"],
+      ["Other Bank Ltd", "Other Bank Int A/c", "Other Bank FD A/c"],
+      [null, null, null],
+    ]));
+    expect(map.mappings).toEqual([]);
+    expect(map.banks).toEqual([
+      { as26Name: "Sample Bank", interestLedgers: ["Sample Bank FD Int A/c"], fdLedgers: ["Sample Bank FD A/c"] },
+      { as26Name: "Other Bank Ltd", interestLedgers: ["Other Bank Int A/c"], fdLedgers: ["Other Bank FD A/c"] },
+    ]);
+  });
+  it("accepts a bank with a name but no ledgers yet (fill-in progress row)", () => {
+    const map = parseAs26MapTemplate(rawBank([["Sample Bank", "", null]]));
+    expect(map.banks).toEqual([{ as26Name: "Sample Bank", interestLedgers: [], fdLedgers: [] }]);
+  });
+  it("refuses a ledger named twice on the sheet, citing the row number only", () => {
+    let msg = "";
+    try {
+      parseAs26MapTemplate(rawBank([
+        ["Sample Bank", "Sample Bank FD Int A/c", null],
+        ["Sample Bank", "Sample Bank FD Int A/c", null],
+      ]));
+    } catch (e) { msg = String((e as Error).message); }
+    expect(msg).toMatch(/row 3/);
+    expect(msg).not.toMatch(/Sample Bank/);
+  });
+  it("refuses ledgers filled with no bank name, citing the row number only", () => {
+    expect(() =>
+      parseAs26MapTemplate(rawBank([[null, "Sample Bank FD Int A/c", null]])),
+    ).toThrow(/row 2 .*"26AS name \(bank\)" is blank/);
+  });
+  it("an older filled template without the sheet loads unchanged with empty banks", () => {
+    expect(parseAs26MapTemplate(rawTemplate([
+      ["Alpha Traders", "tds", 1, "Alpha Ledger"],
+    ]))).toEqual({ mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }], banks: [] });
   });
 });

@@ -1281,6 +1281,25 @@ export async function writeAs26Report(opts: {
     ]),
   };
 
+  const fd20Sheet: Sheet = {
+    name: "FD interest 20% TDS",
+    columns: [
+      { header: "row", width: 8, format: "text" },
+      { header: "party", width: 26, format: "text" },
+      { header: "date", width: 12, format: "text" },
+      { header: "interest", width: 16, format: "money" },
+      { header: "TDS (20%)", width: 16, format: "money" },
+    ],
+    rows: [
+      ...(opts.result.fd20 ?? []).map((e, i) => [
+        `F20-${i + 1}`, e.party, e.date, e.interest, e.tax,
+      ]),
+      ["", "", "total",
+        round2((opts.result.fd20 ?? []).reduce((s, e) => s + e.interest, 0)),
+        round2((opts.result.fd20 ?? []).reduce((s, e) => s + e.tax, 0))],
+    ],
+  };
+
   await writeFile(
     markdownPath,
     demaskText(opts.markdown, opts.vault) + "\n",
@@ -1289,7 +1308,7 @@ export async function writeAs26Report(opts: {
   await writeWorkbook({
     reportDir: opts.reportDir,
     fileName: `as26-review-${stem}.xlsx`,
-    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet],
+    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet, fd20Sheet],
     vault: opts.vault,
   });
   return { markdownPath, workbookPath };

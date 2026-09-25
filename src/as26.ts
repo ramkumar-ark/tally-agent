@@ -4,7 +4,17 @@ import type { As26File, As26Kind } from "./as26-file.js";
 
 export interface BooksDeduction { ledgerKey: string; kind: As26Kind; date: string; tax: number; voucherType: string; voucherNumber: string | null; reference: string | null; }
 export interface BooksSale { ledgerKey: string; date: string; ref: string | null; taxable: number; gross: number; }
-export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; }
+/** One books voucher of an operator-mapped bank (design §12.2): interest
+ * credited on the bank's interest ledgers, TDS credited on a receivable
+ * ledger in the same voucher, FD principal debited (carried, not compared). */
+export interface BankBooksEvent { nameKey: string; date: string; interest: number; tax: number; fdDebit: number; }
+export interface BankBooks { nameKey: string; events: BankBooksEvent[]; }
+export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; bankEvents?: BankBooks[]; }
+
+/** The Bank Interest sheet's parsed rows (design §12.5): presence marks the
+ * 26AS name a bank; its interest income and FD ledgers feed the bank-194A
+ * books side. */
+export interface BankInterestMapping { as26Name: string; interestLedgers: string[]; fdLedgers: string[]; }
 
 export interface PartyMatch {
   /** Every Tally ledger mapped to this deductor/collector, canonical keys. */
@@ -48,6 +58,17 @@ export function matchParties(
   // party. The reverse — one ledger standing for two deductors — is refused
   // by the loader, so it never reaches here.
   const groupsByKey = new Map<string, PartyMatch>();
+  const addLedgerToGroup = (group: PartyMatch, lk: string, ledgerName: string): void => {
+    // A bank's ledgers may also appear on the Mapping sheet; union, never
+    // duplicate (canonical keys cross-refuse elsewhere by policy).
+    if (!group.ledgerKeys.includes(lk)) {
+      group.ledgerKeys.push(lk);
+      group.ledgerNames.push(ledgerName);
+      group.ledgerName = group.ledgerNames.join(" + ");
+    }
+    matchedLedgerKeys.add(lk);
+    matchedNameKeys.add(`${group.kind}|${group.as26NameKey}`);
+  };
   for (const m of map.mappings) {
     const lk = canonicalKey(m.ledger), nk = canonicalKey(m.as26Name);
     const ledger = ledgerByKey.get(lk);
@@ -70,11 +91,28 @@ export function matchParties(
       };
       groupsByKey.set(groupKey, group);
     }
-    group.ledgerKeys.push(lk);
-    group.ledgerNames.push(m.ledger);
-    group.ledgerName = group.ledgerNames.join(" + ");
-    matchedLedgerKeys.add(lk);
-    matchedNameKeys.add(groupKey);
+    addLedgerToGroup(group, lk, m.ledger);
+  }
+  // Bank Interest rows: the operator marks 26AS names banks and names their
+  // interest income and FD ledgers (design §12.5). The bank party joins the
+  // reconciliation even if its ledgers are absent from the master list —
+  // the totals comparison runs on the books' own voucher evidence.
+  for (const b of map.banks ?? []) {
+    const nk = canonicalKey(b.as26Name);
+    const summary = file.summaries.find((s) => s.nameKey === nk);
+    const kind: As26Kind = summary?.kind ?? "tds";
+    const groupKey = `${kind}|${nk}`;
+    let group = groupsByKey.get(groupKey);
+    if (!group) {
+      group = {
+        ledgerKeys: [], ledgerNames: [], ledgerName: "",
+        as26NameKey: nk, as26Name: b.as26Name, kind, source: "operator",
+      };
+      groupsByKey.set(groupKey, group);
+    }
+    for (const l of [...b.interestLedgers, ...b.fdLedgers]) {
+      addLedgerToGroup(group, canonicalKey(l), l);
+    }
   }
   matches.push(...groupsByKey.values());
 
@@ -97,7 +135,7 @@ export function matchParties(
 }
 
 export interface As26MapEntry { ledger: string; as26Name: string; }
-export interface As26Map { mappings: As26MapEntry[]; }
+export interface As26Map { mappings: As26MapEntry[]; banks?: BankInterestMapping[]; }
 export const EMPTY_AS26_MAP: As26Map = { mappings: [] };
 
 /**
@@ -241,6 +279,17 @@ export const AS26_TAX_TOLERANCE = 1.0;
 export const AS26_VALUE_TOLERANCE = 1000.0;
 export const COMBINATION_MAX_SIZE = 4;
 export const COMBINATION_MAX_ITEMS = 40;
+/** The higher 20% TDS some banks deduct on FD interest (no PAN on file);
+ * such books entries are excluded from the 26AS totals comparison (design
+ * §12.4; never expected to appear in 26AS). Tolerance: 1% of the interest,
+ * with a ₹1 floor so sub-₹100 entries still match. */
+export const FD20_TAX_RATE = 0.2;
+export const FD20_RELTOL = 0.01;
+export const isFd20 = (interest: number, tax: number): boolean =>
+  interest > 0 && tax > 0 &&
+  Math.abs(tax - FD20_TAX_RATE * interest) <= Math.max(1, FD20_RELTOL * interest);
+/** Punctuation/case-insensitive section token (`194I(a)` -> `194ia`). */
+export const sectionToken = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 export interface ReconItem { date: string; tax: number; dedIdx?: number; txIdx?: number; gross?: number; status?: string | null; }
 
@@ -258,6 +307,9 @@ export interface PartyRecon {
   booksTaxableValue?: number;
   booksGrossValue?: number;
   as26GrossValue?: number;
+  /** Totals-only party (design §12.1): every 26AS section is 194R, or 194A
+   * with the operator-marked bank — no bill-level findings or rows. */
+  totalsOnly?: boolean;
 }
 
 /** Index-combination subsets of `items` with size 2..maxSize, in index order. */
@@ -484,6 +536,10 @@ export interface As26Result {
   gaps: As26Gap[];
   totals: { booksTax: number; as26Tax: number; partiesMatched: number; combinationExplained: number; ambiguous: number };
   skipped: As26File["skipped"];
+  /** Books FD-interest events the books show taxed at ~20% — the higher rate
+   * some banks deduct (no PAN on file). Excluded from the totals comparison;
+   * reported, never expected in 26AS (design §12.4). */
+  fd20: BankBooksEvent[];
 }
 
 import { as26FindingId, type As26CheckId, type As26Finding, type As26ScheduleRow } from "./types.js";
@@ -524,6 +580,9 @@ export function analyzeAs26(
   const sumSales = (rows: BooksSale[], pick: (s: BooksSale) => number): number => round2(rows.reduce((s, x) => s + pick(x), 0));
 
   const recons: PartyRecon[] = [];
+  /** Books FD-interest entries taxed at ~20% — excluded from totals, reported
+   * separately (design §12.4). */
+  const fd20All: BankBooksEvent[] = [];
   for (const match of matches) {
     const r = reconcileParty(file, facts, match, opts.toDate);
     recons.push(r);
@@ -536,7 +595,45 @@ export function analyzeAs26(
     r.booksGrossValue = booksGross;
     r.as26GrossValue = as26Gross;
 
+    // Totals-only parties (design §12.1): every 26AS section of the party is
+    // 194R, or 194A with the operator-marked bank. Their entries are many
+    // small amounts no bill-level matcher should chase; totals compare below.
+    const sections = [...new Set(
+      file.summaries.filter((s) => s.kind === match.kind && s.nameKey === match.as26NameKey).map((s) => s.section),
+    )];
+    const toks = sections.map(sectionToken);
+    const bankKeyOf = new Set((map.banks ?? []).map((b) => canonicalKey(b.as26Name)));
+    const isBank = toks.some((t) => t === "194a") && bankKeyOf.has(match.as26NameKey);
+    const totalsOnly = toks.length > 0 &&
+      toks.every((t) => t === "194r" || (t === "194a" && bankKeyOf.has(match.as26NameKey)));
+    r.totalsOnly = totalsOnly;
+
+    // 20% TDS split (design §12.4) runs whenever the operator mapped the
+    // bank's interest/FD ledgers; a 20%-taxed event never reflects in 26AS
+    // and is excluded from the books totals below.
+    const bankMapEntry = (map.banks ?? []).find((b) => canonicalKey(b.as26Name) === match.as26NameKey);
+    const bb = facts.bankEvents?.find((e) => e.nameKey === match.as26NameKey);
+    let compTax = r.booksTax;
+    let booksInterest = 0;
+    if (isBank && bankMapEntry) {
+      const events = bb?.events ?? [];
+      const non20 = events.filter((e) => !isFd20(e.interest, e.tax));
+      compTax = round2(non20.reduce((s, e) => s + e.tax, 0));
+      booksInterest = round2(non20.reduce((s, e) => s + e.interest, 0));
+      const fd20Entries = events.filter((e) => isFd20(e.interest, e.tax));
+      if (fd20Entries.length > 0) {
+        const fdInterest = round2(fd20Entries.reduce((s, e) => s + e.interest, 0));
+        const fdTax = round2(fd20Entries.reduce((s, e) => s + e.tax, 0));
+        fd20All.push(...fd20Entries);
+        push("fd_20pct_tds", "review", match.ledgerName, match.kind, summary?.section ?? null, fdTax,
+          `${fd20Entries.length} FD interest entry/entries carry books TDS of approx 20% of the interest ` +
+          `(interest ${money(fdInterest)}, tax ${money(fdTax)}): the bank deducted the higher rate, often for a ` +
+          "missing PAN, and these entries are not expected to reflect in 26AS. Listed on the 'FD interest 20% TDS' sheet.");
+      }
+    }
+
     // 001 — books tax beyond what 26AS declares
+    if (!totalsOnly) {
     const excessBooks = round2(r.booksTax - r.as26Tax);
     if (excessBooks > AS26_TAX_TOLERANCE) {
       const lateNote = r.lateBookedTax > 0
@@ -551,8 +648,10 @@ export function analyzeAs26(
       })));
       push("books_tax_not_in_26as", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
     }
+    }
 
     // 002 — 26AS tax with no books counterpart
+    if (!totalsOnly) {
     const excessAs26 = round2(r.as26Tax - r.booksTax);
     if (excessAs26 > AS26_TAX_TOLERANCE) {
       const rows = file.transactions.filter((t) => t.kind === match.kind && t.nameKey === match.as26NameKey);
@@ -563,6 +662,7 @@ export function analyzeAs26(
         (latest !== "00000000" ? `; latest booking date ${displayDate(latest)}` : "") +
         (statuses ? `; booking statuses seen: ${statuses}` : "");
       push("as26_tax_not_in_books", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessAs26, detail);
+    }
     }
 
     // 003 — 26AS gross vs books taxable: taxable-only (captain deviation; the
@@ -580,6 +680,7 @@ export function analyzeAs26(
     }
 
     // 007 — totals reconcile but the item-level picture is left over
+    if (!totalsOnly) {
     const deltaTotals = Math.abs(round2(r.booksTax - r.as26Tax));
     if (deltaTotals <= AS26_TAX_TOLERANCE &&
         (r.unmatchedBooks.length > 0 || r.unmatchedAs26.length > 0 || r.ambiguous > 0)) {
@@ -599,6 +700,7 @@ export function analyzeAs26(
         leftovers,
       );
     }
+    }
 
     // 005 — 26AS credits landed outside the reviewed window
     if (r.lateBookedTax > 0) {
@@ -609,11 +711,49 @@ export function analyzeAs26(
     }
 
     // 008 — deductions without any sale entry for the customer
+    if (!totalsOnly) {
     if (r.booksTax > 0 && partySales.length === 0) {
       push(
         "deduction_without_sale", "review", match.ledgerName, match.kind, summary?.section ?? null, r.booksTax,
         "Books carry the deduction but no sale entry exists for this customer in the period — the deduction may sit against a prior-period sale or a receipt (not asserted).",
       );
+    }
+    }
+
+    // 009 — totals-only reconciliation (design §12.3): 194R and bank-194A
+    // parties compare aggregates, not items. Books side: 194R uses the
+    // ordinary deduction events, a bank uses its operator-mapped interest/FD
+    // ledgers (with the 20% events already split off). The books tax total
+    // is compared against the 26AS tax total with AS26_TAX_TOLERANCE; a
+    // bank's interest total additionally against the 26AS gross with
+    // AS26_VALUE_TOLERANCE. A bank marked but mapped with no ledgers at all
+    // cannot produce a books side, so it surfaces as review, not critical.
+    if (totalsOnly) {
+      const mappingEmpty = !!bankMapEntry &&
+        bankMapEntry.interestLedgers.length === 0 && bankMapEntry.fdLedgers.length === 0;
+      const taxDelta = round2(r.as26Tax - compTax);
+      const taxMiss = !mappingEmpty && Math.abs(taxDelta) > AS26_TAX_TOLERANCE;
+      const valMiss = isBank && !mappingEmpty && as26Gross > 0 &&
+        Math.abs(round2(as26Gross - booksInterest)) > AS26_VALUE_TOLERANCE;
+      if (taxMiss || valMiss || mappingEmpty) {
+        const secLabel = sections.length > 0 ? sections.join(", ") : "no section";
+        const head = `26AS ${match.kind.toUpperCase()} ${secLabel} totals: tax ${money(r.as26Tax)}` +
+          (as26Gross > 0 ? `, amount paid/credited ${money(as26Gross)}` : "");
+        if (mappingEmpty) {
+          push("as26_totals_mismatch", "review", match.ledgerName, match.kind, summary?.section ?? null, r.as26Tax,
+            `${head}. The Bank Interest mapping names this bank but none of its interest income or FD ledgers, ` +
+            "so no books totals could be compared; fill the ledger names and re-run.");
+        } else {
+          const bits = [`books tax total ${money(compTax)}`];
+          if (valMiss) bits.unshift(`books interest total ${money(booksInterest)} against`);
+          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", match.ledgerName, match.kind,
+            summary?.section ?? null, taxMiss ? Math.abs(taxDelta) : Math.abs(round2(as26Gross - booksInterest)),
+            taxMiss
+              ? `${head}; ${bits.join(", ")}. These sections reconcile on totals, never bill by bill.`
+              : `${head}; ${bits.join(", ")}. The tax totals tie but the interest does not.`,
+          );
+        }
+      }
     }
   }
 
@@ -673,5 +813,5 @@ export function analyzeAs26(
     combinationExplained: recons.reduce((s, r) => s + r.combinations.length, 0),
     ambiguous: recons.reduce((s, r) => s + r.ambiguous, 0),
   };
-  return { findings, recon: recons, gaps, totals, skipped: file.skipped };
+  return { findings, recon: recons, gaps, totals, skipped: file.skipped, fd20: fd20All };
 }

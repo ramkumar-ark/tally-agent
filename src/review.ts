@@ -24,6 +24,8 @@ import {
   type PartyMatch,
   type PartyRecon,
   type As26Result,
+  type BankBooks,
+  type BankBooksEvent,
 } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 import { loadAs26MapFile } from "./as26-template.js";
@@ -275,6 +277,9 @@ export interface As26ReviewResult {
   groupsUnavailable: boolean;
   skipped: As26Result["skipped"];
   counts: { credits: number; receivableLedgers: string[] };
+  /** FD-interest books entries taxed at ~20% — not expected in 26AS
+   * (design §12.4); party labels masked like the findings'. */
+  fd20: Array<{ party: string; date: string; interest: number; tax: number }>;
   /** Every books evidence row behind the recon, party-pseudonymed: the
    * written report's Books Events sheet (the drill-down the deduction and
    * sale vouchers give the operator). */
@@ -998,10 +1003,39 @@ export function createSession(
     }
 
     const map = loadAs26MapFile(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
-    const result = analyzeAs26(file, { deductions, sales }, map, ledgerNames, { fromDate, toDate });
+    // Bank-194A books side (design §12.2): the operator's Bank Interest sheet
+    // names each bank's interest income and FD ledgers. One event per voucher
+    // touching a bank's own ledgers: interest credited on the interest
+    // ledgers, FD principal debited, and the TDS credited on a TDS/TCS
+    // receivable ledger inside the SAME voucher.
+    const receivableKeySet = new Set(receivable.map((r) => canonicalKey(r.name)));
+    const bankEvents: BankBooks[] = [];
+    for (const b of map.banks ?? []) {
+      const ik = new Set(b.interestLedgers.map(canonicalKey));
+      const fk = new Set(b.fdLedgers.map(canonicalKey));
+      const events: BankBooksEvent[] = [];
+      for (const v of voucherList) {
+        if (v.cancelled) continue;
+        let interest = 0, tax = 0, fd = 0, touched = false;
+        for (const e of v.entries) {
+          const k = canonicalKey(e.ledger);
+          if (ik.has(k) && e.amount < 0) { interest += -e.amount; touched = true; }
+          else if (fk.has(k) && e.amount > 0) { fd += e.amount; touched = true; }
+          else if (touched && receivableKeySet.has(k) && e.amount < 0) { tax += -e.amount; }
+        }
+        if (touched) {
+          events.push({
+            nameKey: canonicalKey(b.as26Name), date: String(v.date),
+            interest: round2(interest), tax: round2(tax), fdDebit: round2(fd),
+          });
+        }
+      }
+      if (events.length > 0) bankEvents.push({ nameKey: canonicalKey(b.as26Name), events });
+    }
+    const result = analyzeAs26(file, { deductions, sales, bankEvents }, map, ledgerNames, { fromDate, toDate });
     // Bill-level drill-down (pure, unmasked): the SAME file instance the
     // session analyzed, so the rows and the findings share one provenance.
-    const billRowsEngine = buildBillRows(result, { deductions, sales }, file, { fromDate, toDate });
+    const billRowsEngine = buildBillRows(result, { deductions, sales, bankEvents }, file, { fromDate, toDate });
 
     // --- masking (R-P-5): parties pseudonym, refs Doc N, totals untouched ---
     const isTallyLedger = new Set(masterPairs.map((l) => canonicalKey(l.name)));
@@ -1166,6 +1200,13 @@ export function createSession(
       if (parts.length > 0) f.detail += ` ${parts.join("; ")}.`;
     }
 
+    const fd20BankLabel = new Map(result.recon.map((r) => [r.match.as26NameKey, pseudoName(r.match.ledgerName)]));
+    const fd20 = result.fd20.map((e) => ({
+      party: fd20BankLabel.get(e.nameKey) ?? pseudoKey(e.nameKey),
+      date: displayDate(e.date),
+      interest: e.interest,
+      tax: e.tax,
+    }));
     const masked: As26ReviewResult = sweepStrings(
       {
         company: company ?? undefined,
@@ -1181,6 +1222,7 @@ export function createSession(
         counts: { credits, receivableLedgers: recLedgers },
         bookEvents,
         billRows,
+        fd20,
       },
       vault,
     ) as As26ReviewResult;

@@ -134,7 +134,7 @@ describe("tb_write_26as_report", () => {
     const names = wb.map((s) => s.name);
     expect(names).toEqual([
       "Findings", "Deductors", "Books Events", "Mapping",
-      "Books not in 26AS", "26AS unmatched", "Bill value mismatch",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS",
     ]);
     const deductors = wb.find((s) => s.name === "Deductors")!;
     const cells = [...deductors.rows.values()].flatMap((r) => [...r.cells.values()].map((c) => String(c.value)));
@@ -203,7 +203,7 @@ describe("tb_write_26as_report", () => {
     const names = wb.map((s) => s.name);
     expect(names).toEqual([
       "Findings", "Deductors", "Books Events", "Mapping",
-      "Books not in 26AS", "26AS unmatched", "Bill value mismatch",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS",
     ]);
 
     // data row n (1-based) is rows[n] — Excel row 1 is the header row
@@ -242,5 +242,34 @@ describe("tb_write_26as_report", () => {
     // the tolerance renders as the NUMERIC 1000 (format: "money"), never a string
     expect(value[0][8]).toBe("1000");
     expect(value[0][8]).not.toBe("1,000.00");
+  });
+});
+
+describe("tb_write_26as_report > FD interest 20% TDS sheet", () => {
+  it("lists the 20%-taxed FD interest entries with a totals row, de-masked on disk", async () => {
+    const session = createSession(fakeDown(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const result = {
+      company: "Demo Traders Pvt Ltd", fromDate: "20250401", toDate: "20260331",
+      findings: [], recon: [], gaps: [], totals: { booksTax: 0, as26Tax: 0, partiesMatched: 0, combinationExplained: 0, ambiguous: 0 },
+      mastersUnavailable: false, groupsUnavailable: false,
+      skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+      counts: { credits: 0, receivableLedgers: [] }, bookEvents: [], billRows: [],
+      fd20: [{ party: "Ledger 1", date: "01-Aug-2025", interest: 5000, tax: 1000 },
+             { party: "Ledger 1", date: "01-Nov-2025", interest: 4000, tax: 800 }],
+    } as As26ReviewResult;
+    const paths = await writeAs26Report({
+      reportDir: tempDir("as26-out"), company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401", toDate: "20260331",
+      markdown: "narrative", result, vault: session.vault,
+    });
+    const wb = readWorkbook(readFileSync(paths.workbookPath));
+    const sheet = wb.find((s) => s.name === "FD interest 20% TDS")!;
+    const rows = [...sheet.rows.values()].map((r) => [...r.cells.values()].map((c) => c.value));
+    expect(rows).toEqual([
+      ["row", "party", "date", "interest", "TDS (20%)"],
+      ["F20-1", "Ledger 1", "01-Aug-2025", 5000, 1000],
+      ["F20-2", "Ledger 1", "01-Nov-2025", 4000, 800],
+      [null, null, "total", 9000, 1800],
+    ]);
   });
 });

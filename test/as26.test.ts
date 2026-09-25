@@ -511,3 +511,98 @@ describe("analyzeAs26 — findings 001–008", () => {
     expect(r.recon).toHaveLength(r.totals.partiesMatched);
   });
 });
+
+// --- addendum 2: totals-only 194R / bank-194A and 20% FD interest (design §12) ---
+
+const tx194 = (section: string, tx: As26Transaction[], total: number, gross = 0): As26File => ({
+  summaries: [{ kind: "tds", name: nameOf, nameKey: NK, section, taxTotal: total, taxClaimed: 0, balanceCf: 0, gross }],
+  transactions: tx,
+  skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+});
+const tx194n = (tax: number, section: string, date = "20250612", bookingDate: string | null = null, amount?: number): As26Transaction => ({
+  kind: "tds", nameKey: NK, date, amount: amount ?? tax, tax, status: bookingDate ? "O" : "F", bookingDate, section,
+});
+
+describe("analyzeAs26 — totals-only reconciliation (design §12)", () => {
+  it("194R with tying totals raises no findings at all — silence is the success state", () => {
+    const file = tx194("194R",
+      [tx194n(3000, "194R", "20250612", null, 180000), tx194n(2000, "194R", "20250712", null, 120000)],
+      5000, 300000);
+    const r = analyzeAs26(file, bookFacts([["20250612", 3000], ["20250712", 2000]]), mapper, ledgers,
+      { fromDate: "20250401", toDate: "20251231" });
+    expect(r.recon[0].totalsOnly).toBe(true);
+    expect(r.findings).toEqual([]);
+  });
+  it("194R with a totals gap raises 009 critical, never a bill-level finding", () => {
+    const file = tx194("194 R", [tx194n(9000, "194 R")], 9000);
+    const r = analyzeAs26(file, bookFacts([["20250612", 5000]]), mapper, ledgers,
+      { fromDate: "20250401", toDate: "20251231" });
+    const f = r.findings.find((x) => x.check === "as26_totals_mismatch")!;
+    expect(f).toBeTruthy();
+    expect(f.id).toBe("AS26-009-1");
+    expect(f.severity).toBe("critical");
+    expect(f.amount).toBe(4000);
+    expect(f.detail).toMatch(/9,000\.00/);
+    expect(f.detail).toMatch(/5,000\.00/);
+    expect(f.detail).toMatch(/never bill by bill/);
+    expect(r.findings.some((x) =>
+      x.check === "books_tax_not_in_26as" || x.check === "unresolved_combination" ||
+      x.check === "deduction_without_sale")).toBe(false);
+  });
+  it("a bank-marked 194A party compares totals with a 20% FD event excluded and reported", () => {
+    const file = tx194("194A", [tx194n(5000, "194A", "20250801", null, 50000)], 5000, 50000);
+    const bankMap = { mappings: [], banks: [{ as26Name: nameOf, interestLedgers: ["Sample Bank FD Int A/c"], fdLedgers: ["Sample Bank FD A/c"] }] };
+    const facts20: BooksFacts = {
+      deductions: [], sales: [],
+      bankEvents: [{ nameKey: NK, events: [
+        // 10% event: comparable
+        { nameKey: NK, date: "20250801", interest: 50000, tax: 5000, fdDebit: 45000 },
+        // 20% event: excluded, reported separately
+        { nameKey: NK, date: "20251101", interest: 5000, tax: 1000, fdDebit: 4000 },
+      ]}],
+    };
+    const r = analyzeAs26(file, facts20, bankMap, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    expect(r.recon[0].totalsOnly).toBe(true);
+    expect(r.findings.some((f) => f.check === "as26_totals_mismatch")).toBe(false);
+    const f20 = r.findings.find((f) => f.check === "fd_20pct_tds")!;
+    expect(f20).toBeTruthy();
+    expect(f20.id).toBe("AS26-010-1");
+    expect(f20.severity).toBe("review");
+    expect(f20.amount).toBe(1000);
+    expect(f20.detail).toMatch(/1 FD interest entry\/entries/);
+    expect(f20.detail).toMatch(/not expected to reflect in 26AS/);
+    expect(r.fd20).toEqual([{ nameKey: NK, date: "20251101", interest: 5000, tax: 1000, fdDebit: 4000 }]);
+  });
+  it("a bank's tax totals tie but interest misses 003's value tolerance — 009 warning", () => {
+    const file = tx194("194A", [tx194n(10000, "194A", "20250801", null, 60000)], 10000, 60000);
+    const bankMap = { mappings: [], banks: [{ as26Name: nameOf, interestLedgers: ["Sample Bank FD Int A/c"], fdLedgers: [] }] };
+    const factsInt: BooksFacts = {
+      deductions: [], sales: [],
+      bankEvents: [{ nameKey: NK, events: [{ nameKey: NK, date: "20250801", interest: 40000, tax: 10000, fdDebit: 30000 }] }],
+    };
+    const r = analyzeAs26(file, factsInt, bankMap, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    const f = r.findings.find((x) => x.check === "as26_totals_mismatch")!;
+    expect(f.severity).toBe("warning");
+    expect(f.amount).toBe(20000);
+    expect(f.detail).toMatch(/tax totals tie but the interest does not/);
+    expect(f.detail).toMatch(/books interest total/);
+  });
+  it("a mixed party (bill-level plus 194R section) keeps the bill-level behaviour", () => {
+    const file = { summaries: [
+      { kind: "tds" as const, name: nameOf, nameKey: NK, section: "194C", taxTotal: 6000, taxClaimed: 0, balanceCf: 0, gross: 0 },
+      { kind: "tds" as const, name: nameOf, nameKey: NK, section: "194R", taxTotal: 0, taxClaimed: 0, balanceCf: 0, gross: 0 },
+    ], transactions: [tx194n(6000, "194C")], skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 } };
+    const r = analyzeAs26(file, bookFacts([["20250612", 190000]]), mapper, ledgers,
+      { fromDate: "20250401", toDate: "20251231" });
+    expect(r.recon[0].totalsOnly).toBe(false);
+    expect(r.findings.some((x) => x.check === "books_tax_not_in_26as")).toBe(true);
+  });
+  it("a bank marked with no ledgers at all surfaces 009 review, never a lesson-learnt critical", () => {
+    const file = tx194("194A", [tx194n(10000, "194A")], 10000);
+    const bankMap = { mappings: [], banks: [{ as26Name: nameOf, interestLedgers: [], fdLedgers: [] }] };
+    const r = analyzeAs26(file, bookFacts([]), bankMap, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    const f = r.findings.find((x) => x.check === "as26_totals_mismatch")!;
+    expect(f.severity).toBe("review");
+    expect(f.detail).toMatch(/names this bank but none of its interest income or FD ledgers/);
+  });
+});

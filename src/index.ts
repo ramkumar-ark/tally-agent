@@ -503,7 +503,9 @@ export function registerTools(
     "Generate the fillable Excel 26AS party-mapping template (as26-map-template-<company>-<date>.xlsx) " +
       "into the report directory and return its path. It pre-fills one row per 26AS deductor/collector " +
       "with the Tally ledger already in effect; type the matching Tally ledger into the \"Tally ledger\" " +
-      "column, then pass its path to tb_26as_review as as26MapPath — never paste its rows into chat.",
+      "column, then pass its path to tb_26as_review as as26MapPath — never paste its rows into chat. " +
+      "The blank 'Bank Interest' sheet marks 26AS banks and their interest income/FD ledgers; " +
+      "a bank named there reconciles its 194A entries on totals, never bill by bill.",
     {
       as26Path: z.string()
         .describe("Path to the TRACES Form 26AS export (.xlsm); read inside the gateway, only the path is audited"),
@@ -563,7 +565,8 @@ export function registerTools(
     "tb_26as_review",
     "Tally-books vs TRACES Form 26AS reconciliation: TDS/TCS tax booked but absent from 26AS, " +
       "26AS tax the books never booked, gross-vs-taxable valuation mismatch, mapping gaps, " +
-      "late booking and export self-consistency. Pass the PATH of the TRACES Form 26AS export " +
+      "late booking and export self-consistency, totals-only 194R/bank-194A reconciliation and " +
+      "20%-taxed FD interest reporting. Pass the PATH of the TRACES Form 26AS export " +
       "(.xlsm) — never paste its rows into chat; parties appear as pseudonyms; drill in with " +
       "tb_ledger_activity using finding ids. Correct the party mapping by passing the filled " +
       "template from tb_write_26as_template as as26MapPath. Optionally pass dayBookPath to run the books from " +

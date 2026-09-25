@@ -454,6 +454,35 @@ This file is the project's committed home for project-intrinsic agent knowledge:
     `see <sheet> rows <ids>.` AFTER masking (001/008→B, 002/005→D, 007→B+D,
     003→V) and omit the pointer when the party has no such rows.
 
+## Sharp edges found adding totals-only 194R/bank-194A and 20% FD TDS (2026-09-26)
+
+- Design of record is design doc §12. Party routing is **totals-only at party
+  level** (a party whose every summary section is 194R, or 194A with the
+  operator-marked bank): books deduction events carry no section, so a
+  per-section split is impossible, and a mixed party keeps bill-level
+  behaviour. Checks 001/002/007/008 and all `buildBillRows` loops skip
+  `recon[i].totalsOnly` parties; 005 stays.
+- `As26Map.banks` comes only from the template's new **Bank Interest** sheet
+  (JSON channel never sets it); **presence on the sheet is the bank mark** —
+  "is a bank" is never guessed from names. `matchParties` unions the bank's
+  interest/FD ledgers into the party, so the bank pilgrims even when its
+  ledgers are absent from the master list.
+- The bank-194A books side is built ONLY from the operator's ledgers
+  (`review.ts`): one event per voucher touching a bank ledger; the TDS credit
+  counts only inside such a voucher and only on a receivable ledger. FD
+  debit is carried, never compared. A marked bank with zero ledgers surfaces
+  check 009 as **review** (no zero-books critical).
+- is20 (`src/as26.ts`): `|tax − 0.20×interest| ≤ max(1, 0.01×interest)`; a
+  20% event is excluded from the totals compare and emitted as
+  `result.fd20` (raw `BankBooksEvent[]`) → the session masks party/date →
+  the `FD interest 20% TDS` workbook sheet (`F20-n` rows + a totals row).
+  `writeAs26Report` tolerates a `fd20` of undefined (`?? []`) because older
+  test fixtures build results without it.
+- Mind the datetime and ordinal precedents: `count()` in `src/format.ts`
+  formats a NUMBER — `${count(arr)}` is not `${arr.length}` (regression twice
+  in one afternoon); checks 009/010 extend `AS26_CHECK_ORDINAL` (frozen table
+  in the design doc §6 was not renumbered — new checks are appended).
+
 ## Masking sharp edges (whole-token substitution, 2026-09-23)
 
 - `maskKnownNames`, `demaskText` and `maskFinding`'s ledger substitution in

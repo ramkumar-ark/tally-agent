@@ -182,3 +182,77 @@ de-masked on disk via `writeWorkbook` + vault, exactly as the rest of the 26AS
 report, and party labels on the sheets equal the findings' masked labels
 (R-P-5).
 
+## 12. Totals-only reconciliation, bank interest and 20% TDS (addendum 2, 2026-09-26)
+
+Captain: s.194R entries and bank-deducted s.194A interest are "reported in
+many small amounts and are impossible to map to book entries" — bill-level
+pairing is noise there. Compare totals instead; keep the ordinary drill-down
+for every other section, including non-bank 194A.
+
+### 12.1 Which parties go totals-only
+
+Party-level decision (the books deduction events carry no section, so a
+per-section split is impossible): a matched party is **totals-only** when every
+summary row of the party carries a section token of `194R`, or of `194A` **and
+the operator marked that name a bank** on the Bank Interest mapping sheet.
+Section tokens are normalized like everywhere else (case/punctuation strip):
+`194R`/`194 R`/`194-R` all collapse to `194r`. A mixed party (some sections
+bill-level, some totals-only) keeps the bill-level behaviour — the totals-only
+reading requires the party's whole books side to be unattributable; when the
+captain's company hits that mix, the drill-down still shows everything and no
+figure is lost.
+
+### 12.2 The books side
+
+- **194R**: the ordinary `facts.deductions` of the party's ledgers — compared
+  on TAX only (`booksTax` vs the 26AS tax total). No books amount is claimed:
+  the expense ledger mapping does not exist, and the finding must not pretend
+  otherwise.
+- **Bank 194A**: wholly operator-mapped. The Bank Interest sheet gives, per
+  26AS bank name, the interest income ledger(s) and the FD ledger(s). A books
+  event is one books voucher touching any of the bank's interest/FD ledgers;
+  `interest` = the credit magnitude on interest ledgers, `tax` = the credit
+  magnitude on a TDS receivable ledger inside the same voucher, `fdDebit` =
+  the debit on FD ledgers (carried, not compared — it is principal). Non-bank
+  194A parties are untouched.
+
+### 12.3 The comparison and findings
+
+Per totals-only party: compares the books tax total against
+the 26AS transactions' tax total with `AS26_TAX_TOLERANCE`; for banks the
+books interest total is additionally compared against the 26AS gross with
+`AS26_VALUE_TOLERANCE`. Any distance beyond the tolerance raises **check
+`as26_totals_mismatch` (ordinal 009)** — critical when the tax total misses,
+warning when only the interest/gross misses. A marked bank whose Bank Interest
+rows carry no ledgers at all yields no books side; it surfaces as
+**review** (never a zero-books critical) asking the operator to fill the
+ledger names. Checks 001/002/007/008 and the
+three drill-down sheets are skipped for a totals-only party (its rows must not
+appear in "Books not in 26AS"/"26AS unmatched"); 005 (late booking) is kept —
+it explains a totals gap across the window. When the totals tie there is
+**no finding at all** — silence is the success state.
+
+### 12.4 20% TDS on FD interest
+
+Some banks deduct 20% TDS on FD interest (no PAN on file); such books entries
+will never appear in 26AS. Per books event of a mapped bank:
+`is20 = tax>0 and interest>0 and |tax − 0.20×interest| ≤ max(1, 0.01×interest)`
+(`FD20_TAX_RATE`, relative tolerance 1%). A 20% event is **excluded** from the
+bank's totals comparison and reported instead as individual rows on the new
+**`FD interest 20% TDS`** workbook sheet (count, interest, TDS per entry) plus
+one finding per bank, **check `fd_20pct_tds` (ordinal 010, review)**, whose
+detail states the entries are not expected to reflect in 26AS. Masking is the
+ordinary channel: party pseudonym, `displayDate` dates.
+
+### 12.5 The Bank Interest mapping sheet
+
+The fillable template gains a **`Bank Interest`** sheet — columns `26AS name
+(bank)`, `Interest income ledger`, `FD ledger` (both dropdowns backed by the
+same `Ledgers` range). One row per ledger; a bank repeats across rows and the
+parser groups by canonical name. Presence on the sheet **is** the bank mark
+(no name guessing, no extra flag column). The parser refuses a ledger named
+twice on this sheet (row number only, never a value); a ledger shared with the
+Mapping sheet is *not* cross-refused — the two sheets serve different
+questions. Older filled templates (no such sheet) load unchanged with empty
+bank rows; the JSON map channel never carries banks.
+
