@@ -15,6 +15,10 @@ export type CheckId =
   | "pf_esi_challan_unmatched"
   | "pf_esi_amount_mismatch"
   | "pf_esi_due_date_not_working_day"
+  | "gst44_composition_unknown"
+  | "gst44_unattributed_expenditure"
+  | "gst44_party_not_in_masters"
+  | "gst44_status_override_unknown_ledger"
   | "loans_cash_acceptance"
   | "loans_cash_repayment"
   | "loans_mode_unknown"
@@ -41,6 +45,11 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   pf_esi_challan_unmatched: 12,
   pf_esi_amount_mismatch: 13,
   pf_esi_due_date_not_working_day: 14,
+  // gst44 clause-44 checks (TB ordinals 15-18, per the captain ruling).
+  gst44_composition_unknown: 15,
+  gst44_unattributed_expenditure: 16,
+  gst44_party_not_in_masters: 17,
+  gst44_status_override_unknown_ledger: 18,
   // Loans clause-31/269S checks (captain ruling: ordinals 15-18 belong to the
   // concurrent clause-44 lane; loans occupy 19-26). Never renumber.
   loans_cash_acceptance: 19,
