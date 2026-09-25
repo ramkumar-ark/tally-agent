@@ -12,7 +12,7 @@ import {
 } from "./fa-register.js";
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import { gst44, partySpend, type Gst44Row, type OperatorGst44 } from "./gst44.js";
-import { GST44_CONFIRMS, type Gst44Bucket } from "./gst44-law.js";
+import { GST44_CONFIRMS, GST44_FORM_ID, GST44_SHEET, type Gst44Bucket } from "./gst44-law.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
 import { count, dayBefore, displayDate, displayMonth } from "./format.js";
@@ -662,6 +662,12 @@ export interface Session {
    * display-shaped for the model.
    */
   gst44Rows(): Gst44Row[] | undefined;
+  /**
+   * Rewrite the `Break-up of GST expenditure` sheet of a Winman 3CD workbook
+   * COPY from the cached review's rows and return the written path. The
+   * source is never written to.
+   */
+  write3cdGst44(opts: { sourcePath: string; outPath?: string }): Promise<string>;
   vault: Vault;
 }
 
@@ -3033,6 +3039,57 @@ export function createSession(
     };
   }
 
+  /**
+   * Rewrite the "Break-up of GST expenditure" sheet of a Winman 3CD COPY from
+   * the cached review's rows (clause 44, mirror of write3cdPfEsi). Both rows
+   * are written always, zeros included: writeSheetRows replaces rows at or
+   * after the first data row wholesale, so the sheet's pre-filled labels are
+   * re-written by us. The sheet columns are a text label and five numbers —
+   * no vault-held name exists in them, so de-masking has nothing to restore
+   * by construction.
+   */
+  async function write3cdGst44(opts: { sourcePath: string; outPath?: string }): Promise<string> {
+    if (!lastGst44 || lastGst44.length === 0) {
+      throw new Error("run tb_gst44_review first: there are no clause 44 rows to write");
+    }
+    const pkg = readXlsm(await readFile(opts.sourcePath));
+    // The handshake is the only reliable Winman discriminator; asserting it
+    // (and the form id on the writable sheet) refuses anything else loudly.
+    readHandshake(pkg);
+    const schema = readSchema(pkg, GST44_SHEET);
+    if (schema.formId !== GST44_FORM_ID) {
+      throw new Error(
+        `"${GST44_SHEET}" belongs to form "${schema.formId || "unknown"}": this tool fills the Winman ${GST44_FORM_ID} workbook`,
+      );
+    }
+    const rows: WinmanRow[] = lastGst44.map((r) => ({
+      PARTICULARS: { kind: "text", value: r.label },
+      TOTALEXPENDITURE: { kind: "number", value: r.total },
+      TOWARDSSUPPLIES: { kind: "number", value: r.exempt },
+      COMPOSITIONSUPPLIER: { kind: "number", value: r.composition },
+      OTHERS: { kind: "number", value: r.others },
+      REGISTEREDUNDERGST: { kind: "number", value: r.unregistered },
+    }));
+    const out = writeSheetRows(pkg, GST44_SHEET, rows);
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const stem = basename(opts.sourcePath, extname(opts.sourcePath));
+    if (!opts.outPath) throw new Error("no output location for the filled workbook was given");
+    const target =
+      extname(opts.outPath).toLowerCase() === ".xlsm"
+        ? opts.outPath
+        : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    // Copying onto the source would destroy the operator's template before
+    // its contents were used; both entries are resolved through their real
+    // paths where they exist so a dot-dotted outPath cannot slip past.
+    const sourceId = await realPathId(opts.sourcePath);
+    if (sourceId === (await realPathId(target))) {
+      throw new Error("the outPath target resolves to the source workbook itself; write the copy somewhere else");
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, writeXlsm(out));
+    return target;
+  }
+
 /**
  * An identity for a possibly-not-yet-existing path: its realpath when the
  * entry is there, else its parent directory's realpath joined with its
@@ -3186,6 +3243,7 @@ async function realPathId(p: string): Promise<string> {
         : undefined,
     write3cdLoans,
     gst44Review,
+    write3cdGst44,
     gst44Rows: () => lastGst44,
   };
 }

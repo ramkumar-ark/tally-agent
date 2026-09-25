@@ -830,6 +830,26 @@ export function registerTools(
   );
 
   register(
+    "tb_write_3cd_gst44",
+    "Write the clause 44 rows of the last tb_gst44_review into the Break-up of GST expenditure sheet of a COPY " +
+      "of the operator's Winman 3CD workbook and return the copy's path. The copy is written to the report " +
+      "directory (or outPath) as '<source stem> - filled - <date>.xlsm'; the source workbook is never modified. " +
+      "Compose nothing by hand: the sheet carries the capital/revenue break-up from the review.",
+    {
+      sourcePath: z.string().describe("Path to the operator's Winman `Break-up of GST expenditure.xlsm`; read only, never written"),
+      outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+    },
+    async (args) => {
+      const outPath = await session.write3cdGst44({
+        sourcePath: args.sourcePath,
+        outPath: args.outPath ?? cfg.reportDir,
+      });
+      await audit("tb_write_3cd_gst44", { sourcePath: args.sourcePath, outPath: args.outPath ?? null }, 0, 0);
+      return JSON.stringify({ outPath }, null, 2);
+    },
+  );
+
+  register(
     "tb_gst44_review",
     "Winman Form 3CD clause 44 review - break-up of total expenditure into GST categories: capital/revenue " +
       "rows split by supplier GST status (registered exempt / composition / others / unregistered), computed from " +
