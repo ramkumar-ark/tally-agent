@@ -279,6 +279,13 @@ export const AS26_TAX_TOLERANCE = 1.0;
 export const AS26_VALUE_TOLERANCE = 1000.0;
 export const COMBINATION_MAX_SIZE = 4;
 export const COMBINATION_MAX_ITEMS = 40;
+/** Addendum 5: a deductor can split one bill's TDS across many small
+ * journal entries — a government deductor took 11 journals against ONE 26AS
+ * row, which the size-4 cap can never reassemble. When the leftover books
+ * pool is small enough to enumerate exhaustively, allow a bigger group.
+ * 2^14 enumerations max, so the search stays bounded. */
+export const COMBINATION_GROUP_MAX_SIZE = 12;
+export const COMBINATION_GROUP_POOL_MAX = 14;
 /** The higher 20% TDS some banks deduct on FD interest (no PAN on file);
  * such books entries are excluded from the 26AS totals comparison (design
  * §12.4; never expected to appear in 26AS). Tolerance: 1% of the interest,
@@ -618,12 +625,19 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
         ambiguous += 1;
       }
     }
-    // combinations targeting an as26 item, parts from books
+    // combinations targeting an as26 item, parts from books. When the
+    // leftover books pool is exhaustively enumerable, the group cap is
+    // raised so a many-journal split of one 26AS row reassembles; the
+    // smallest fitting subset still wins (size-ascending), only a UNIQUE
+    // fit is taken, dates never block the fit.
     const as26Targets = unmatchedAs26.filter((_, i) => !takenAs26.has(i));
     for (const target of as26Targets) {
       const pool = unmatchedBooks.filter((_, i) => !takenBooks.has(i));
+      const maxSize = pool.length <= COMBINATION_GROUP_POOL_MAX
+        ? COMBINATION_GROUP_MAX_SIZE
+        : COMBINATION_MAX_SIZE;
       const fitBooks: ReconItem[][] = [];
-      for (const s of subsets(pool, COMBINATION_MAX_SIZE)) {
+      for (const s of subsets(pool, maxSize)) {
         if (fits(sumTax(s), target.tax)) fitBooks.push(s);
       }
       if (fitBooks.length === 1) {

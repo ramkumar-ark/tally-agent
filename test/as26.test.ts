@@ -257,6 +257,21 @@ describe("reconcileParty", () => {
     expect(r.unmatchedBooks).toHaveLength(0);
     expect(r.unmatchedAs26).toHaveLength(0);
   });
+  it("grouped: eleven small books journals explain one 26AS row (addendum 5, size cap raised on an enumerable pool)", () => {
+    // live case: 16+103+131+140+307+391+392+440+473+526+2612 = 5,531 booked in
+    // April; the 26AS row dated August carries the same tax on ~2,76,550.
+    const src = [16, 103, 131, 140, 307, 391, 392, 440, 473, 526, 2612];
+    const facts = bookFacts(src.map((t) => ["20250429", t]));
+    const file = txFile([txn(5531, "20250809", "20250809",)], 5531);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.as26Tax).toBe(5531);
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].parts).toHaveLength(11);
+    expect(r.combinations[0].side).toBe("as26");
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+    expect(r.ambiguous).toBe(0);
+  });
   it("split: one books deduction explained by two 26AS lines", () => {
     const facts = bookFacts([["20250612", 10000]]);
     const file = txFile([txn(6000), txn(4000, null, "20250620")], 10000);
