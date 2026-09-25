@@ -742,6 +742,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   has no clause-44 column and is excluded. Without `worksheetPath` the source
   is unchanged (cached review rows). The source .xlsm is never overwritten.
 
+## Sharp edges found implementing No TDS Disallowance (clause 21(b))
+
+- Read `docs/design/2026-09-24-no-tds-disallowance-design.md` before touching
+  `src/notds*.ts` or the notds branches of `src/review.ts` — it is the design
+  of record for the 3CD clause 21(b) fill (s.40(a)(i)/(ia)/(ib)/(iii)).
+- Section spelling map: the law key `194-I(a)` reaches the Winman TDSSECTION
+  cell as `194I (a)` and `194-I(b)` as `194I (b)`; every other law key is its
+  own spelling; a bare `194-I` throws everywhere.
+- **The agent computes no disallowance percentages** — the sheets carry payment
+  facts only; Winman applies 30%/100% itself. Percentages appear only in
+  masked review prose quoting the law.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
