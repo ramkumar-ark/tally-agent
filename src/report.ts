@@ -4,6 +4,7 @@ import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
 import { count, money, displayDate } from "./format.js";
 import { round2, type BlockResult, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
+import { AS26_VALUE_TOLERANCE } from "./as26.js";
 import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding, PfEsiMaskedFinding, As26ReviewResult } from "./review.js";
 import type { Clause20bRow } from "./pf-esi.js";
 import type { Vault } from "./vault.js";
@@ -1210,6 +1211,76 @@ export async function writeAs26Report(opts: {
     ],
   };
 
+  // The bill-level drill-down sheets (A5): one per masked billRows sheetId.
+  // Rows arrive masked and in report order; ids regenerate 1-based per sheet
+  // in array order, reproducing the findings' pointers. No masking here —
+  // writeWorkbook de-masks on disk via the vault.
+  const windowCell = (r: As26ReviewResult["billRows"][number]): string =>
+    r.windowState === "in" ? "" : `${r.windowState}-period`;
+  const booksRows = opts.result.billRows.filter((r) => r.sheetId === "booksded");
+  const booksNotIn26ASSheet: Sheet = {
+    name: "Books not in 26AS",
+    columns: [
+      { header: "row", width: 8, format: "text" },
+      { header: "party", width: 26, format: "text" },
+      { header: "date", width: 12, format: "text" },
+      { header: "voucher type", width: 12, format: "text" },
+      { header: "voucher ref", width: 16, format: "text" },
+      { header: "amount", width: 16, format: "money" },
+      { header: "linked invoice ref", width: 16, format: "text" },
+      { header: "linked invoice date", width: 12, format: "text" },
+      { header: "invoice taxable", width: 16, format: "money" },
+      { header: "link basis", width: 14, format: "text" },
+      { header: "window", width: 12, format: "text" },
+    ],
+    rows: booksRows.map((r, i) => [
+      `B${i + 1}`, r.party, r.date, r.voucherType ?? "", r.ref ?? "", r.tax,
+      r.linked?.ref ?? "", r.linked ? r.linked.date : "", r.linked?.taxable ?? null,
+      r.linkBasis, windowCell(r),
+    ]),
+  };
+  const as26Rows = opts.result.billRows.filter((r) => r.sheetId === "as26");
+  const as26UnmatchedSheet: Sheet = {
+    name: "26AS unmatched",
+    columns: [
+      { header: "row", width: 8, format: "text" },
+      { header: "party", width: 26, format: "text" },
+      { header: "date", width: 12, format: "text" },
+      { header: "section", width: 10, format: "text" },
+      { header: "tax", width: 14, format: "money" },
+      { header: "amount paid/credited", width: 16, format: "money" },
+      { header: "booking status", width: 12, format: "text" },
+      { header: "link basis", width: 14, format: "text" },
+      { header: "window", width: 12, format: "text" },
+    ],
+    rows: as26Rows.map((r, i) => [
+      `D${i + 1}`, r.party, r.date, r.section ?? "", r.tax, r.gross ?? null,
+      r.status ?? "", r.linkBasis, windowCell(r),
+    ]),
+  };
+  const valueRows = opts.result.billRows.filter((r) => r.sheetId === "value");
+  const billValueMismatchSheet: Sheet = {
+    name: "Bill value mismatch",
+    columns: [
+      { header: "row", width: 8, format: "text" },
+      { header: "party", width: 26, format: "text" },
+      { header: "26AS date", width: 12, format: "text" },
+      { header: "26AS amount", width: 16, format: "money" },
+      { header: "invoice ref", width: 16, format: "text" },
+      { header: "invoice date", width: 12, format: "text" },
+      { header: "invoice taxable", width: 16, format: "money" },
+      { header: "delta", width: 16, format: "money" },
+      { header: "tolerance", width: 12, format: "money" },
+      { header: "link basis", width: 14, format: "text" },
+      { header: "window", width: 12, format: "text" },
+    ],
+    rows: valueRows.map((r, i) => [
+      `V${i + 1}`, r.party, r.date, r.gross ?? null, r.linked?.ref ?? "",
+      r.linked ? r.linked.date : "", r.linked?.taxable ?? null,
+      r.delta ?? null, AS26_VALUE_TOLERANCE, r.linkBasis, windowCell(r),
+    ]),
+  };
+
   await writeFile(
     markdownPath,
     demaskText(opts.markdown, opts.vault) + "\n",
@@ -1218,7 +1289,7 @@ export async function writeAs26Report(opts: {
   await writeWorkbook({
     reportDir: opts.reportDir,
     fileName: `as26-review-${stem}.xlsx`,
-    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet],
+    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet],
     vault: opts.vault,
   });
   return { markdownPath, workbookPath };

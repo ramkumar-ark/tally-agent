@@ -316,4 +316,25 @@ describe("Session.as26Review", () => {
     expect(f001!.detail).toMatch(/see Books not in 26AS rows B1, B2\./);
     expect(f001!.detail).not.toMatch(/26AS unmatched/);
   });
+
+  it("masked bill rows carry windowState: pre, post and in", async () => {
+    const base = defaultAs26Fixture();
+    // Insert after the Anand detail row (indices 3-5) so both blank-named rows
+    // band under the Anand name: one transaction dated before the reviewed
+    // window opens, one booking after the window closes (05-Jan-2026 booking)
+    const preRow = ["", "10-Feb-2025", 80000, null, 1600, null, "PUNB05678F", null, "F", "20-Mar-2025", "194C"];
+    const postRow = ["", "20-Nov-2025", 100000, null, 2000, null, "PUNB05678F", null, "F", "05-Jan-2026", "194C"];
+    const fileW = parseAs26Export(buildAs26Fixture({
+      ...base,
+      tdsDetail: [...base.tdsDetail.slice(0, 6), preRow, postRow],
+    }));
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileW, anandMap());
+    const as26rows = res.billRows.filter((r) => r.sheetId === "as26");
+    expect(as26rows.some((r) => r.windowState === "pre")).toBe(true);
+    expect(as26rows.some((r) => r.windowState === "post")).toBe(true);
+    expect(as26rows.some((r) => r.windowState === "in")).toBe(true);
+    // every row carries a legal windowState
+    for (const r of res.billRows) expect(["pre", "post", "in"]).toContain(r.windowState);
+  });
 });

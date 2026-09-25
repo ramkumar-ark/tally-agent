@@ -289,6 +289,8 @@ export interface As26ReviewResult {
     gross: number | null; voucherType: string | null;
     ref: string | null; status: string | null; section: string | null;
     inWindow: boolean; linkBasis: LinkBasis;
+    /** Windowed state on the raw engine date (A5): in / pre / post the reviewed period. */
+    windowState: "in" | "pre" | "post";
     linked: { date: string; ref: string | null; taxable: number } | null;
     delta: number | null;
   }>;
@@ -1109,6 +1111,7 @@ export function createSession(
       section: r.section,
       inWindow: r.inWindow,
       linkBasis: r.linkBasis,
+      windowState: r.date < fromDate ? "pre" : r.date > toDate ? "post" : "in",
       linked: r.linked
         ? { date: displayDate(r.linked.date), ref: REF_MASK(r.linked.ref), taxable: r.linked.taxable }
         : null,

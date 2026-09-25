@@ -7,7 +7,10 @@ import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { parseAs26Export } from "../src/as26-file.js";
 import { buildAs26Fixture } from "./as26-fixture.js";
-import { readWorkbook } from "../src/xlsx-read.js";
+import { readWorkbook, type GridSheet } from "../src/xlsx-read.js";
+import { writeAs26Report } from "../src/report.js";
+import { createVault } from "../src/vault.js";
+import type { As26ReviewResult } from "../src/review.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import type { Downstream } from "../src/downstream.js";
 
@@ -129,7 +132,10 @@ describe("tb_write_26as_report", () => {
     expect(md).toContain("Anand Buildmart Pvt Ltd");
     const wb = readWorkbook(readFileSync(paths.workbookPath));
     const names = wb.map((s) => s.name);
-    expect(names).toEqual(["Findings", "Deductors", "Books Events", "Mapping"]);
+    expect(names).toEqual([
+      "Findings", "Deductors", "Books Events", "Mapping",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch",
+    ]);
     const deductors = wb.find((s) => s.name === "Deductors")!;
     const cells = [...deductors.rows.values()].flatMap((r) => [...r.cells.values()].map((c) => String(c.value)));
     const joined = cells.join("|");
@@ -140,5 +146,101 @@ describe("tb_write_26as_report", () => {
     expect(eventCells).toContain("12-Jun-2025");
     expect(eventCells).toContain("CS/9");
     void session;
+  });
+
+  it("writes the three bill-level sheets with row ids, numeric tolerance and window text", async () => {
+    const reportDir = tempDir("as26-billsheets-");
+    const result: As26ReviewResult = {
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      findings: [],
+      recon: [],
+      gaps: [],
+      totals: { booksTax: 0, as26Tax: 0, partiesMatched: 0, combinationExplained: 0, ambiguous: 0 },
+      mastersUnavailable: false,
+      groupsUnavailable: false,
+      skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+      counts: { credits: 0, receivableLedgers: [] },
+      bookEvents: [],
+      billRows: [
+        {
+          sheetId: "booksded", party: "Pseudonym One", date: "10-Jun-2025", tax: 4600.15,
+          gross: null, voucherType: "Journal", ref: "Doc 1", status: null, section: null,
+          inWindow: true, linkBasis: "reference",
+          linked: { date: "09-Sep-2025", ref: "Doc 2", taxable: 230000 }, delta: null,
+          windowState: "in",
+        },
+        {
+          sheetId: "booksded", party: "Pseudonym One", date: "20-Dec-2025", tax: 1100,
+          gross: null, voucherType: "Journal", ref: "Doc 3", status: null, section: null,
+          inWindow: true, linkBasis: "none", linked: null, delta: null, windowState: "in",
+        },
+        {
+          sheetId: "as26", party: "Pseudonym One", date: "05-Jan-2026", tax: 2000,
+          gross: 100000, voucherType: null, ref: "Doc 4", status: "L", section: "194C",
+          inWindow: false, linkBasis: "none", linked: null, delta: null, windowState: "post",
+        },
+        {
+          sheetId: "value", party: "Pseudonym One", date: "09-Sep-2025", tax: 4600.15,
+          gross: 240000, voucherType: null, ref: null, status: null, section: "194C",
+          inWindow: true, linkBasis: "invoice-rate",
+          linked: { date: "05-Jun-2025", ref: "Doc 5", taxable: 230000 },
+          delta: 10000.89, windowState: "in",
+        },
+      ],
+    };
+    const paths = await writeAs26Report({
+      reportDir,
+      company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401",
+      toDate: "20260331",
+      markdown: "plain markdown",
+      result,
+      vault: createVault(),
+    });
+    const wb = readWorkbook(readFileSync(paths.workbookPath));
+    const names = wb.map((s) => s.name);
+    expect(names).toEqual([
+      "Findings", "Deductors", "Books Events", "Mapping",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch",
+    ]);
+
+    // data row n (1-based) is rows[n] — Excel row 1 is the header row
+    const dataRows = (sh: GridSheet): string[][] =>
+      sh.rows.slice(1).map((r) => {
+        const out: string[] = [];
+        let prev = -1;
+        for (const k of [...r.cells.keys()].sort((a, b) => a - b)) {
+          for (let i = prev + 1; i < k; i++) out.push("");
+          out.push(String(r.cells.get(k)!.value ?? ""));
+          prev = k;
+        }
+        return out;
+      });
+
+    const books = dataRows(wb.find((s) => s.name === "Books not in 26AS")!);
+    expect(books[0]).toEqual([
+      "B1", "Pseudonym One", "10-Jun-2025", "Journal", "Doc 1", "4600.15",
+      "Doc 2", "09-Sep-2025", "230000", "reference", "",
+    ]);
+    expect(books[1]).toEqual([
+      "B2", "Pseudonym One", "20-Dec-2025", "Journal", "Doc 3", "1100",
+      "", "", "", "none", "",
+    ]);
+
+    const as26 = dataRows(wb.find((s) => s.name === "26AS unmatched")!);
+    expect(as26[0]).toEqual([
+      "D1", "Pseudonym One", "05-Jan-2026", "194C", "2000", "100000", "L", "none", "post-period",
+    ]);
+
+    const value = dataRows(wb.find((s) => s.name === "Bill value mismatch")!);
+    expect(value[0]).toEqual([
+      "V1", "Pseudonym One", "09-Sep-2025", "240000", "Doc 5", "05-Jun-2025",
+      "230000", "10000.89", "1000", "invoice-rate", "",
+    ]);
+    // the tolerance renders as the NUMERIC 1000 (format: "money"), never a string
+    expect(value[0][8]).toBe("1000");
+    expect(value[0][8]).not.toBe("1,000.00");
   });
 });
