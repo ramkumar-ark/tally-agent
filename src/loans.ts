@@ -61,6 +61,8 @@ export interface LoansBooksCtx {
   isBankOdLedger: (ledger: string) => boolean;
   /** A Loans-(Liability) ledger that is also OD/OCC — excluded from clause 31. */
   isBankOdLoan: (ledger: string) => boolean;
+  /** Addendum 4 (2026-09-26): Secured Loans ancestry (canonical match). */
+  isSecuredLoanLedger: (ledger: string) => boolean;
 }
 
 /**
@@ -84,6 +86,7 @@ const BANK_OD_GROUPS = ["bank od a/c", "bank occ a/c"];
  */
 const BANK_LENDER_TOKENS = [
   "IDFC",
+  "UB",
   "Union Bank",
   "SBI",
   "State Bank",
@@ -115,7 +118,11 @@ const tokenRe = (token: string): RegExp =>
   new RegExp(`(?:^|[^a-z0-9])${token.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^a-z0-9])`, "i");
 
 const BANK_LENDER_RES = BANK_LENDER_TOKENS.map(tokenRe);
-const NBFC_GUARD_RES = NBFC_GUARD_TOKENS.map(tokenRe);
+// NBFC guard tokens are STEMS: "Financ" must match Finance and Financial,
+// so the token may be followed by a letter (unlike the bank tokens).
+const NBFC_GUARD_RES = NBFC_GUARD_TOKENS.map(
+  (t) => new RegExp(`(?:^|[^a-z0-9])${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i"),
+);
 
 const isRootEnd = (parent: string | undefined): boolean =>
   !parent || parent === ROOT_OF_PRIMARIES;
@@ -127,15 +134,20 @@ const isRootEnd = (parent: string | undefined): boolean =>
  */
 export function bankLenderNameMatch(name: string): boolean {
   const s = String(name ?? "");
-  if (NBFC_GUARD_RES.some((re) => re.test(s))) return false;
+  if (nbfcNameGuard(s)) return false;
   return BANK_LENDER_RES.some((re) => re.test(s));
+}
+
+/** Addendum 4: the NBFC guard applies to the secured-loans reason as well. */
+function nbfcNameGuard(name: string): boolean {
+  return NBFC_GUARD_RES.some((re) => re.test(String(name ?? "")));
 }
 
 /**
  * Addendum 2 (2026-09-26): auto-exempt candidates from the master pairs.
  * Loan ledgers only (clause 31 scope): "bank OD/OCC ancestry" (ignores the
  * NBFC guard — ancestry is book evidence, not a name guess), else
- * "bank name match". Keys are canonical.
+ * "bank name match", else "secured loan" (addendum 4). Keys are canonical.
  */
 export function loanAutoExemptNames(
   masters: { name: string; parent: string; openingBalance?: number | null }[],
@@ -147,6 +159,8 @@ export function loanAutoExemptNames(
     if (!ctx.isLoanLedger(m.name)) continue;
     if (ctx.isBankOdLedger(m.name)) out.set(canonicalKey(m.name), "bank OD/OCC ancestry");
     else if (bankLenderNameMatch(m.name)) out.set(canonicalKey(m.name), "bank name match");
+    else if (ctx.isSecuredLoanLedger(m.name) && !nbfcNameGuard(m.name))
+      out.set(canonicalKey(m.name), "secured loan");
   }
   return out;
 }
@@ -221,6 +235,11 @@ export function buildLoansCtx(
     );
   }
 
+  /** Addendum 4 (2026-09-26): Secured Loans ancestry (canonical match). */
+  function isSecuredLoanLedger(ledger: string): boolean {
+    return chainOf(ledger).some((n) => canonicalKey(n) === "secured loans");
+  }
+
   return {
     parentOf: rawParent,
     chainOf,
@@ -229,6 +248,7 @@ export function buildLoansCtx(
     isCashLedger,
     isBankOdLedger,
     isBankOdLoan,
+    isSecuredLoanLedger,
   };
 }
 
@@ -438,7 +458,8 @@ const overrideFor = (
  * Sheets 6/7 belong to Task 4's `scan269St` and come out empty here.
  *
  * Addendum 2 (2026-09-26): `opts.autoExempt` maps canonical ledger key →
- * reason ("bank name match" / "bank OD/OCC ancestry") for parties with no
+ * reason ("bank name match" / "bank OD/OCC ancestry" / "secured loan")
+ * for parties with no
  * operator row. Exempted parties are skipped like `exempt` rows, but one
  * `loans_auto_exempt` review advisory per party states the reason verbatim.
  * `opts.masterFacts` supplies PAN (pre-derived; GSTIN fallback happens at

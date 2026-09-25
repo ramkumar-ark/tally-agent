@@ -84,6 +84,11 @@ const bundle = {
     pan: norm(l.pan ?? l.IncomeTaxNumber),
     gstin: norm(l.gstin),
     address: keepCase(l.address),
+    // Addendum 4a (2026-09-26): raw upstream value; the reader + gateway
+    // apply the single sign-flip boundary convention.
+    openingBalance: typeof l.openingBalance === "number" && Number.isFinite(l.openingBalance)
+      ? l.openingBalance
+      : null,
   })),
   vouchers,
 };

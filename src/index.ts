@@ -862,12 +862,14 @@ export function registerTools(
         ledgerList = pairsInfo.ledgers.map((p) => p.name);
       }
       // Addendum 2 (2026-09-26): pre-fill Exempt = Y for Bank OD/OCC-ancestry
-      // loan ledgers and banking-company name matches; the operator can
-      // overwrite with N either way.
+      // loan ledgers, banking-company name matches, and — addendum 4 —
+      // Secured Loans ancestry; the operator can overwrite with N either way.
       const exemptCtx = buildLoansCtx(masterPairsInfo.ledgers, masterPairsInfo.groups);
       const exemptPrefill = (name: string): boolean =>
         exemptCtx.isLoanLedger(name) &&
-        (exemptCtx.isBankOdLedger(name) || bankLenderNameMatch(name));
+        (exemptCtx.isBankOdLedger(name) ||
+          bankLenderNameMatch(name) ||
+          exemptCtx.isSecuredLoanLedger(name));
       if (ledgerList.length === 0) {
         console.error(
           "tally-agent: no ledger names available (no day-book list and live masters unavailable) — " +

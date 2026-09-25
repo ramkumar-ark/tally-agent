@@ -13,7 +13,7 @@ import {
   type LoansOperator,
   type V,
 } from "../src/loans.js";
-import { readDayBookMasterPairs } from "../src/tds-daybook.js";
+import { readDayBook, readDayBookMasterPairs } from "../src/tds-daybook.js";
 import {
   buildLoansTemplateWorkbook,
   parseLoansTemplate,
@@ -194,6 +194,16 @@ describe("bank lender name match (addendum 2)", () => {
     ]) {
       expect(bankLenderNameMatch(name)).toBe(true);
     }
+  });
+
+  it("addendum 4: the UB short form matches UB -X / UB-X / UB X", () => {
+    expect(bankLenderNameMatch("UB - Standard Term Loan")).toBe(true);
+    expect(bankLenderNameMatch("UB-Site Overdraft Loan")).toBe(true);
+    expect(bankLenderNameMatch("UB Site Loan")).toBe(true);
+    // "Capital" is an NBFC-guard word (Working-Capital names); the guard wins.
+    expect(bankLenderNameMatch("UB Working Capital Loan")).toBe(false);
+    expect(bankLenderNameMatch("UBX Loan")).toBe(false);
+    expect(bankLenderNameMatch("SUB Loan")).toBe(false);
   });
 
   it("NBFC guard wins over bank tokens; HDFC alone is not an exempt token", () => {
@@ -457,6 +467,32 @@ describe("day-book reader carries pan/gstin/address/openingBalance additively", 
       { name: "Nirosha - Loan A/c", parent: "Unsecured Loans", pan: null, gstin: null, address: null, openingBalance: null },
     ]);
   });
+
+  it("a non-zero openingBalance round-trips through readDayBook (addendum 4a)", () => {
+    const bundleText = JSON.stringify({
+      tallyAgentExport: 1,
+      company: "RVS Constructions",
+      fromDate: "20250401",
+      toDate: "20260331",
+      groups: [{ name: "Unsecured Loans", parent: "Loans (Liability)" }],
+      ledgers: [
+        { name: "Nirosha - Loan A/c", parent: "Unsecured Loans", openingBalance: -3_50_000 },
+        { name: "Cash", parent: "Cash-in-Hand", openingBalance: 1200 },
+      ],
+      vouchers: [
+        { date: "20250415", voucherNumber: "RV-1", voucherType: "Payment", isCancelled: false, entries: [] },
+      ],
+    });
+    const out = readDayBook(bundleText, {
+      company: "rvs constructions",
+      fromDate: "20250401",
+      toDate: "20260331",
+    });
+    expect(out.ledgers).toEqual([
+      { name: "Nirosha - Loan A/c", parent: "Unsecured Loans", pan: null, gstin: null, address: null, openingBalance: -3_50_000 },
+      { name: "Cash", parent: "Cash-in-Hand", pan: null, gstin: null, address: null, openingBalance: 1200 },
+    ]);
+  });
 });
 
 describe("CHECK_ORDINAL pin (auto-exempt ordinal 27)", () => {
@@ -464,5 +500,87 @@ describe("CHECK_ORDINAL pin (auto-exempt ordinal 27)", () => {
     expect(CHECK_ORDINAL.loans_auto_exempt).toBe(27);
     expect(CHECK_ORDINAL.loans_party_unmastered).toBe(26);
     expect(Object.keys(CHECK_ORDINAL)).toHaveLength(23);
+  });
+});
+
+describe("secured-loans auto-exempt (addendum 4)", () => {
+  const SECURED_GROUPS = [
+    ...GROUPS,
+    { name: "Secured Loans", parent: "Loans (Liability)" },
+  ];
+
+  it("a secured-loan ledger with no bank name is exempt with the secured-loan reason", () => {
+    const masters = [
+      ...MASTERS,
+      { name: "Loan -050616440000088 - Hamm Roller", parent: "Secured Loans" },
+    ];
+    const map = loanAutoExemptNames(masters, SECURED_GROUPS);
+    expect(map.get(canonicalKey("Loan -050616440000088 - Hamm Roller"))).toBe("secured loan");
+  });
+
+  it("an OD-ancestry loan outranks the secured reason; bank name outranks secured", () => {
+    const masters = [
+      ...MASTERS,
+      { name: "OD Secured Term Loan", parent: "Bank OD A/c" },
+      { name: "Union Bank Loan Sec", parent: "Secured Loans" },
+      { name: "SBI Secured Term Loan", parent: "Secured Loans" },
+    ];
+    const groups = [
+      ...SECURED_GROUPS,
+      { name: "Bank OD A/c", parent: "Secured Loans" },
+    ];
+    const map = loanAutoExemptNames(masters, groups);
+    expect(map.get(canonicalKey("OD Secured Term Loan"))).toBe("bank OD/OCC ancestry");
+    expect(map.get(canonicalKey("Union Bank Loan Sec"))).toBe("bank name match");
+    expect(map.get(canonicalKey("SBI Secured Term Loan"))).toBe("bank name match");
+  });
+
+  it("a secured-loan ledger with an NBFC name is NOT exempt", () => {
+    const masters = [
+      ...MASTERS,
+      { name: "Bajaj Finance Secured Loan", parent: "Secured Loans" },
+    ];
+    const map = loanAutoExemptNames(masters, SECURED_GROUPS);
+    expect(map.has(canonicalKey("Bajaj Finance Secured Loan"))).toBe(false);
+  });
+
+  it("unsecured-loan ledgers are unaffected by the secured rule", () => {
+    const map = loanAutoExemptNames(MASTERS, GROUPS);
+    expect(map.has(canonicalKey("Nirosha - Loan A/c"))).toBe(false);
+    expect(map.has(canonicalKey("Term Loan A/c"))).toBe(false);
+  });
+
+  it("an operator N override keeps a secured loan listed", () => {
+    const autoExempt = new Map([
+      [canonicalKey("Loan -050616440000088 - Hamm Roller"), "secured loan"],
+    ]);
+    const op: LoansOperator = {
+      parties: [{ ledger: "Loan -050616440000088 - Hamm Roller", exemptNot: true }],
+    };
+    const books = buildLoansRows(
+      [ev("20250415", "Loan -050616440000088 - Hamm Roller", "accepted", 2_50_000, "cash")],
+      op,
+      { mastersPresent: true, autoExempt },
+    );
+    expect(books.sheet1).toHaveLength(1);
+    expect(books.findings.some((f) => f.check === "loans_auto_exempt")).toBe(false);
+  });
+
+  it("buildLoansRows emits the exact secured-loan advisory", () => {
+    const autoExempt = new Map([
+      [canonicalKey("Loan -050616440000088 - Hamm Roller"), "secured loan"],
+    ]);
+    const books = buildLoansRows(
+      [ev("20250415", "Loan -050616440000088 - Hamm Roller", "accepted", 2_50_000, "cash")],
+      EMPTY_LOANS_OPERATOR,
+      { mastersPresent: true, autoExempt },
+    );
+    expect(books.sheet1).toEqual([]);
+    expect(books.findings).toEqual([
+      expect.objectContaining({
+        check: "loans_auto_exempt",
+        detail: "auto-exempt: secured loan",
+      }),
+    ]);
   });
 });
