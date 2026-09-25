@@ -460,6 +460,53 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `findFundLedgers`/`employeeEvents` take abs). V4 (Winman import click) is
   captain-operated and recorded in the design doc §10.1.
 
+## Winman 3CD loans 269SS/T/ST (2026-09-25)
+
+- Clause 31 (l.269SS/l.269T) and l.269ST live in `src/loans.ts` +
+  `src/loans-law.ts` (its C1–C8 confirm table is the rules of record) with the
+  operator template in `src/loans-file.ts` (`tb_write_loans_template` →
+  `tb_loans_review` → `tb_write_3cd_loans`).
+- The Winman loans sheet names carry `&` ("Sec.269SS Loans & Deposits",
+  "Sec.269T Repayments Cheque & DD") and workbook.xml stores them escaped
+  (`&amp;`). `resolveSheetPart` matches DECODED attribute values, so lookups
+  must pass the unescaped name — a raw-bytes comparison against the part text,
+  or the escaped form, never matches. The test fixture encodes exactly this.
+- Unlike PF/ESI's date+number-only sheets, the loans sheets carry text columns,
+  so `write3cdLoans` resolves every vault alias back to its real value through
+  the cached `lastLoansVault` snapshot (26AS-template write-side precedent; on
+  the operator's disk only). The operator PAN/Aadhaar rides
+  `LoansSheetRow.panAlias` RAW through the engine (both books and template
+  rows); `Session.loansReview`'s `maskRow` is the SINGLE vaulting point
+  (`vault.pseudonym(.., "tax_id")`) — the engine never repaints a raw value as
+  a pseudonym itself.
+- Journal-mode movements are never auto-breaches (C3): a loan event with no
+  cash/bank counter and no operator override earns one `loans_mode_unknown`
+  advisory per party and no row; narration hints (RTGS/NEFT/IMPS/UPI) or the
+  Settings `Default bank mode` give a bank movement its F-token (C4, default
+  ECS).
+- Bank-party loans are exempt counterparties (C6): an operator-declared
+  `exempt` party's buckets are excluded from rows and from the
+  splitting/max-amount advisories entirely.
+- MAXAMOUNT/SQUAREDUP are movement-only from a 0 opening (C7): when ledger
+  masters are absent (`mastersSource: "absent"`) each moving party earns a
+  `loans_max_amount_estimated` advisory and the peak is an estimate.
+- Loans checks occupy ordinals 19–26 in `CHECK_ORDINAL` (`src/types.ts`);
+  ordinals 15–18 belong to the concurrent clause-44 lane (captain ruling).
+  Never renumber.
+- Sheet5 (Sec.269T Repayments Cheque & DD) is engine-empty by construction —
+  the books cannot invent a declared cheque/DD repayment — and needs a
+  sheets-4-style operator declaration channel (like `Cash-breach-declared`
+  feeding sheet4) before it can carry rows.
+- The fill clones `write3cdPfEsi` mechanics: INTER handshake asserted, per
+  sheet the formId `269SS/269T_LoansAc/RpinCash` pinned; only non-empty sheets
+  are written, a sheet the workbook lacks is skipped with a stderr warning,
+  and a workbook carrying none of the seven refuses. Target is
+  `<stem> - filled - <YYYYMMDD>.xlsm` inside the `outPath` directory (or the
+  exact `outPath` when it ends in `.xlsm`), with a `realPathId` self-overwrite
+  guard. Optional cells are written only when the row carries them — a
+  defined-but-empty text value (`bearer: ""`) omits the cell rather than
+  writing an empty inlineStr.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
