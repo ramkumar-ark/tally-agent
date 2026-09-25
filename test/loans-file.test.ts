@@ -86,7 +86,7 @@ describe("parseLoansTemplate", () => {
       withRows(
         {
           parties: [["Loan Creditor A", "AAAPL1234A", "12 Site Road", "Y", "Net Banking", ""]],
-          specified: [["Loan Debtor B", 125000.5, "", "", "IMPS", ""]],
+          specified: [["Loan Debtor B", 125000.5, "BBBPL5678B", "12 Site Road", "IMPS", ""]],
           st26: [["Loan Creditor A", "Receipts", "20251014", 250000, "instalment", "Y"]],
         },
         [{ name: "Loan Creditor A" }, { name: "Loan Debtor B" }],
@@ -107,6 +107,11 @@ describe("parseLoansTemplate", () => {
       {
         party: "Loan Debtor B",
         amount: 125000.5,
+        // PIN (ruling 2026-09-25): the operator PAN/Aadhaar rides panAlias
+        // on the template-parse path; Session.loansReview (Task 6) must
+        // vault it before the row reaches the model.
+        panAlias: "BBBPL5678B",
+        address: "12 Site Road",
         mode: "IMPS",
       },
     ]);
@@ -178,6 +183,26 @@ describe("parseLoansTemplate", () => {
       withRows({ settings: [["Default bank mode", ""]] }, [{ name: "Loan Creditor A" }]),
     );
     expect(parsed.defaultBankMode).toBeUndefined();
+  });
+
+  it("parses Settings Include exempt-party rows: Y ⇒ flag, blank ⇒ absent, anything else refused", () => {
+    const yes = parseLoansTemplate(withRows({ settings: [["Include exempt-party rows", "Y"]] }, [], {}));
+    expect(yes.includeExemptRows).toBe(true);
+    const blank = parseLoansTemplate(withRows({ settings: [["Include exempt-party rows", ""]] }, [], {}));
+    expect(blank.includeExemptRows).toBeUndefined();
+    const bad = errOf(() =>
+      parseLoansTemplate(withRows({ settings: [["Include exempt-party rows", "Never mind"]] }, [], {})),
+    );
+    expect(bad).toMatch(/^template Settings row 2, column B \(Value\): enter Y or leave it blank$/);
+  });
+
+  it("refuses a numeric PAN cell, citing the address only (Excel-mangled column)", () => {
+    const msg = errOf(() =>
+      // prettier-ignore
+      parseLoansTemplate(withRows({ parties: [["Loan Creditor A", 123456789012, "", "", "", ""]] })),
+    );
+    expect(msg).toMatch(/^template Parties row 2, column B \(PAN or Aadhaar\): cell is numeric/);
+    expect(msg).not.toContain("123456789012");
   });
 
   it("rejects a workbook that lost a required sheet, naming only sheet names", () => {

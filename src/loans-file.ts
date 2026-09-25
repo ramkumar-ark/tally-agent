@@ -65,6 +65,8 @@ export interface LoansTemplateParsed {
   specifiedSums: LoansSheetRow[];
   st26Declarations: LoansSheetRow[];
   defaultBankMode?: ReceiptMode;
+  /** Settings "Include exempt-party rows": Y ⇒ true; blank/absent ⇒ undefined. */
+  includeExemptRows?: boolean;
 }
 
 const LEDGER_MODES: string[] = [...RECEIPT_MODES, "Cash-breach-declared"];
@@ -229,7 +231,7 @@ export function parseLoansTemplate(buf: Buffer): LoansTemplateParsed {
     const key = canonicalKey(ledger);
     if (seenLedger.has(key)) {
       throw new Error(
-        `template Parties row ${r.row}, column A (Tally ledger): this ledger already appears in row ${seenLedger.get(key)} — one row per loan party`,
+        `template Parties row ${r.row}, column ${colLetter(ledgerCol)} (Tally ledger): this ledger already appears in row ${seenLedger.get(key)} — one row per loan party`,
       );
     }
     seenLedger.set(key, r.row);
@@ -437,7 +439,19 @@ export function parseLoansTemplate(buf: Buffer): LoansTemplateParsed {
           ) as ReceiptMode;
           defaultBankModeRow = r.row;
         }
-      } else if (s !== "include exempt-party rows") {
+      } else if (s === "include exempt-party rows") {
+        // Additive setting: Y declares the operator wants exempt-party rows
+        // included; blank (the generated default) leaves the flag undefined.
+        if (value !== undefined) {
+          const flagRaw = String(raw(r.cells.get(valueCol)).value ?? "").trim().toLowerCase();
+          if (flagRaw === "y" || flagRaw === "yes") parsed.includeExemptRows = true;
+          else {
+            throw new Error(
+              `template Settings row ${r.row}, column ${colLetter(valueCol)} (Value): enter Y or leave it blank`,
+            );
+          }
+        }
+      } else {
         throw new Error(
           `template Settings row ${r.row}, column ${colLetter(settingCol)} (Setting): not a known setting — the settings are "Default bank mode" and "Include exempt-party rows"`,
         );
@@ -446,6 +460,7 @@ export function parseLoansTemplate(buf: Buffer): LoansTemplateParsed {
   }
 
   if (parsed.defaultBankMode === undefined) delete parsed.defaultBankMode;
+  if (parsed.includeExemptRows === undefined) delete parsed.includeExemptRows;
   return parsed;
 }
 
