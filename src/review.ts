@@ -2187,6 +2187,9 @@ export function createSession(
     };
 
     return {
+      company,
+      fromDate,
+      toDate,
       findings,
       rows: LOANS_SHEET_NAMES.flatMap((n) => maskedSheets[n]),
       sheets,

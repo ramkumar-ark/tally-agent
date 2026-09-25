@@ -34,6 +34,7 @@ import {
   writeReport,
   writeAs26Report,
   writePfEsiReport,
+  writeLoansReport,
   writeTdsReport,
   writeVaultDump,
 } from "./report.js";
@@ -49,7 +50,7 @@ import {
   type Session,
   type TdsReviewResult,
 } from "./review.js";
-import type { LoansReviewResult } from "./loans.js";
+import { LOANS_SHEET_NAMES, type LoansReviewResult } from "./loans.js";
 import { loadDayBookText, readDayBook, readDayBookLedgerNames, type DayBookInput } from "./tds-daybook.js";
 
 export type ToolRegistrar = (
@@ -982,12 +983,37 @@ export function registerTools(
       outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
-      if (!session.loansRows()) {
+      if (!lastLoans || !session.loansRows()) {
         throw new Error("run tb_loans_review first: there are no clause-31/269ST rows to write");
       }
-      // Placeholder: the report workbook itself (writeLoansReport in
-      // src/report.ts) lands in Task 9, which replaces this throw.
-      throw new Error("the loans report workbook lands in Task 9");
+      // The family sheets carry the RAW cached rows (real names, PAN and
+      // address, YYYYMMDD dates) exactly as tb_write_pf_esi_report carries
+      // its clause 20(b) rows; the findings stay masked and de-mask through
+      // the vault on write. Both channels arrive correct by construction.
+      const cached = session.loansRows()!;
+      const company = args.company ?? lastLoans.company;
+      const paths = await writeLoansReport({
+        reportDir: cfg.reportDir,
+        result: {
+          company,
+          fromDate: lastLoans.fromDate,
+          toDate: lastLoans.toDate,
+          findings: lastLoans.findings,
+          rows: LOANS_SHEET_NAMES.flatMap((n) => cached.sheets[n]),
+          sheets: lastLoans.sheets,
+        },
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_loans_report",
+        { company: company ?? null },
+        lastLoans.findings.length,
+        maskedCount(lastLoans.findings),
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
     },
   );
 

@@ -7,6 +7,7 @@ import { round2, type BlockResult, type AssetRow, type MovementRow, type Exclude
 import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding, PfEsiMaskedFinding, As26ReviewResult } from "./review.js";
 import type { Clause20bRow } from "./pf-esi.js";
 import type { Vault } from "./vault.js";
+import { LOANS_SHEET_LABELS, LOANS_SHEET_NAMES, type LoansSheetName, type LoansSheetRow } from "./loans.js";
 
 /**
  * Structural shape both the trial-balance and the GST findings CSV need. GST
@@ -954,6 +955,151 @@ export async function writePfEsiReport(opts: {
     reportDir: opts.reportDir,
     fileName: `pf-esi-review-${stem}.xlsx`,
     sheets: pfEsiSheets(opts.result),
+    vault: opts.vault,
+  });
+  return { workbookPath };
+}
+
+/**
+ * Task 9's loans review as the workbook writer consumes it: a masked
+ * LoansReviewResult is structurally assignable (its extra mastersSource /
+ * sectionSummary fields are ignored), and the production tool path passes the
+ * RAW flattened rows from Session.loansRows() instead — both channels work,
+ * because the family sheets only assume LoansSheetRow and the de-masking is
+ * writeWorkbook's (a raw string demasks to itself).
+ */
+export interface LoansReportResult {
+  company?: string;
+  fromDate?: string;
+  toDate?: string;
+  findings: Finding[];
+  rows: LoansSheetRow[];
+  sheets: Record<LoansSheetName, number>;
+}
+
+/**
+ * The three family sheets: sheets 1+2 print as "269SS", 3+4+5 as "269T",
+ * 6+7 as "269ST" (C5 family grouping; the per-paragraph detail rides the
+ * title's label list). Sheets 2/5 are operator-declared rows the books never
+ * invent; an absent engine entry just contributes zero rows.
+ */
+const LOANS_FAMILIES: Array<{
+  name: "269SS" | "269T" | "269ST";
+  sheetNames: LoansSheetName[];
+}> = [
+  { name: "269SS", sheetNames: ["sheet1", "sheet2"] },
+  { name: "269T", sheetNames: ["sheet3", "sheet4", "sheet5"] },
+  { name: "269ST", sheetNames: ["sheet6", "sheet7"] },
+];
+
+/**
+ * Both row channels render as the same dd-mmm-yyyy text: the raw cache keeps
+ * YYYYMMDD (masked rows already carry displayDate form), and displayDate
+ * passes a display-formatted date through only when it looks 8-digit —
+ * formatted ones ride untouched. A date column therefore never emits a bare
+ * 8-digit string (scrubDigits food).
+ */
+const loansDateCell = (d: string | undefined): string =>
+  d && /^\d{8}$/.test(d) ? displayDate(d) : (d ?? "");
+
+/**
+ * The loans working-paper sheets (R-R-4): a Findings sheet plus one sheet per
+ * statutory family. Masked in, masked out: writeWorkbook de-masks — a raw cached
+ * string simply demasks to itself, so the same builder serves both channels.
+ * Amounts stay numeric cells (money column format); the rows/total title line
+ * is the only place a total is spelled out (through money(), never bare).
+ */
+export function loansSheets(result: LoansReportResult): Sheet[] {
+  // Rows arrive flattened in LOANS_SHEET_NAMES order; slice them back apart
+  // on the review's own per-sheet counts (same contract as the Winman writer).
+  const bySheet = new Map<LoansSheetName, LoansSheetRow[]>();
+  let at = 0;
+  for (const n of LOANS_SHEET_NAMES) {
+    bySheet.set(n, result.rows.slice(at, at + (result.sheets[n] ?? 0)).map((r) => r));
+    at += result.sheets[n] ?? 0;
+  }
+  const period = result.fromDate && result.toDate
+    ? `Loans clause 31 / s.269ST review, ${displayDate(result.fromDate)} to ${displayDate(result.toDate)}`
+    : "Loans clause 31 / s.269ST review (period not recorded)";
+  const clause23Columns: Column[] = [
+    textCol("Party", 28),
+    textCol("PAN alias", 14),
+    moneyCol("Amount"),
+    textCol("Mode", 16),
+    textCol("Address", 36),
+    textCol("Squared up", 11),
+    moneyCol("Max amount"),
+    textCol("Non-A/c mode", 13),
+  ];
+  const sheets: Sheet[] = [
+    findingsSheet(result.findings),
+  ];
+  for (const fam of LOANS_FAMILIES) {
+    const rows = fam.sheetNames.flatMap((n) => bySheet.get(n) ?? []);
+    sheets.push({
+      name: fam.name,
+      title: [
+        period,
+        fam.sheetNames.map((n) => LOANS_SHEET_LABELS[n]).join("; "),
+        `Rows: ${count(rows.length)}; total ${money(rows.reduce((s, r) => s + r.amount, 0))}.`,
+      ],
+      columns: fam.name === "269ST"
+        ? [
+            textCol("Party", 28),
+            moneyCol("Amount"),
+            textCol("Type", 10),
+            textCol("Date", 12),
+            textCol("Nature", 40),
+            textCol("Bearer", 8),
+          ]
+        : clause23Columns,
+      rows: rows.map((r) =>
+        fam.name === "269ST"
+          ? [
+              r.party,
+              r.amount,
+              r.type ?? "",
+              loansDateCell(r.date),
+              r.nature ?? "",
+              r.bearer ?? "",
+            ]
+          : [
+              r.party,
+              r.panAlias ?? "",
+              r.amount,
+              r.mode ?? "",
+              r.address ?? "",
+              r.squaredUp ?? "",
+              r.maxAmount ?? "",
+              r.nonAcMode ?? "",
+            ],
+      ),
+    });
+  }
+  return sheets;
+}
+
+/**
+ * The clause 31 / 269ST working paper workbook (R-R-4), de-masked on the way
+ * to disk by writeWorkbook. Both channels write here: the masked review
+ * result's rows (alias-bearing, address dropped) de-mask through the vault,
+ * and the raw cached rows pass through unaliased. No explicit mkdir —
+ * writeWorkbook does it, as for the other review workbooks.
+ */
+export async function writeLoansReport(opts: {
+  reportDir: string;
+  company?: string;
+  result: LoansReportResult;
+  vault: Vault;
+}): Promise<{ workbookPath: string }> {
+  const stem = opts.result.fromDate && opts.result.toDate
+    ? `${slug(opts.result.company ?? "loans")}-${opts.result.fromDate}-${opts.result.toDate}`
+    : slug(opts.result.company ?? "loans");
+  const workbookPath = join(opts.reportDir, `loans-review-${stem}.xlsx`);
+  await writeWorkbook({
+    reportDir: opts.reportDir,
+    fileName: `loans-review-${stem}.xlsx`,
+    sheets: loansSheets(opts.result),
     vault: opts.vault,
   });
   return { workbookPath };

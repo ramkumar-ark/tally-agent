@@ -281,15 +281,16 @@ describe("tb_write_loans_report", () => {
     ).rejects.toThrow(/run tb_loans_review first/i);
   });
 
-  it("is registered for Task 9's writer, which does not exist yet", async () => {
+  it("writes the workbook from the cached review (period keyed file name)", async () => {
     const h = offlineHarness();
     await h.tools.get("tb_loans_review")!({
       ...PHASE,
       dayBookPath: await bundlePath(),
     });
-    await expect(
-      h.tools.get("tb_write_loans_report")!({ company: "Sample Co" }),
-    ).rejects.toThrow(/lands in Task 9/i);
+    const out = await h.tools.get("tb_write_loans_report")!({ company: "Sample Co" });
+    const parsed = JSON.parse(out);
+    expect(parsed.workbookPath).toMatch(/loans-review-sample-co-20250401-20260331\.xlsx$/);
+    expect(existsSync(parsed.workbookPath)).toBe(true);
   });
 });
 

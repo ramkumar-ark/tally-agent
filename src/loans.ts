@@ -578,6 +578,11 @@ export const LOANS_SHEET_LABELS: Record<LoansSheetName, string> = {
 
 /** The loansReview session result: findings and rows MODEL-SIDE (masked). */
 export interface LoansReviewResult {
+  /** Period/company ride along for the report workbook's file name stem and
+   * period line (Task 9). Optional: older direct-engine callers may omit. */
+  company?: string;
+  fromDate?: string;
+  toDate?: string;
   findings: Finding[];
   /** Masked rows, sheets 1..7 flattened in order; numeric amounts intact. */
   rows: LoansSheetRow[];
