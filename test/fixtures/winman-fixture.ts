@@ -193,13 +193,11 @@ export function makeTdsTcsFixture(opts: { tcsSheet?: boolean } = {}): TdsTcsFixt
     part("xl/styles.xml", STYLES),
     part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${ss.length}" uniqueCount="${ss.length}">${ss.map((s) => `<si><t>${s}</t></si>`).join("")}</sst>`),
   ];
-
   const bins: Array<readonly [string, Buffer, 0 | 8]> = [
     ["xl/media/image1.jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]), 0],
     ["xl/vbaProject.bin", Buffer.from("MACRO\u0000\u0001BYTES", "binary"), 8],
     ["xl/vbaProjectSignature.bin", Buffer.from("SIG\u0000\u00ff", "binary"), 8],
   ];
-
   const partNames = {} as TdsTcsFixture["parts"];
   const byName: Record<string, string> = { TDS: "TDS", TCS: "TCS", "Return details": "RET", "Interest on TDS": "INT_TDS", "Interest on TCS": "INT_TCS" };
   for (const spec of specs) partNames[byName[spec.name]] = `xl/worksheets/sheet${specs.indexOf(spec) + 1}.xml`;
@@ -211,6 +209,171 @@ const INTER_TDS_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G1"/><sheetData>
 <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c><c r="G1"><v>1</v></c></row>
 </sheetData></worksheet>`;
+
+// ---------------------------------------------------------------------------
+// The No TDS Disallowance.xlsm fixture (clause 21(b), design of record
+// docs/design/2026-09-24-no-tds-disallowance-design.md §2.1). Same discipline
+// as above: invented values only, but the real row-1/row-2 key layout.
+// ---------------------------------------------------------------------------
+
+/** Column letters of the 13 key positions, A..M, zero-based index aligned. */
+const NOTDS_COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"];
+
+const NOTDS_ADDR_KEYS = ["ADDRESS", "CITY", "STATE", "PINZIP", "COUNTRY", "PANAADHAAR"] as const;
+
+const NOTDS_ADDR_HEADERS = [
+  "Address", "City", "State", "PIN / ZIP code", "Country", "PAN/ Aadhaar, if available",
+] as const;
+
+/** Row-2 machine keys per sheet; `null` is a key-less column (§2.1). */
+const NOTDS_SHEETS = [
+  {
+    name: "40(a)(ia) to resident",
+    first: 7,
+    path: "6.06.10.10.*.00",
+    keys: ["DEDUCTEENAME", "DATEOFPAYMENT", "EXPENSEAMOUNT", "TDSDONE", "TDSDEPOSITED",
+      "TDSSECTION", "NATUREOFPAYMENT", ...NOTDS_ADDR_KEYS],
+    headers: ["Deductee Name", "Date of payment", "Expense Amount", "TDS done, if any",
+      "TDS deposited, if any*", "TDS Section", "Nature of payment", ...NOTDS_ADDR_HEADERS],
+  },
+  {
+    name: "40(a)(ib) - Equalisation Levy",
+    first: 7,
+    path: "6.06.14.07.*.00",
+    keys: ["DEDUCTEENAME", "DATEOFPAYMENT", "EXPENSEAMOUNT", "LEVYDEDUCTED", "LEVYDEPOSITED",
+      null, "NATUREOFPAYMENT", ...NOTDS_ADDR_KEYS],
+    headers: ["Deductee Name", "Date of payment", "Expense Amount", "Levy deducted, if any",
+      "Levy deposited, if any*", null, "Nature of payment", ...NOTDS_ADDR_HEADERS],
+  },
+  {
+    name: "40(a)(i) to non-resident",
+    first: 7,
+    path: "6.06.20.10.*.00",
+    keys: ["DEDUCTEENAME", "DATEOFPAYMENT", "EXPENSEAMOUNT", "TDSDONE", "TDSDEPOSITED",
+      "TDSSECTION", "NATUREOFPAYMENT", ...NOTDS_ADDR_KEYS],
+    headers: ["Deductee Name", "Date of payment", "Expense Amount", "TDS done, if any",
+      "TDS deposited, if any*", "TDS Section", "Nature of payment", ...NOTDS_ADDR_HEADERS],
+  },
+  {
+    name: "40(a)(iii)",
+    first: 8,
+    path: "6.06.30.10.*.00",
+    keys: ["DEDUCTEENAME", "DATEOFPAYMENT", "AMOUNT", null, null, null, null, ...NOTDS_ADDR_KEYS],
+    headers: ["Deductee Name", "Date of payment", "Amount", "TDS done, if any",
+      "TDS deposited, if any*", "TDS Section", "Nature of payment", ...NOTDS_ADDR_HEADERS],
+  },
+] as const;
+
+interface NotdsStrings {
+  /** Emit the `<sst>` document from the recorded fragments. */
+  xml(): string;
+  /** Index of a plain string (appended on first use). */
+  i(s: string): number;
+  /** Index of the rich-run "TDS Section" `<si>`, the way inspect.mjs saw real ones. */
+  richSection(): number;
+}
+
+function notdsStrings(): NotdsStrings {
+  const frags: Array<{ xml: string; lookup: string | null }> = [];
+  const plain = new Map<string, number>();
+  const i = (s: string): number => {
+    const hit = plain.get(s);
+    if (hit !== undefined) return hit;
+    const idx = frags.length;
+    frags.push({ xml: `<si><t xml:space="preserve">${s}</t></si>`, lookup: s });
+    plain.set(s, idx);
+    return idx;
+  };
+  i("3cdNoTDS"); i("2026-2027");
+  const richIdx = frags.length;
+  frags.push({
+    xml: `<si><r><t xml:space="preserve">TDS </t></r><r><t xml:space="preserve">Section</t></r></si>`,
+    lookup: null,
+  });
+  return {
+    i,
+    richSection: () => richIdx,
+    xml: () => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${frags.length}" uniqueCount="${frags.length}">${frags.map((f) => f.xml).join("")}</sst>`,
+  };
+}
+
+/** The INTER handshake row, parametrised: `G1` numeric 1 == validation on. */
+function notdsInterXml(marker: number, version: number, build: number, ay: number, flag: number): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G1"/><sheetData>
+<row r="1"><c r="A1" t="s"><v>${marker}</v></c><c r="B1" t="s"><v>${version}</v></c><c r="C1" t="s"><v>${build}</v></c><c r="D1" t="s"><v>${ay}</v></c><c r="E1" t="s"><v>${flag}</v></c><c r="G1"><v>1</v></c></row>
+</sheetData></worksheet>`;
+}
+
+function notdsSheetXml(sheet: (typeof NOTDS_SHEETS)[number], ref: (s: string) => number, richSection: number): string {
+  let s = "";
+  const keyed = (col: number): boolean => sheet.keys[col] !== null;
+  // Row 1: form id, sheet key, first data row, field path.
+  s += `<row r="1" hidden="1"><c r="A1" s="78" t="s"><v>${ref("3cdNoTDS")}</v></c><c r="B1" s="78" t="s"><v>${ref(sheet.name)}</v></c><c r="C1" s="82" t="s"><v>${ref(String(sheet.first))}</v></c><c r="D1" s="82" t="s"><v>${ref(sheet.path)}</v></c></row>`;
+  // Row 2: the machine keys; key-less columns carry no cell at all.
+  let row2 = "";
+  for (let col = 0; col < 13; col += 1) {
+    if (!keyed(col)) continue;
+    row2 += `<c r="${NOTDS_COLS[col]}2" s="${col < 2 ? 78 : 82}" t="s"><v>${ref(sheet.keys[col]!)}</v></c>`;
+  }
+  s += `<row r="2" hidden="1">${row2}</row>`;
+  // Headers sit two rows above the first data row (row 4; row 5 on 40(a)(iii)).
+  let hdr = "";
+  for (let col = 0; col < 13; col += 1) {
+    if (sheet.headers[col] === null) continue;
+    const idx = sheet.headers[col] === "TDS Section" ? richSection : ref(sheet.headers[col]!);
+    hdr += `<c r="${NOTDS_COLS[col]}${sheet.first - 3}" t="s"><v>${idx}</v></c>`;
+  }
+  s += `<row r="${sheet.first - 3}">${hdr}</row>`;
+  // Hidden all-'-' prototype row on firstDataRow - 1; two quotePrefix styles
+  // (88 for A/B date-width columns, 89 for the rest) so resolveStyleTwins has
+  // work to do.
+  let proto = "";
+  for (let col = 0; col < 13; col += 1) {
+    if (!keyed(col)) continue;
+    proto += `<c r="${NOTDS_COLS[col]}${sheet.first - 1}" s="${col < 2 ? 88 : 89}" t="s"><v>${ref("-")}</v></c>`;
+  }
+  s += `<row r="${sheet.first - 1}" hidden="1">${proto}</row>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:M${sheet.first - 1}"/><sheetData>${s}</sheetData></worksheet>`;
+}
+
+export const NOTDS_PARTS = {
+  resident: "xl/worksheets/sheet1.xml",
+  levy: "xl/worksheets/sheet2.xml",
+  nonResident: "xl/worksheets/sheet3.xml",
+  salary: "xl/worksheets/sheet4.xml",
+} as const;
+
+/**
+ * A 100% synthetic `No TDS Disallowance.xlsm`-shaped package: four sheets with
+ * the real row-1/row-2 keys, prototype rows and firstDataRow (8 on sheet4),
+ * plus the INTER sheet carrying the handshake and `G1=1`.
+ */
+export function makeNotdsFixture(): Buffer {
+  const ss = notdsStrings();
+  const richSection = ss.richSection();
+  const sheets = NOTDS_SHEETS.map((cfg) => notdsSheetXml(cfg, (v) => ss.i(v), richSection));
+  const sheetTags = (others: string) =>
+    NOTDS_SHEETS.map((c, n) => `<sheet name="${c.name}" sheetId="${[11, 13, 5, 7][n]}" state="hidden" r:id="rId${n + 1}"/>`).join("") + others;
+  const parts = [
+    part("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>`),
+    part("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
+    part("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheetTags(`<sheet name="INTER" sheetId="9" state="hidden" r:id="rId5"/>`)}</sheets></workbook>`),
+    part("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${[NOTDS_PARTS.resident, NOTDS_PARTS.levy, NOTDS_PARTS.nonResident, NOTDS_PARTS.salary, "worksheets/sheet5.xml"].map((target, n) => `<Relationship Id="rId${n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${target}"/>`).join("")}</Relationships>`),
+    ...sheets.map((xml, n) => part(`xl/worksheets/sheet${n + 1}.xml`, xml)),
+    // INTER row 1: marker, version, build, AY, validation flag; G1 = 1 == validation on.
+    part("xl/worksheets/sheet5.xml", notdsInterXml(ss.i("$WiNsArAlXlImPoRt2$"), ss.i("9.6.1"), ss.i("1623"), ss.i("2026-2027"), ss.i("F"))),
+    part("xl/styles.xml", STYLES),
+    part("xl/sharedStrings.xml", ss.xml()),
+  ] as Array<readonly [string, Buffer]>;
+  const bins: Array<readonly [string, Buffer, 0 | 8]> = [
+    ["xl/media/image1.jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]), 0],
+    ["xl/vbaProject.bin", Buffer.from("MACRO\u0000\u0001BYTES", "binary"), 8],
+    ["xl/vbaProjectSignature.bin", Buffer.from("SIG\u0000\u00ff", "binary"), 8],
+  ];
+  return zipOf([...parts.map(([n, b]) => [n, b, 8] as const), ...bins]);
+}
 
 interface WinmanZipOpts {
   esiSheet?: boolean;
