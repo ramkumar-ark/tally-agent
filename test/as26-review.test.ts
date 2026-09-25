@@ -331,9 +331,21 @@ describe("Session.as26Review", () => {
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
     const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileW, anandMap());
     const as26rows = res.billRows.filter((r) => r.sheetId === "as26");
-    expect(as26rows.some((r) => r.windowState === "pre")).toBe(true);
-    expect(as26rows.some((r) => r.windowState === "post")).toBe(true);
-    expect(as26rows.some((r) => r.windowState === "in")).toBe(true);
+    // Pin the DIRECTION per named row: a pre↔post inversion would still leave
+    // all three states present, so membership alone cannot catch it. An as26
+    // bill row's `date` is the transaction's booking date.
+    // pre: transaction 10-Feb-2025, booked 20-Mar-2025 — before the window opens
+    const pre = as26rows.find((r) => r.date === "20-Mar-2025");
+    expect(pre).toBeDefined();
+    expect(pre!.windowState).toBe("pre");
+    // post: transaction 20-Nov-2025, booked 05-Jan-2026 — after the window closes
+    const post = as26rows.find((r) => r.date === "05-Jan-2026");
+    expect(post).toBeDefined();
+    expect(post!.windowState).toBe("post");
+    // in: Anand's 15-Oct-2025 booking sits inside the reviewed window
+    const within = as26rows.find((r) => r.date === "15-Oct-2025");
+    expect(within).toBeDefined();
+    expect(within!.windowState).toBe("in");
     // every row carries a legal windowState
     for (const r of res.billRows) expect(["pre", "post", "in"]).toContain(r.windowState);
   });
