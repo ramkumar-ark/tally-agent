@@ -229,6 +229,8 @@ export interface LoansSheetRow {
   type?: "Payments" | "Receipts";
   date?: string;
   nature?: string;
+  /** 269ST sheet 7 only: operator-declared bearer cheque/DD character. */
+  bearer?: "Y" | "";
 }
 
 export interface LoansBooksResult {
