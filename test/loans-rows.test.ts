@@ -259,6 +259,37 @@ describe("buildLoansRows", () => {
     expect(split.sheet1[0]?.amount).toBe(39_998);
   });
 
+  it("reviewer: a cash bucket sub-limit on its own does not claim a breach when a sibling bank bucket crossed", () => {
+    const res = buildLoansRows(
+      [
+        ev("20250415", "Party Alpha", "accepted", 25_000, "bank"), // the crossing move
+        ev("20250416", "Party Alpha", "accepted", 15_000, "cash"),
+      ],
+      EMPTY_LOANS_OPERATOR,
+      { mastersPresent: true },
+    );
+    // both rows present — the party crossed, so all buckets row on the sheet
+    expect(res.sheet1).toHaveLength(2);
+    // but the 15,000 cash bucket alone never breached s.269SS: no finding
+    expect(res.findings.filter((f) => f.check === "loans_cash_acceptance")).toHaveLength(0);
+    expect(res.findings.filter((f) => f.severity === "critical")).toHaveLength(0);
+
+    // its own single event > 20k still breaches even when the aggregate cell
+    // stays small (one event of 25,000 cash counts twice against the limit)
+    const own = buildLoansRows(
+      [
+        ev("20250415", "Party Beta", "accepted", 25_000, "cash"),
+        ev("20250501", "Party Beta", "repaid", 15_000, "cash"),
+      ],
+      EMPTY_LOANS_OPERATOR,
+      { mastersPresent: true },
+    );
+    expect(own.findings.filter((f) => f.check === "loans_cash_acceptance")).toHaveLength(1);
+    // the repaid bucket (15,000) does not claim an s.269T breach
+    expect(own.findings.filter((f) => f.check === "loans_cash_repayment")).toHaveLength(0);
+    expect(own.sheet3).toHaveLength(1);
+  });
+
   it("C7: mastersPresent=false fires loans_max_amount_estimated once per party with movement", () => {
     const events: LoanEvent[] = [
       ev("20250401", "Party Alpha", "accepted", 25_000, "bank"),

@@ -262,6 +262,11 @@ interface Bucket {
   direction: LoansDirection;
   modeClass: ModeClass;
   amount: number;
+  /** Largest single event in this bucket — a bucket can breach on its own
+   * single event even when its aggregate stays below LOANS_LIMIT (two
+   * crossings of the same counterparty annul nothing; s.271D/E attach to the
+   * event). */
+  maxEvent: number;
   earliest: string;
   narrations: string[];
 }
@@ -341,10 +346,12 @@ export function buildLoansRows(
       direction: e.direction,
       modeClass: e.mode,
       amount: 0,
+      maxEvent: 0,
       earliest: e.date,
       narrations: [],
     };
     bucket.amount += e.amount;
+    bucket.maxEvent = Math.max(bucket.maxEvent, e.amount);
     if (e.date < bucket.earliest) bucket.earliest = e.date;
     if (e.narration) bucket.narrations.push(e.narration);
     buckets.set(bKey, bucket);
@@ -447,8 +454,29 @@ export function buildLoansRows(
     sheet.push(row);
 
     if (!cashTreatmentFinal || op?.exempt) continue;
+
+    // Reviewer fix: a critical s.269SS/T breach is claimed only when THIS
+    // bucket crossed the limit on its own (aggregate > LOANS_LIMIT, or a
+    // single event > LOANS_LIMIT such as a side-country aggregate's
+    // participation). A sub-limit cash bucket that crosses only through the
+    // party's overall running balance keeps its non-a/c-payee SHEET row (the
+    // row speaks) but does not claim a breach it did not make — the simpler
+    // honest rule, stated in the fix report.
     const breachCheck: CheckId =
       bucket.direction === "accepted" ? "loans_cash_acceptance" : "loans_cash_repayment";
+    // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment
+    // (declaration rows are reporting, independent of the 20k threshold).
+    if (bucket.direction === "repaid" && ov === "Cash-breach-declared") res.sheet4.push(row);
+
+    // Reviewer fix: a critical s.269SS/T breach is claimed only when THIS
+    // bucket crossed the limit on its own (aggregate > LOANS_LIMIT, or a
+    // single event > LOANS_LIMIT). A sub-limit cash bucket that crosses only
+    // through the party's overall running balance keeps its non-a/c-payee
+    // SHEET row (the row speaks) but does not claim a breach it did not make
+    // — the simpler honest rule, stated in the fix report.
+    const bucketOwnCross = bucket.amount > LOANS_LIMIT || bucket.maxEvent > LOANS_LIMIT;
+    if (!bucketOwnCross) continue;
+
     const breachDetail =
       bucket.direction === "accepted"
         ? `Cash acceptance from ${bucket.party} of ${money(bucket.amount)} on ` +
@@ -458,9 +486,6 @@ export function buildLoansRows(
           `${displayDate(bucket.earliest)} breaches s.269T (account-payee cheque/DD/ECS required; ` +
           `penalty exposure s.271E).`;
     res.findings.push(finding(breachCheck, "critical", bucket.party, bucket.amount, breachDetail));
-
-    // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment.
-    if (bucket.direction === "repaid" && ov === "Cash-breach-declared") res.sheet4.push(row);
   }
 
   // C5-sheet4 declarations sorted with their sheets; finders all sort below.
