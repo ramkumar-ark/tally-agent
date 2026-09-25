@@ -300,6 +300,36 @@ describe("reconcileParty", () => {
     expect(r.as26Tax).toBe(10000);
     expect(r.booksTax).toBe(7000);
   });
+  it("four identical split deductions pair earliest-books with earliest-26AS", () => {
+    // The live case: a government deductor splits one bill's tax across four
+    // equal entries; the books side carries four equal deductions. Neither the
+    // unique 1:1 stage nor the size-2..4 combination search can pair them.
+    const facts = bookFacts([
+      ["20250418", 9000], ["20250516", 9000], ["20250617", 9000], ["20250715", 9000],
+    ]);
+    const file = txFile([
+      txn(9000, "20250808", "20250808"), txn(9000, "20250814", "20250814"),
+      txn(9000, "20251110", "20251110"), txn(9000, "20251121", "20251121"),
+    ], 36000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.paired).toHaveLength(4);
+    expect(r.combinations).toHaveLength(0);
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+    expect(r.paired.map((p) => p.books.date)).toEqual(["20250418", "20250516", "20250617", "20250715"]);
+    expect(r.paired.map((p) => p.as26.date)).toEqual(["20250808", "20250814", "20251110", "20251121"]);
+    expect(r.paired.every((p) => p.books.tax === 9000 && p.as26.tax === 9000)).toBe(true);
+  });
+  it("equal-amount surplus pairs by nearest date and leaves the rest unmatched", () => {
+    const facts = bookFacts([["20250410", 9000], ["20250820", 9000]]);
+    const file = txFile([txn(9000, "20250815")], 9000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.paired).toHaveLength(1);
+    expect(r.paired[0].books.date).toBe("20250820");
+    expect(r.unmatchedBooks).toHaveLength(1);
+    expect(r.unmatchedBooks[0].date).toBe("20250410");
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
 });
 
 describe("multi-ledger aggregation", () => {
@@ -438,15 +468,29 @@ describe("analyzeAs26 — findings 001–008", () => {
     expect(r.findings.some((x) => x.check === "export_inconsistent" && /no transactions/.test(x.detail))).toBe(true);
   });
   it("007 fires when totals reconcile but residuals remain", () => {
+    // Genuinely unpaired: neither side's amounts echo the other's, and no
+    // subset of size 2..4 reproduces a single item, yet the totals tie.
     const r = result(
-      [["20250612", 3000], ["20250613", 3000]],
-      [txn(3000), txn(3000, null, "20250620")],
-      6000,
+      [["20250612", 2000], ["20250613", 2000]],
+      [txn(1000), txn(3000, null, "20250620")],
+      4000,
     );
     const f = r.findings.find((x) => x.check === "unresolved_combination")!;
     expect(f.severity).toBe("review");
-    expect(f.amount).toBe(6000);
+    expect(f.amount).toBe(4000);
     expect(f.schedule!.length).toBeGreaterThanOrEqual(2);
+  });
+  it("007 does not fire once equal-amount split deductions pair", () => {
+    const r = result(
+      [["20250418", 9000], ["20250516", 9000], ["20250617", 9000], ["20250715", 9000]],
+      [
+        txn(9000, "20250808", "20250808"), txn(9000, "20250814", "20250814"),
+        txn(9000, "20251110", "20251110"), txn(9000, "20251121", "20251121"),
+      ],
+      36000,
+    );
+    expect(r.recon[0].paired).toHaveLength(4);
+    expect(r.findings.some((x) => x.check === "unresolved_combination")).toBe(false);
   });
   it("008 fires when a party has deductions but no sale entry in the period", () => {
     const r = result([["20250612", 18000]], [txn(18000)], 18000);

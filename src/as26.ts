@@ -281,8 +281,88 @@ const sumTax = (items: ReconItem[]): number => round2(items.reduce((s, i) => s +
 const fits = (sum: number, target: number): boolean =>
   Math.abs(sum - target) <= AS26_TAX_TOLERANCE;
 
+/** Day-granular gap between two YYYYMMDD dates; +Infinity when either is
+ * malformed so such items never outrank a real date. */
+const gapDays = (a: string, b: string): number => {
+  if (!/^\d{8}$/.test(a) || !/^\d{8}$/.test(b)) return Number.POSITIVE_INFINITY;
+  const at = Date.UTC(Number(a.slice(0, 4)), Number(a.slice(4, 6)) - 1, Number(a.slice(6, 8)));
+  const bt = Date.UTC(Number(b.slice(0, 4)), Number(b.slice(4, 6)) - 1, Number(b.slice(6, 8)));
+  return Math.abs(at - bt) / 86400000;
+};
+
+const byDateAsc = (items: ReconItem[]) => (x: number, y: number): number =>
+  items[x].date === items[y].date ? x - y : items[x].date < items[y].date ? -1 : 1;
+
+/** Leftovers grouped by tax amount, tolerance-merged on the sorted union of
+ * both sides (the first item's amount anchors each group, so no group spans
+ * more than AS26_TAX_TOLERANCE from its anchor). */
+function leftoverAmountGroups(
+  booksItems: ReconItem[], usedBooks: Set<number>,
+  as26Items: ReconItem[], usedAs26: Set<number>,
+): Array<{ books: number[]; as26: number[] }> {
+  const entries: Array<{ side: 0 | 1; idx: number; tax: number }> = [];
+  booksItems.forEach((b, i) => { if (!usedBooks.has(i)) entries.push({ side: 0, idx: i, tax: round2(b.tax) }); });
+  as26Items.forEach((a, j) => { if (!usedAs26.has(j)) entries.push({ side: 1, idx: j, tax: round2(a.tax) }); });
+  entries.sort((x, y) => x.tax - y.tax || x.side - y.side || x.idx - y.idx);
+  const groups: Array<{ books: number[]; as26: number[] }> = [];
+  let anchor = Number.NaN;
+  for (const e of entries) {
+    if (groups.length === 0 || e.tax - anchor > AS26_TAX_TOLERANCE) {
+      anchor = e.tax;
+      groups.push({ books: [], as26: [] });
+    }
+    (e.side === 0 ? groups[groups.length - 1].books : groups[groups.length - 1].as26).push(e.idx);
+  }
+  return groups;
+}
+
+/** Equal-amount leftovers pair many-to-many. The unique-both-directions test
+ * leaves N identical-amount items on each side unpaired (a government
+ * deductor splitting one bill's tax across several identical entries is the
+ * live case) and the size-2..4 combination search cannot reproduce a single
+ * item. Equal counts pair earliest-books with earliest-26AS; unequal counts
+ * pair by nearest date and leave the surplus unmatched. */
+function pairEqualLeftovers(
+  booksItems: ReconItem[], usedBooks: Set<number>,
+  as26Items: ReconItem[], usedAs26: Set<number>,
+): Array<[number, number]> {
+  const pairs: Array<[number, number]> = [];
+  for (const g of leftoverAmountGroups(booksItems, usedBooks, as26Items, usedAs26)) {
+    if (g.books.length === 0 || g.as26.length === 0) continue;
+    const b = [...g.books].sort(byDateAsc(booksItems));
+    const a = [...g.as26].sort(byDateAsc(as26Items));
+    if (b.length === a.length) {
+      for (let k = 0; k < b.length; k += 1) pairs.push([b[k], a[k]]);
+      continue;
+    }
+    const smallerIsBooks = b.length < a.length;
+    const from = smallerIsBooks ? b : a;
+    const into = smallerIsBooks ? a : b;
+    const fromItems = smallerIsBooks ? booksItems : as26Items;
+    const intoItems = smallerIsBooks ? as26Items : booksItems;
+    const usedInto = new Set<number>();
+    for (const fi of from) {
+      let best = -1;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (const ti of into) {
+        if (usedInto.has(ti)) continue;
+        const dist = gapDays(fromItems[fi].date, intoItems[ti].date);
+        if (dist < bestDist || (dist === bestDist && (best < 0 || intoItems[ti].date < intoItems[best].date))) {
+          best = ti;
+          bestDist = dist;
+        }
+      }
+      if (best < 0) continue;
+      usedInto.add(best);
+      pairs.push(smallerIsBooks ? [fi, best] : [best, fi]);
+    }
+  }
+  return pairs;
+}
+
 /** Stage-2 reconciliation: totals first, then unique 1:1 pairing within
- * tolerance, then a bounded combination explanation. The search never
+ * tolerance, then equal-amount leftovers in date order, then a bounded
+ * combination explanation. The search never
  * mutates the totals — it only explains leftovers, honestly: more than one
  * fitting subset means the item stays unmatched and is counted ambiguous. */
 export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
@@ -322,6 +402,15 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     usedBooks.add(i);
     usedAs26.add(j);
   });
+
+  // Equal-amount leftovers: identical amounts on both sides never pass the
+  // unique-both-directions test above, so pair them directly (earliest to
+  // earliest) before the combination search runs on what remains.
+  for (const [i, j] of pairEqualLeftovers(booksItems, usedBooks, as26Items, usedAs26)) {
+    paired.push({ books: booksItems[i], as26: as26Items[j] });
+    usedBooks.add(i);
+    usedAs26.add(j);
+  }
 
   let unmatchedBooks = booksItems.filter((_, i) => !usedBooks.has(i));
   let unmatchedAs26 = as26Items.filter((_, i) => !usedAs26.has(i));
