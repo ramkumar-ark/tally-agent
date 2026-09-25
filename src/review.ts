@@ -80,7 +80,11 @@ import {
 } from "./dep3cd.js";
 import { EMPTY_DEP3CD_OPERATOR, parseDep3cdTemplate } from "./dep3cd-file.js";
 import { ADDITIONAL_DEPRECIATION_TEXT, DEFAULT_BLOCK_LISTS, DEPN_TEXT } from "./dep3cd-law.js";
-
+import { parseNotdsTemplate, EMPTY_NOTDS_OPERATOR, type NotdsOperatorFile } from "./notds-file.js";
+import {
+  booksCandidates, isNrSectionSpelling, winmanSectionOf,
+  type NoTdsRow, type NotdsSheetKey,
+} from "./notds.js";
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
 const DAY_BOOK_FINDING = "(day-book file)";
 /**
@@ -103,7 +107,7 @@ const TCS_NAME_KEYWORDS: ReadonlyArray<readonly [RegExp, string]> = [
   [/remittance/i, "lrs"],
   [/notified/i, "notified-goods"],
 ];
-import { analyzeTds, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows } from "./tds.js";
+import { analyzeTds, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows, type TdsLiability } from "./tds.js";
 import { analyzeTcs } from "./tcs.js";
 import { tds3cdRows, type Tds3cdResult } from "./tds3cd.js";
 import { tcsNatureByWinman } from "./tcs-law.js";
@@ -124,6 +128,8 @@ import {
   type TdsCheckId,
   type TdsFinding,
   tdsFindingId,
+  type NotdsCheckId,
+  notdsFindingId,
   type WrongGroupConfig,
   type DepFinding,
   type D3cdCheckId,
@@ -290,6 +296,49 @@ export interface TdsReviewResult {
     rejected: number;
     mastersSource: "live" | "bundle" | "absent";
   };
+}
+
+/** One masked clause 21(b) finding: party pseudonymed, no PAN anywhere. */
+export interface NoTdsMaskedFinding {
+  id: string;
+  check: NotdsCheckId;
+  severity: Severity;
+  party: string;          // pseudonym; "" for the aggregate line
+  section: string | null; // Winman spelling
+  amount: number;         // money at stake, positive
+  detail: string;         // money()/displayDate() only, scrubbed
+}
+
+/** tb_notds_review's result: masked, per-sheet counts only. */
+export interface NoTdsReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  /** Where the cached books came from (the tb_tds_review run's channel). */
+  booksSource: "live" | "daybook-file";
+  /** Books candidates projected from the cached review, before decisions. */
+  candidates: number;
+  /** Row counts written per sheet, including operator manual rows. */
+  sheets: Record<NotdsSheetKey, number>;
+ /** Candidates excluded by an Include=N decision (rows never written). */
+  cureExcluded: number;
+  /** Operator manual rows appended. */
+  manualCount: number;
+  findings: NoTdsMaskedFinding[];
+  counts: Record<Severity, number>;
+}
+
+/** The books facts tb_tds_review caches for the clause 21(b) merge. */
+interface TdsBooksCache {
+  events: TdsEvents;
+  liabilities: TdsLiability[];
+  panOf: (party: string) => string | null;
+  panDerivedFromGstinOf: (party: string) => boolean;
+  panAliasOf: (party: string) => string | null;
+  company: string | undefined;
+  fromDate: string;
+  toDate: string;
+  booksSource: "live" | "daybook-file";
 }
 
 /** One masked PF/ESI finding: the engine Finding shape, ledger pseudonymed. */
@@ -761,6 +810,18 @@ export interface Session {
    */
   tds3cdResult(): Tds3cdResult | undefined;
   /**
+   * Clause 21(b) (No TDS Disallowance): merges the books candidates from the
+   * cached tb_tds_review run with the operator decisions workbook (path-only
+   * channel at the tool layer) into masked review output. Requires a cached
+   * TDS review; caches the unmasked NoTdsRow[] for the Winman writer.
+   */
+  noTdsReview(input: { templatePath?: string; operator?: NotdsOperatorFile }): Promise<NoTdsReviewResult>;
+  /**
+   * The cached clause 21(b) rows from the last noTdsReview — unmasked, real
+   * names and PANs, raw dates. The Winman writer (Task 8) consumes them.
+   */
+  notdsRows(): NoTdsRow[] | undefined;
+  /**
    * The cached clause 20(b) rows from the last pfEsiReview, with raw dates —
    * the report writer (tb_write_pf_esi_report) consumes them unchanged; the
    * review result's own rows are display-formatted for the model.
@@ -908,6 +969,10 @@ export function createSession(
         blockLists: { additions: readonly string[]; deletions: readonly string[] };
       }
     | undefined;
+  /** The books facts tb_tds_review cached for the clause 21(b) merge (unmasked, session-only). */
+  let lastTdsBooks: TdsBooksCache | undefined;
+  /** The private vellum of the clause 21(b) review: unmasked NoTdsRow[] for the Winman writer. */
+  let lastNoTds: NoTdsRow[] | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -2338,6 +2403,17 @@ export function createSession(
         : {}),
     };
     lastTds = result;
+    lastTdsBooks = {
+      events: analysis.events,
+      liabilities: analysis.liabilities,
+      panOf: (party: string) => panOf.get(canonicalKey(party)) ?? null,
+      panDerivedFromGstinOf: (party: string) => panDerived.has(canonicalKey(party)),
+      panAliasOf: (party: string) => panAliasOf.get(canonicalKey(party)) ?? null,
+      company,
+      fromDate,
+      toDate,
+      booksSource: dayBook ? "daybook-file" : "live",
+    };
     return result;
   }
 
@@ -3974,6 +4050,7 @@ export function createSession(
   }
 
   /**
+  /**
    * Rewrite the clause-18 `Depreciation additions` / `Depreciation deletions`
    * sheets of a Winman 3CD workbook COPY from the cached depreciation review's
    * raw rows (write3cdPfEsi mechanics; design of record §2/§3). Block strings
@@ -4092,6 +4169,222 @@ export function createSession(
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, writeXlsm(out));
     return { written: target, additions: additions.length, deletions: deletions.length, skipped, notes };
+  }
+
+  /**
+   * Clause 21(b) merge (design of record:
+   * docs/design/2026-09-24-no-tds-disallowance-design.md §4): the books
+   * candidates from the cached tb_tds_review run, cut by the operator's
+   * decisions workbook — blank Include keeps, Include=N cures the row away,
+   * Residency NR routes to the non-resident sheet under the operator's
+   * NR-section spelling. The merged rows are cached unmasked for the Winman
+   * writer; what comes back here is masked: pseudonymed parties, no PAN
+   * anywhere, money()/displayDate() details. No disallowance percentage is
+   * ever computed here — the sheets carry payment facts only.
+   */
+  async function noTdsReview(input: { templatePath?: string; operator?: NotdsOperatorFile }): Promise<NoTdsReviewResult> {
+    if (!lastTdsBooks) {
+      throw new Error("run tb_tds_review first: it caches the books the clause 21(b) merge reads");
+    }
+    const books = lastTdsBooks;
+    const operator = input.templatePath
+      ? parseNotdsTemplate(await readFile(input.templatePath))
+      : input.operator ?? EMPTY_NOTDS_OPERATOR;
+
+    const cands = booksCandidates(books.events, books.liabilities, books.panOf, books.panDerivedFromGstinOf);
+    const rows: NoTdsRow[] = [];
+    const findings: NoTdsMaskedFinding[] = [];
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    const ords = new Map<NotdsCheckId, number>();
+    const push = (
+      check: NotdsCheckId,
+      severity: Severity,
+      party: string,
+      section: string | null,
+      amount: number,
+      detail: string,
+    ): void => {
+      const n = (ords.get(check) ?? 0) + 1;
+      ords.set(check, n);
+      const masked: NoTdsMaskedFinding = {
+        id: notdsFindingId(check, n),
+        check,
+        severity,
+        party: party ? vault.pseudonym(party, "creditor") : "",
+        section,
+        amount,
+        detail: scrubSecrets(maskKnownNames(detail, vault)),
+      };
+      findings.push(masked);
+      counts[severity] += 1;
+    };
+    let cureExcluded = 0;
+
+    for (const c of cands) {
+      const dec = operator.decisions.get(c.key);
+      if (dec && !dec.include) {
+        cureExcluded += 1;
+        push(
+          "notds_cure_excluded",
+          "review",
+          c.party,
+          winmanSectionOf(c.section),
+          c.gross,
+          `the operator excluded this row from clause 21(b) to cure the disallowance (cure reason: ${dec.cure}); the row is not written to the workbook — review it before the return is filed.`,
+        );
+        continue;
+      }
+      // Residency: blank R is the default; an NR mark routes the row. An
+      // NR-routed row without a valid NR-section spelling is dropped loudly
+      // (review-time guard, Focus #3) — never guessed across.
+      const nrSection = dec?.nrSection;
+      const section =
+        dec?.residency === "NR"
+          ? nrSection && isNrSectionSpelling(nrSection)
+            ? nrSection
+            : null
+          : winmanSectionOf(c.section);
+      if (section === null) {
+        push(
+          "notds_nr_missing_section",
+          "critical",
+          c.party,
+          null,
+          c.gross,
+          `the operator marked this payee non-resident but gave no NR section spelling on the NR list; the row is dropped from clause 21(b) and the sheet understates the payment by that much until it is fixed.`,
+        );
+        continue;
+      }
+      const sheet: NotdsSheetKey =
+        dec?.residency === "NR" ? "40(a)(i) to non-resident" : "40(a)(ia) to resident";
+      const amount = dec?.amountOverride ?? c.gross;
+      rows.push({
+        sheet,
+        party: c.party,
+        date: c.date,
+        amount,
+        tdsDone: c.tdsDone,
+        tdsDeposited: c.tdsDeposited,
+        section,
+        nature: dec?.nature ?? null,
+        address: dec?.address ?? null,
+        city: dec?.city ?? null,
+        state: dec?.state ?? null,
+        pin: dec?.pin ?? null,
+        country: dec?.country ?? null,
+        pan: dec?.pan ?? c.pan,
+      });
+      if (dec?.amountOverride !== undefined) {
+        push(
+          "notds_amount_override",
+          "review",
+          c.party,
+          section,
+          dec.amountOverride,
+          `the operator overrode the books figure: the workbook states ${money(amount)} where the books expense was ${money(c.gross)}.`,
+        );
+      }
+      if (!(dec && dec.residency === "NR")) {
+        // Residency defaulted by the books (R or blank: the books cannot
+        // show residency, so the operator's silence keeps the row on the
+        // resident sheet). The PAN travels only as its TaxId pseudonym;
+        // a derived PAN says so without printing one.
+        const taxId = books.panAliasOf(c.party);
+        const derived = books.panDerivedFromGstinOf(c.party);
+        push(
+          "notds_residency_defaulted",
+          "review",
+          c.party,
+          section,
+          c.liability,
+          `residency was defaulted to resident; the row is written to the "${sheet}" sheet${taxId ? ` (PAN ${taxId} on file${derived ? " (PAN derived from GSTIN)" : ""})` : ""}.`,
+        );
+      }
+      if (!c.pan && !dec?.pan) {
+        push(
+          "notds_no_pan",
+          "review",
+          c.party,
+          section,
+          amount,
+          `no PAN is recorded anywhere on this payee; the 40(a)/40(ia) exposure cannot be measured per-deductor until it is filled.`,
+        );
+      }
+    }
+
+    for (const m of operator.manual) {
+      rows.push({
+        sheet: m.sheet,
+        party: m.party,
+        date: m.date,
+        amount: m.amount,
+        tdsDone: m.deducted,
+        tdsDeposited: m.deposited,
+        section: m.section ?? null,
+        nature: m.nature ?? null,
+        address: m.address ?? null,
+        city: m.city ?? null,
+        state: m.state ?? null,
+        pin: m.pin ?? null,
+        country: m.country ?? null,
+        pan: m.pan ?? null,
+      });
+      push(
+        "notds_manual_row",
+        "review",
+        m.party,
+        m.section ?? null,
+        m.amount,
+        `an operator-added row on the "${m.sheet}" sheet for ${money(m.amount)} on ${displayDate(m.date)}${m.nature ? `, described as "${m.nature}"` : ""}${m.section ? `, section ${m.section}` : ""}.`,
+      );
+      if (!m.pan) {
+        push(
+          "notds_no_pan",
+          "review",
+          m.party,
+          m.section ?? null,
+          m.amount,
+          `an operator-added row whose payee carries no PAN anywhere; clause 21(b)'s exposure cannot be measured per-deductor until it is filled.`,
+        );
+      }
+    }
+
+    // Bookings the engine could not section are excluded — visible once as an
+    // aggregate line, count and gross only, never per-row.
+    const unsectioned = books.events.bookings.filter((b) => b.section === null);
+    if (unsectioned.length > 0) {
+      const gross = unsectioned.reduce((a, b) => a + b.gross, 0);
+      push(
+        "notds_unsectioned_bookings",
+        "review",
+        "",
+        null,
+        gross,
+        `${unsectioned.length} bookings totalling ${money(gross)} could not be placed under any TDS section from the operator file; they are excluded from clause 21(b). Map their ledgers in the operator file to include them.`,
+      );
+    }
+
+    rows.sort((a, b) => a.date.localeCompare(b.date) || a.party.localeCompare(b.party));
+    const sheets = {
+      "40(a)(ia) to resident": 0,
+      "40(a)(i) to non-resident": 0,
+      "40(a)(ib) - Equalisation Levy": 0,
+      "40(a)(iii)": 0,
+    } as Record<NotdsSheetKey, number>;
+    for (const r of rows) sheets[r.sheet] += 1;
+    lastNoTds = rows;
+    return {
+      company: books.company,
+      fromDate: books.fromDate,
+      toDate: books.toDate,
+      booksSource: books.booksSource,
+      candidates: cands.length,
+      sheets,
+      cureExcluded,
+      manualCount: operator.manual.length,
+      findings,
+      counts,
+    };
   }
 
 /**
@@ -4255,5 +4548,7 @@ async function realPathId(p: string): Promise<string> {
     writeGstWorksheet,
     write3cdTdsTcs,
     tds3cdResult: () => lastTds3cd,
+    noTdsReview,
+    notdsRows: () => lastNoTds,
   };
 }

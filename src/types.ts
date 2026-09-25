@@ -264,6 +264,26 @@ export function tdsFindingId(check: TdsCheckId, ordinal: number): string {
   return `TDS-${String(TDS_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
 }
 
+export type NotdsCheckId =
+  | "notds_no_pan" | "notds_nr_missing_section" | "notds_residency_defaulted"
+  | "notds_cure_excluded" | "notds_amount_override" | "notds_unsectioned_bookings"
+  | "notds_manual_row";
+
+/** NOTDS ids live in their own ordinal space (NOTDS-<ordinal>-<n>); other tables are never renumbered. */
+export const NOTDS_CHECK_ORDINAL: Record<NotdsCheckId, number> = {
+  notds_no_pan: 1,
+  notds_nr_missing_section: 2,
+  notds_residency_defaulted: 3,
+  notds_cure_excluded: 4,
+  notds_amount_override: 5,
+  notds_unsectioned_bookings: 6,
+  notds_manual_row: 7,
+};
+
+export function notdsFindingId(check: NotdsCheckId, ordinal: number): string {
+  return `NOTDS-${String(NOTDS_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
 export interface TdsScheduleRow {
   kind: "i" | "ii" | "fee";
   amount: number;

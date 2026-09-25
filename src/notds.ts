@@ -188,3 +188,30 @@ export function booksCandidates(
   }
   return rows;
 }
+
+/**
+ * The final clause 21(b) row the four sheets are filled from and the written
+ * workbook carries — the merged, de-duplicated result of the books candidates
+ * and the operator decisions/manual additions. A no-TDS-review cache row:
+ * real names and real PAN in-session and on the operator's disk, never in any
+ * outbound payload. `amount` is the payment the workbook states (C13: the
+ * full payment, or the operator's amount override), `tdsDone`/`tdsDeposited`
+ * the deduction/deposit facts, `section` the Winman TDSSECTION spelling
+ * (null only on the levy and salary sheets, which take no section).
+ */
+export interface NoTdsRow {
+  sheet: NotdsSheetKey;
+  party: string;          // real name, unmasked; session + disk only
+  date: string;           // YYYYMMDD
+  amount: number;         // payment amount the workbook states (override honoured)
+  tdsDone: number;        // tax/levy deducted, 0 when none
+  tdsDeposited: number;   // tax/levy deposited, 0 when none
+  section: string | null; // Winman spelling
+  nature: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  pin: string | null;
+  country: string | null;
+  pan: string | null;     // real PAN/Aadhaar; NEVER outbound
+}

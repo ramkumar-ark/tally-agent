@@ -1068,7 +1068,7 @@ export function analyzeTds(
       // above derive from, captured here so the 194Q running-cumulative and
       // whole-year rules are never re-derived in a second module. `ded` is
       // null for an undeducted booking; no other filtering is applied.
-      liabilities.push({ booking: b, section, liableBase, liability, rate: rate.rate, deduction: ded ?? null });
+      liabilities.push({ booking: b, section, liableBase: b.liable ?? 0, liability, rate: b.rateApplied ?? rate.rate, deduction: ded ?? null });
       if (!ded) {
         // A timing-only section (194T, 2026-09-26o item 035) never raises a
         // not-deducted finding: its deductee is a partner's Capital Account,
