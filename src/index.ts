@@ -15,6 +15,8 @@ import {
 } from "./loans-file.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
+import { buildGst44Template, gst44TemplateFileName } from "./gst44-template.js";
+import { EMPTY_GST44, parseGst44Template } from "./gst44-file.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadPfEsiLedgers, loadWrongGroup } from "./overrides.js";
@@ -43,6 +45,7 @@ import {
   type As26ReviewResult,
   type DepReviewResult,
   type FaReviewResult,
+  type Gst44ReviewResult,
   type GstMismatchResult,
   type LedgerScrutinyResult,
   type PfEsiReviewResult,
@@ -136,6 +139,7 @@ export function registerTools(
   let lastFa: FaReviewResult | undefined;
   let lastPfEsi: PfEsiReviewResult | undefined;
   let lastLoans: LoansReviewResult | undefined;
+  let lastGst44: Gst44ReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -786,6 +790,101 @@ export function registerTools(
         0,
       );
       return JSON.stringify({ outPath }, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_gst44_template",
+    "Generate the fillable clause-44 GST operator template (gst-44-operator-template-<company>-<date>.xlsx) " +
+      "into the report directory and return its path. Fill the GST Status sheet in Excel - one row per ledger " +
+      "whose GST status you know better than the books (composition dealers, corrections, or when Tally is down) - " +
+      "then pass its path to tb_gst44_review as templatePath; never paste its rows into chat.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+      dayBookPath: z.string().optional().describe(
+        "Optional PATH to a day-book JSON export; its ledgers[] feed the Ledger column's dropdown",
+      ),
+    },
+    async (args) => {
+      // Path-only channel: the day book is read inside the gateway; only the
+      // path is audited, never its rows.
+      let ledgers: string[] = [];
+      if (args.dayBookPath) {
+        ledgers = readDayBookLedgerNames(
+          await readFile(args.dayBookPath, "utf8"),
+          args.company ?? cfg.defaultCompany,
+        );
+      } else {
+        ledgers = await session.ledgerNames(args.company ?? cfg.defaultCompany);
+      }
+      const outDir = args.outDir ?? cfg.reportDir;
+      const outPath = join(
+        outDir,
+        gst44TemplateFileName(args.company, new Date().toISOString().slice(0, 10).replace(/-/g, "")),
+      );
+      await writeFile(outPath, buildGst44Template({ company: args.company, ledgers }));
+      await audit("tb_write_gst44_template", { company: args.company, outDir, dayBookPath: args.dayBookPath ?? null }, 0, 0);
+      return JSON.stringify({ templatePath: outPath }, null, 2);
+    },
+  );
+
+  register(
+    "tb_gst44_review",
+    "Winman Form 3CD clause 44 review - break-up of total expenditure into GST categories: capital/revenue " +
+      "rows split by supplier GST status (registered exempt / composition / others / unregistered), computed from " +
+      "the books. Pass the PATH of a day-book JSON export as dayBookPath and optionally the PATH of the filled " +
+      "gst-44 operator template as templatePath - never paste either file's rows into chat. Parties appear as " +
+      "pseudonyms such as 'Ledger 2'. Run tb_write_3cd_gst44 afterwards to write the Winman sheet.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      templatePath: z.string().optional().describe("Path to the filled gst-44-operator-template-*.xlsx; read inside the gateway"),
+      dayBookPath: z.string().optional().describe(
+        "Optional PATH to an operator day-book JSON export for the whole period. When given, the books are " +
+          "read from that file instead of from Tally. Pass the path - never paste the file's rows into chat.",
+      ),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      // Path-only channels: both files are read and parsed here, inside the
+      // gateway; what crosses back is the review result with names masked.
+      const operator = args.templatePath
+        ? parseGst44Template(await readFile(args.templatePath))
+        : EMPTY_GST44;
+      let dayBook: DayBookInput | undefined;
+      let digest: string | undefined;
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        dayBook = readDayBook(text, {
+          company: args.company ?? cfg.defaultCompany,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        });
+        digest = createHash("sha256").update(text).digest("hex");
+      }
+      const result = await session.gst44Review({
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        operator,
+        dayBook,
+      });
+      lastGst44 = result;
+      await audit(
+        "tb_gst44_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          ...(args.templatePath ? { templatePath: args.templatePath } : {}),
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+          ...(digest ? { dayBookDigest: digest } : {}),
+        },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
     },
   );
 

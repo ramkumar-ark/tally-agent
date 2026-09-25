@@ -11,6 +11,8 @@ import {
   type FaCtx, type FaDisposalRow, type FaPurchaseRow, type FaResult,
 } from "./fa-register.js";
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
+import { gst44, partySpend, type Gst44Row, type OperatorGst44 } from "./gst44.js";
+import { GST44_CONFIRMS, type Gst44Bucket } from "./gst44-law.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
 import { count, dayBefore, displayDate, displayMonth } from "./format.js";
@@ -83,6 +85,7 @@ import {
   type TbRow,
   type TdsCheckId,
   type TdsFinding,
+  findingId,
   tdsFindingId,
   type WrongGroupConfig,
   type DepFinding,
@@ -263,6 +266,53 @@ export interface PfEsiReviewResult {
   funds: { pf: string[]; esi: string[] };
   /** Which channel supplied the books (Q3: the day book is primary). */
   booksSource: "live" | "daybook-file";
+  books?: {
+    vouchers: number;
+    rejected: number;
+    mastersSource: "live" | "bundle" | "absent";
+  };
+}
+
+/** One masked clause-44 party: pseudonym in, bucket numbers out (no GSTIN ever). */
+export interface Gst44MaskedParty {
+  party: string;
+  override: boolean;
+  ambiguous: boolean;
+  capital: Record<Gst44Bucket, number>;
+  revenue: Record<Gst44Bucket, number>;
+}
+
+/** Same field set as PfEsiMaskedFinding, but the amount may be null (the unknown-override warning carries none). */
+export interface Gst44MaskedFinding {
+  id: string;
+  check: string;
+  severity: Severity;
+  ledger: string;
+  group: string;
+  amount: number | null;
+  side: null;
+  expected: null;
+  detail: string;
+}
+
+/**
+ * tb_gst44_review's result: masked findings, the clause 44 break-up rows,
+ * the per-party buckets as pseudonyms. GSTINs never appear — gstinSource
+ * says where the statuses came from, gstinKnown booleans stay internal.
+ */
+export interface Gst44ReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  counts: Record<Severity, number>;
+  findings: Gst44MaskedFinding[];
+  rows: Array<{ label: string; total: number; exempt: number; composition: number; others: number; unregistered: number }>;
+  parties: Gst44MaskedParty[];
+  /** "live" = ledger-master GSTINs; "none" = operator template only. */
+  gstinSource: "live" | "none";
+  booksSource: "daybook-file" | "live";
+  /** The design's confirm points C1-C6, printed next to the findings. */
+  confirms: readonly string[];
   books?: {
     vouchers: number;
     rejected: number;
@@ -590,6 +640,28 @@ export interface Session {
         vault: Array<{ real: string; alias: string }>;
       }
     | undefined;
+   * Winman Form 3CD clause 44 — break-up of total expenditure into GST
+   * categories (design of record: docs/design/2026-09-24-gst-44-clause-44-
+   * design.md). The operator GST Status template arrives already parsed
+   * (path-only channel at the tool layer); the books come from the operator
+   * day book when given, else live Tally. The narrow M2 tax-ID channel
+   * (ledgersTax) is called live even beside a day book — Decision 2; a hard
+   * error when nothing can evidence a supplier's GST status and uncovered
+   * spend exists (Decision 1.3: never fabricate a break-up).
+   */
+  gst44Review(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    operator: OperatorGst44;
+    dayBook?: DayBookInput;
+  }): Promise<Gst44ReviewResult>;
+  /**
+   * The cached clause 44 rows from the last gst44Review, raw — the Winman
+   * writer consumes them unchanged; the review result's own rows are
+   * display-shaped for the model.
+   */
+  gst44Rows(): Gst44Row[] | undefined;
   vault: Vault;
 }
 
@@ -614,6 +686,8 @@ export function createSession(
   /** Paperback of the loans review: raw unmasked per-sheet rows + vault map (write3cdLoans, Task 7). */
   let lastLoansSheets: Record<LoansSheetName, LoansSheetRow[]> | undefined;
   let lastLoansVault: Array<{ real: string; alias: string }> | undefined;
+  /** Unmasked clause 44 rows from the last gst44Review, for the Winman writer. */
+  let lastGst44: Gst44Row[] | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -2802,6 +2876,163 @@ export function createSession(
     return { written: target };
   }
 
+  /**
+   * Clause 44 run (design §4, Decision 2): vouchers come from the operator
+   * day book when given, else live; the narrow ledgersTax GSTIN channel is
+   * always called live and degrades to template-only status resolution. The
+   * masking recipe is pfEsiReview's: pseudonym every party first (a creditor
+   * name under a clear-rooted group still masks because the vault alias
+   * exists), register real names for drill-down, then sweep every detail.
+   */
+  async function gst44Review(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    operator: OperatorGst44;
+    dayBook?: DayBookInput;
+  }): Promise<Gst44ReviewResult> {
+    const { company, fromDate, toDate } = opts;
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+
+    let groups: Array<{ name: string; parent: string }>;
+    let masterPairs: Array<{ name: string; parent: string }>;
+    let voucherList: VoucherRow[];
+    let mastersSource: "live" | "bundle" | "absent";
+    if (opts.dayBook) {
+      voucherList = opts.dayBook.vouchers;
+      groups = opts.dayBook.groups ?? [];
+      masterPairs = opts.dayBook.ledgers ?? [];
+      mastersSource = opts.dayBook.ledgers ? "bundle" : "absent";
+    } else {
+      const [g, m, v] = await Promise.all([
+        d.groups(company),
+        d.ledgers(company),
+        d.vouchers(company, fromDate, toDate),
+      ]);
+      groups = g;
+      masterPairs = m;
+      voucherList = v;
+      mastersSource = "live";
+    }
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const l of masterPairs) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    const groupOf = (ledger: string): string =>
+      groupOfLedger.get(canonicalKey(ledger)) ?? "";
+    const rootOf = (ledger: string): string => c.rootOf(groupOf(ledger)) ?? "";
+
+    // Decision 2: the day book carries no GSTINs, so the narrow M2 tax-ID
+    // channel is called live even beside a day book; a failure degrades to
+    // template-only (hard error below when that is not enough).
+    let gstinSource: "live" | "none" = "live";
+    let ledgersTaxInfo: LedgerTaxInfo[] = [];
+    try {
+      ledgersTaxInfo = await d.ledgersTax(company);
+      if (ledgersTaxInfo.length === 0) gstinSource = "none";
+    } catch {
+      gstinSource = "none";
+    }
+    const gstinByLedger = new Map<string, string>();
+    for (const l of ledgersTaxInfo) {
+      if (l.gstin && !gstinByLedger.has(canonicalKey(l.name))) {
+        gstinByLedger.set(canonicalKey(l.name), l.gstin);
+      }
+    }
+    const ctx: GstCtx = {
+      groupOf,
+      rootOf: (group) => c.rootOf(group),
+      roleOf: (group) => c.role(group),
+      inDutiesAndTaxes: (group) =>
+        c.ancestry(group).some((g) => canonicalKey(g) === "duties & taxes"),
+      gstinOf: (ledger) => gstinByLedger.get(canonicalKey(ledger)) ?? null,
+    };
+
+    const books = gst44(voucherList, ctx, opts.operator);
+
+    // Never fabricate a break-up: with no GSTIN evidence, every spend-carrying
+    // party must be covered by an operator status (Decision 1.3).
+    if (gstinSource === "none") {
+      const needing = books.parties.filter((p) => partySpend(p) > 0 && !p.override);
+      if (needing.length > 0) {
+        throw new Error(
+          `no supplier GST-status evidence: Tally is unreachable for ledger GSTINs and the operator template names none of ` +
+            `${needing.length} expenditure parties - start Tally or fill the GST Status sheet (tb_write_gst44_template)`,
+        );
+      }
+    }
+
+    // Operator statuses naming unknown ledgers (warning; the typed name is
+    // pseudonymized below like every other real name).
+    const rawFindings = [...books.findings];
+    let unknownN = 0;
+    for (const s of opts.operator.statuses) {
+      if (masterPairs.length > 0 && !groupOfLedger.has(canonicalKey(s.ledger))) {
+        unknownN += 1;
+        rawFindings.push({
+          id: findingId("gst44_status_override_unknown_ledger", unknownN),
+          check: "gst44_status_override_unknown_ledger",
+          severity: "warning",
+          ledger: s.ledger,
+          group: "",
+          amount: null,
+          detail: `the GST Status sheet names a ledger that is not in the masters; its row was ignored`,
+        });
+      }
+    }
+
+    // Masking: the pfEsiReview recipe — pseudonym every party first, register
+    // the real name for drill-down, then sweep.
+    const partyNames = new Set<string>();
+    for (const f of rawFindings) if (f.ledger) partyNames.add(f.ledger);
+    for (const p of books.parties) partyNames.add(p.party);
+    for (const name of partyNames) vault.pseudonym(name, "other" satisfies GroupRole);
+    const findings: Gst44MaskedFinding[] = rawFindings.map((f) => {
+      if (f.ledger) realLedgerByFinding.set(f.id, f.ledger);
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        ledger: f.ledger ? maskLedgerName(f.ledger, groupOf(f.ledger), c, vault) : "",
+        group: scrubSecrets(f.group),
+        amount: f.amount,
+        side: null,
+        expected: null,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+      };
+    });
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of findings) counts[f.severity] += 1;
+
+    lastGst44 = books.rows;
+    return {
+      company,
+      fromDate,
+      toDate,
+      counts,
+      findings,
+      rows: books.rows.map((r) => ({
+        label: r.label, total: r.total, exempt: r.exempt,
+        composition: r.composition, others: r.others, unregistered: r.unregistered,
+      })),
+      parties: books.parties.map((p) => ({
+        party: maskLedgerName(p.party, p.group, c, vault),
+        override: p.override,
+        ambiguous: p.ambiguous,
+        capital: p.capital,
+        revenue: p.revenue,
+      })),
+      gstinSource,
+      booksSource: opts.dayBook ? "daybook-file" : "live",
+      confirms: GST44_CONFIRMS,
+      ...(opts.dayBook
+        ? { books: { vouchers: voucherList.length, rejected: opts.dayBook.rejected, mastersSource } }
+        : {}),
+    };
+  }
+
 /**
  * An identity for a possibly-not-yet-existing path: its realpath when the
  * entry is there, else its parent directory's realpath joined with its
@@ -2954,5 +3185,7 @@ async function realPathId(p: string): Promise<string> {
         ? { sheets: lastLoansSheets, vault: lastLoansVault ?? [] }
         : undefined,
     write3cdLoans,
+    gst44Review,
+    gst44Rows: () => lastGst44,
   };
 }
