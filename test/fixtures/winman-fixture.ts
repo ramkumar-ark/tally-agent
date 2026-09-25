@@ -180,7 +180,11 @@ const LOANS_JUNK_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 <row r="1"><c r="A1" t="s"><v>39</v></c><c r="B1" t="s"><v>40</v></c></row>
 </sheetData></worksheet>`;
 
-export function makeLoansWinmanFixture(): Buffer {
+export function makeLoansWinmanFixture(opts: { formId?: string } = {}): Buffer {
+  // `formId` swaps the shared string at index 0 — the A1 form id every data
+  // sheet references — WITHOUT shifting any other index, so a test can
+  // corrupt the form id cheaply (a re-zip of patched sheet XML is neither).
+  const ss = opts.formId ? [opts.formId, ...LOANS_SS.slice(1)] : LOANS_SS;
   const parts = [
     part("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>`),
     part("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
@@ -193,7 +197,7 @@ export function makeLoansWinmanFixture(): Buffer {
     part("xl/worksheets/sheet4.xml", LOANS_INTER_SHEET),
     part("xl/worksheets/sheet5.xml", LOANS_JUNK_SHEET),
     part("xl/styles.xml", STYLES),
-    part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${LOANS_SS.length}" uniqueCount="${LOANS_SS.length}">${LOANS_SS.map((s) => `<si><t>${s.replace(/&/g, "&amp;")}</t></si>`).join("")}</sst>`),
+    part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${ss.length}" uniqueCount="${ss.length}">${ss.map((s) => `<si><t>${s.replace(/&/g, "&amp;")}</t></si>`).join("")}</sst>`),
   ];
   const bins: Array<readonly [string, Buffer, 0 | 8]> = [
     ["xl/media/image1.jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]), 0],

@@ -125,10 +125,10 @@ async function sessionWithCache() {
   return session;
 }
 
-function withSource(): { dir: string; sourcePath: string; source: Buffer } {
+function withSource(opts: { formId?: string } = {}): { dir: string; sourcePath: string; source: Buffer } {
   const dir = mkdtempSync(join(tmpdir(), "loans-write-"));
   const sourcePath = join(dir, "Loans Deposits 269SS & 269T.xlsm");
-  const source = makeLoansWinmanFixture();
+  const source = makeLoansWinmanFixture(opts);
   writeFileSync(sourcePath, source);
   return { dir, sourcePath, source };
 }
@@ -249,5 +249,40 @@ describe("Session.write3cdLoans", () => {
     await expect(session.write3cdLoans({ sourcePath: pfPath, outPath: dir })).rejects.toThrow(
       /none of the Sec\.269SS\/269T\/269ST sheets/,
     );
+  });
+
+  it("refuses a clause-31 sheet whose form id is not the loans form", async () => {
+    // Cheap corruption path: the fixture builder swaps shared string 0 (the
+    // A1 form id every data sheet references) without re-zipping sheet XML.
+    // The P.F. form id is the real wrong-form value the PF/ESI writer pins.
+    const { dir, sourcePath } = withSource({ formId: "EmployeePFESIfunds" });
+    const session = await sessionWithCache();
+    // Sheet 1 has cached rows, so the formId assert fires before any write.
+    await expect(session.write3cdLoans({ sourcePath, outPath: dir })).rejects.toThrow(
+      /Sec\.269SS Loans & Deposits belongs to form "EmployeePFESIfunds": this tool fills the Winman 269SS\/269T\/269ST loans workbook/,
+    );
+  });
+
+  it("warns on stderr for every non-empty cached sheet the workbook lacks", async () => {
+    const { dir, sourcePath, source } = withSource();
+    const session = await sessionWithCache();
+    const stderr: string[] = [];
+    const err = console.error;
+    console.error = (msg: string) => stderr.push(msg);
+    try {
+      await session.write3cdLoans({ sourcePath, outPath: dir });
+    } finally {
+      console.error = err;
+    }
+    // Sheet 3 ("sec.269T") is absent from the fixture and carries the
+    // Cash-breach-declared repayment row: skipped with a warning, loudly.
+    const warned = stderr.filter((m) => m.includes("sec.269T"));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain(
+      "tally-agent: loans sheet sec.269T not found in the source workbook — 1 cached rows not written",
+    );
+    // The fill still completed for the sheets the workbook does carry, and
+    // the source stayed byte-identical.
+    expect(readFileSync(sourcePath).equals(source)).toBe(true);
   });
 });

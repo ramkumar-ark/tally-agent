@@ -2315,7 +2315,13 @@ export function createSession(
       // writable, and refusing the whole fill for it would strand every other
       // sheet's rows. Skip it — the wroteAny guard below still refuses the
       // degenerate workbook that carries none of the seven sheets at all.
-      if (findSheetPart(pkg, sheetName) === undefined) continue;
+      if (findSheetPart(pkg, sheetName) === undefined) {
+        console.error(
+          `tally-agent: loans sheet ${sheetName} not found in the source workbook — ` +
+            `${rows.length} cached rows not written`,
+        );
+        continue;
+      }
       const schema = readSchema(pkg, sheetName);
       if (schema.formId !== "269SS/269T_LoansAc/RpinCash") {
         throw new Error(
@@ -2323,37 +2329,42 @@ export function createSession(
         );
       }
       const winmanRows: WinmanRow[] = rows.map((r) => {
+        // write3cdPfEsi's cell-skip convention: an optional cell is written
+        // only when the row actually carries it — a defined-but-empty text
+        // value (e.g. bearer: "") omits the cell instead of writing an empty
+        // inlineStr. NAME/AMOUNT are the sheet's required cells; MAXAMOUNT
+        // and DATE are numbers/dates, where "defined" is the meaningful test.
         const cells: WinmanRow = {
           NAME: { kind: "text", value: demask(r.party) ?? "" },
           AMOUNT: { kind: "number", value: Math.round(r.amount * 100) / 100 },
-          ...(r.panAlias !== undefined && schema.keys.has("PANORAADHAAR")
+          ...(r.panAlias && schema.keys.has("PANORAADHAAR")
             ? { PANORAADHAAR: { kind: "text", value: demask(r.panAlias) ?? "" } }
             : {}),
-          ...(r.squaredUp !== undefined && schema.keys.has("SQUAREDUP")
+          ...(r.squaredUp && schema.keys.has("SQUAREDUP")
             ? { SQUAREDUP: { kind: "text", value: r.squaredUp } }
             : {}),
           ...(r.maxAmount !== undefined && schema.keys.has("MAXAMOUNT")
             ? { MAXAMOUNT: { kind: "number", value: Math.round(r.maxAmount * 100) / 100 } }
             : {}),
-          ...(r.mode !== undefined && schema.keys.has("RECEIPT")
+          ...(r.mode && schema.keys.has("RECEIPT")
             ? { RECEIPT: { kind: "text", value: r.mode } }
             : {}),
-          ...(r.nonAcMode !== undefined && schema.keys.has("RECIEPTNONAC")
+          ...(r.nonAcMode && schema.keys.has("RECIEPTNONAC")
             ? { RECIEPTNONAC: { kind: "text", value: r.nonAcMode } }
             : {}),
-          ...(r.type !== undefined && schema.keys.has("TYPEOFTRANSACTION")
+          ...(r.type && schema.keys.has("TYPEOFTRANSACTION")
             ? { TYPEOFTRANSACTION: { kind: "text", value: r.type } }
             : {}),
           ...(r.date !== undefined && schema.keys.has("DATE")
             ? { DATE: { kind: "date", ymd: String(r.date) } }
             : {}),
-          ...(r.nature !== undefined && schema.keys.has("NATUREOFTRANSACTION")
+          ...(r.nature && schema.keys.has("NATUREOFTRANSACTION")
             ? { NATUREOFTRANSACTION: { kind: "text", value: r.nature } }
             : {}),
-          ...(r.bearer !== undefined && schema.keys.has("BEARER")
+          ...(r.bearer && schema.keys.has("BEARER")
             ? { BEARER: { kind: "text", value: r.bearer } }
             : {}),
-          ...(r.address !== undefined && schema.keys.has("ADDRESS")
+          ...(r.address && schema.keys.has("ADDRESS")
             ? { ADDRESS: { kind: "text", value: demask(r.address) ?? "" } }
             : {}),
         };
