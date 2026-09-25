@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,7 +94,12 @@ function offlineHarness() {
   const session = createSession(stub, EMPTY_OVERRIDES);
   const cfg = { reportDir: mkdtempSync(join(tmpdir(), "loans-report-")), dayBookMaxBytes: 64 * 1_048_576 };
   registerTools(registrar, session, cfg, "20260331T100000Z");
-  return { tools, session, cfg };
+  const auditPath = join(cfg.reportDir, "session-20260331T100000Z.jsonl");
+  const audits = (): Array<Record<string, unknown>> =>
+    existsSync(auditPath)
+      ? readFileSync(auditPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+  return { tools, session, cfg, audits };
 }
 
 const values = (name: string, wb: ReturnType<typeof readWorkbook>): string[] =>
@@ -153,6 +158,22 @@ describe("loansSheets", () => {
     expect(title[2]).toContain("Rows: 1");
   });
 
+  it("refuses a counts/rows re-split mismatch instead of silently truncating", () => {
+    const result = {
+      company: "Sample Co",
+      fromDate: "20250401",
+      toDate: "20260331",
+      findings: [],
+      rows: [
+        { party: "Ledger 1", amount: 25000 },
+        // A surplus row the counts refuse to own must be thrown away loudly.
+        { party: "Ledger 4", amount: 500 },
+      ],
+      sheets: { sheet1: 1, sheet2: 0, sheet3: 0, sheet4: 0, sheet5: 0, sheet6: 0, sheet7: 0 },
+    };
+    expect(() => loansSheets(result as never)).toThrow(/row-count contract violated/i);
+  });
+
   it("degrades without a period", () => {
     const sheets = loansSheets({
       findings: [], rows: [],
@@ -203,10 +224,16 @@ describe("tb_write_loans_report — raw-row channel", () => {
       dayBookPath: await bundlePath(),
       templatePath: await templatePath(),
     });
-    const out = await h.tools.get("tb_write_loans_report")!({ company: "Sample Co" });
+    const outDir = mkdtempSync(join(tmpdir(), "loans-report-outdir-"));
+    const out = await h.tools.get("tb_write_loans_report")!({ company: "Sample Co", outDir });
     const paths = JSON.parse(out);
     expect(paths.workbookPath).toMatch(/loans-review-sample-co-20250401-20260331\.xlsx$/);
     expect(existsSync(paths.workbookPath)).toBe(true);
+    expect(paths.workbookPath.startsWith(outDir)).toBe(true);
+    // The audit records the directory, paths only.
+    const entry = h.audits().find((e) => e.tool === "tb_write_loans_report");
+    expect(entry).toBeDefined();
+    expect((entry!.args as Record<string, unknown>).outDir).toBe(outDir);
     const wb = readWorkbook(await readFile(paths.workbookPath));
     // The raw cached rows carry the operator file's PAN and address, written
     // to disk exactly as they arrive (nothing here was ever masked). With

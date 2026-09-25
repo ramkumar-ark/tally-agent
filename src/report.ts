@@ -1012,12 +1012,22 @@ const loansDateCell = (d: string | undefined): string =>
 export function loansSheets(result: LoansReportResult): Sheet[] {
   // Rows arrive flattened in LOANS_SHEET_NAMES order; slice them back apart
   // on the review's own per-sheet counts (same contract as the Winman writer).
+  const counts = LOANS_SHEET_NAMES.map((n) => result.sheets[n] ?? 0);
+  const expected = counts.reduce((a, b) => a + b, 0);
+  // Self-defending contract: the re-split is driven by the review's own
+  // per-sheet counts; a mismatch means whoever built `rows` disagrees, and
+  // silent truncation would quietly lose findings evidence. Fail loudly.
+  if (expected !== result.rows.length) {
+    throw new Error(
+      `loans report: row-count contract violated — sheets sum to ${expected} but ${result.rows.length} flattened rows arrived`,
+    );
+  }
   const bySheet = new Map<LoansSheetName, LoansSheetRow[]>();
   let at = 0;
-  for (const n of LOANS_SHEET_NAMES) {
-    bySheet.set(n, result.rows.slice(at, at + (result.sheets[n] ?? 0)).map((r) => r));
-    at += result.sheets[n] ?? 0;
-  }
+  LOANS_SHEET_NAMES.forEach((n, i) => {
+    bySheet.set(n, result.rows.slice(at, at + counts[i]!));
+    at += counts[i]!;
+  });
   const period = result.fromDate && result.toDate
     ? `Loans clause 31 / s.269ST review, ${displayDate(result.fromDate)} to ${displayDate(result.toDate)}`
     : "Loans clause 31 / s.269ST review (period not recorded)";
@@ -1088,7 +1098,6 @@ export function loansSheets(result: LoansReportResult): Sheet[] {
  */
 export async function writeLoansReport(opts: {
   reportDir: string;
-  company?: string;
   result: LoansReportResult;
   vault: Vault;
 }): Promise<{ workbookPath: string }> {

@@ -993,7 +993,7 @@ export function registerTools(
       const cached = session.loansRows()!;
       const company = args.company ?? lastLoans.company;
       const paths = await writeLoansReport({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         result: {
           company,
           fromDate: lastLoans.fromDate,
@@ -1006,7 +1006,7 @@ export function registerTools(
       });
       await audit(
         "tb_write_loans_report",
-        { company: company ?? null },
+        { company: company ?? null, outDir: args.outDir ?? null },
         lastLoans.findings.length,
         maskedCount(lastLoans.findings),
       );
