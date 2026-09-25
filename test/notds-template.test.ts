@@ -166,11 +166,50 @@ describe("the generated No-TDS operator template", () => {
       "40(a)(ib) - Equalisation Levy",
       "40(a)(iii)",
     ]);
-    const states = col(4);
-    expect(states).toHaveLength(39); // header + the 38-value state/UT list
-    expect(states[0]).toBe("State");
-    expect(states).toContain("State outside India");
-    expect(states).toContain("Karnataka");
+    // The full 38, in azimuth-of-transcription order — the list is
+    // byte-verified against the real workbook's STATE INTER range, so the
+    // transcription itself is the bug surface being pinned.
+    expect(col(4)).toEqual([
+      "State",
+      "Andaman and Nicobar Islands",
+      "Andhra Pradesh",
+      "Arunachal Pradesh",
+      "Assam",
+      "Bihar",
+      "Chandigarh",
+      "Chhattisgarh",
+      "Dadra & Nagar Haveli",
+      "Daman & Diu",
+      "Delhi",
+      "Goa",
+      "Gujarat",
+      "Haryana",
+      "Himachal Pradesh",
+      "Jammu & Kashmir",
+      "Jharkhand",
+      "Karnataka",
+      "Kerala",
+      "Ladakh",
+      "Lakshadweep",
+      "Madhya Pradesh",
+      "Maharashtra",
+      "Manipur",
+      "Meghalaya",
+      "Mizoram",
+      "Nagaland",
+      "Odisha",
+      "Puducherry",
+      "Punjab",
+      "Rajasthan",
+      "Sikkim",
+      "State outside India",
+      "Tamil Nadu",
+      "Telangana",
+      "Tripura",
+      "Uttar Pradesh",
+      "Uttarakhand",
+      "West Bengal",
+    ]);
   });
 
   it("names the file notds-operator-template-<slug>-<date>.xlsx", () => {
@@ -183,6 +222,7 @@ describe("the generated No-TDS operator template", () => {
     const instructions = build().find((s) => s.name === "Instructions")!;
     const text = [...instructions.rows.flatMap((r) => [...r.cells.values()].map((c) => c.value))].join("\n");
     expect(text).toContain("paste its rows into chat");
+    expect(text).toContain("Generated on: 25-Sep-2026");
     expect(text).toContain("resident unless marked NR");
     expect(text).toContain("Include");
     expect(text).toContain("counts as Include");

@@ -1,5 +1,6 @@
 import { buildWorkbook, type Sheet } from "./xlsx.js";
 import { winmanSectionOf, type NoTdsCandidateRow, type NotdsSheetKey } from "./notds.js";
+import { displayDate } from "./format.js";
 
 /**
  * The generated, fillable clause-21(b) operator decisions workbook (design of
@@ -35,51 +36,49 @@ export const NOTDS_CURE_REASONS: readonly string[] = [
 
 /**
  * The 38-value STATE list Winman's clause-21(b) sheets validate against
- * (design §2.2): the 28 states and 8 union territories, plus "Other
- * Territory" and "State outside India". Not yet byte-verified against the
- * real workbook's STATE INTER range — recorded as a confirm item for the
- * live-validation pass; the parser (Task 6) deliberately does not re-validate
+ * (design §2.2), byte-verified against the real workbook's STATE INTER range
+ * (col J rows 41-78). The parser (Task 6) deliberately does not re-validate
  * the state against this list, and Winman's own import rejects a bad value.
  */
 export const NOTDS_STATES: readonly string[] = [
+  "Andaman and Nicobar Islands",
   "Andhra Pradesh",
   "Arunachal Pradesh",
   "Assam",
   "Bihar",
+  "Chandigarh",
   "Chhattisgarh",
+  "Dadra & Nagar Haveli",
+  "Daman & Diu",
+  "Delhi",
   "Goa",
   "Gujarat",
   "Haryana",
   "Himachal Pradesh",
-  "Jammu and Kashmir",
+  "Jammu & Kashmir",
   "Jharkhand",
   "Karnataka",
   "Kerala",
+  "Ladakh",
+  "Lakshadweep",
   "Madhya Pradesh",
   "Maharashtra",
   "Manipur",
   "Meghalaya",
   "Mizoram",
   "Nagaland",
-  "NCT of Delhi",
   "Odisha",
   "Puducherry",
   "Punjab",
   "Rajasthan",
   "Sikkim",
+  "State outside India",
   "Tamil Nadu",
   "Telangana",
   "Tripura",
   "Uttar Pradesh",
   "Uttarakhand",
   "West Bengal",
-  "Andaman and Nicobar Islands",
-  "Chandigarh",
-  "Dadra and Nagar Haveli and Daman and Diu",
-  "Ladakh",
-  "Lakshadweep",
-  "Other Territory",
-  "State outside India",
 ];
 
 const LISTS_SHEET = "Lists";
@@ -88,11 +87,12 @@ const LISTS_SHEET = "Lists";
 const listFormula = (col: string, count: number): string =>
   `${LISTS_SHEET}!$${col}$2:$${col}$${count + 1}`;
 
-const instructions = (company: string): Sheet => ({
+const instructions = (company: string, generatedOn: string): Sheet => ({
   name: "Instructions",
   columns: [{ header: "How to fill this template", width: 110, format: "text" }],
   rows: [
     [`No TDS disallowance operator template for ${company}.`],
+    [`Generated on: ${displayDate(generatedOn)}`],
     [
       "This workbook decides what reaches clause 21(b) of Form 3CD. The Candidates sheet lists payments the books already show as TDS-liable but not compliant — nothing was deducted, or the deduction fell short, or no deposit joined it by the deposit due date. You make decisions only in the columns AFTER the PAN column; the books columns are here for your reference and belong to the review.",
     ],
@@ -256,7 +256,7 @@ export interface NotdsTemplateInput {
  */
 export function buildNotdsTemplate(input: NotdsTemplateInput): Buffer {
   return buildWorkbook([
-    instructions(input.company),
+    instructions(input.company, input.generatedOn),
     candidatesSheet(input.candidates),
     manualSheet(),
     listsSheet(),
