@@ -82,7 +82,8 @@ import { EMPTY_DEP3CD_OPERATOR, parseDep3cdTemplate } from "./dep3cd-file.js";
 import { ADDITIONAL_DEPRECIATION_TEXT, DEFAULT_BLOCK_LISTS, DEPN_TEXT } from "./dep3cd-law.js";
 import { parseNotdsTemplate, EMPTY_NOTDS_OPERATOR, type NotdsOperatorFile } from "./notds-file.js";
 import {
-  booksCandidates, isNrSectionSpelling, winmanSectionOf,
+  booksCandidates, doneKeyOf, depositedKeyOf, amountKeyOf, isNrSectionSpelling, winmanSectionOf,
+  NOTDS_FORM_ID,
   type NoTdsRow, type NotdsSheetKey,
 } from "./notds.js";
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
@@ -795,6 +796,16 @@ export interface Session {
     deletions: number;
     skipped: number;
     notes: string[];
+  }>;
+  /**
+   * Write the four clause 21(b) sheets ("40(a)(ia) to resident",
+   * "40(a)(i) to non-resident", "40(a)(ib) - Equalisation Levy", "40(a)(iii)")
+   * of a Winman 3CD No-TDS workbook COPY from the cached noTdsReview rows and
+   * return the written path, the source never written to.
+   */
+  write3cdNoTds(opts: { sourcePath: string; outPath?: string }): Promise<{
+    path: string;
+    rowsBySheet: Record<NotdsSheetKey, number>;
   }>;
   /**
    * Rewrite the five TDS/TCS clause-34 sheets (TDS, TCS, Return details,
@@ -4050,7 +4061,6 @@ export function createSession(
   }
 
   /**
-  /**
    * Rewrite the clause-18 `Depreciation additions` / `Depreciation deletions`
    * sheets of a Winman 3CD workbook COPY from the cached depreciation review's
    * raw rows (write3cdPfEsi mechanics; design of record §2/§3). Block strings
@@ -4169,6 +4179,81 @@ export function createSession(
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, writeXlsm(out));
     return { written: target, additions: additions.length, deletions: deletions.length, skipped, notes };
+  }
+
+  /**
+   * Fill the four clause 21(b) sheets of a Winman 3CD No-TDS COPY from the
+   * cached noTdsReview rows (§3 of the design of record). Mirrors
+   * write3cdPfEsi: handshake + per-sheet form id assertions, prototype-row
+   * styles, sheets with no rows left byte-identical, and a target that can
+   * never resolve to the source. The workbook copy on the operator's disk is
+   * where real names and PANs belong — nothing here is masked.
+   */
+  async function write3cdNoTds(opts: { sourcePath: string; outPath?: string }): Promise<{ path: string; rowsBySheet: Record<NotdsSheetKey, number> }> {
+    if (!lastNoTds || lastNoTds.length === 0) {
+      throw new Error("run tb_notds_review first: there are no clause 21(b) rows to write");
+    }
+    const pkg = readXlsm(await readFile(opts.sourcePath));
+    readHandshake(pkg);
+    const notdsSheets: readonly NotdsSheetKey[] = [
+      "40(a)(ia) to resident",
+      "40(a)(i) to non-resident",
+      "40(a)(ib) - Equalisation Levy",
+      "40(a)(iii)",
+    ];
+    for (const sheetName of notdsSheets) {
+      const schema = readSchema(pkg, sheetName);
+      if (schema.formId !== NOTDS_FORM_ID) {
+        throw new Error(
+          `${sheetName} belongs to form "${schema.formId || "unknown"}": this tool fills the Winman ${NOTDS_FORM_ID} workbook`,
+        );
+      }
+    }
+    const bySheet: Record<NotdsSheetKey, WinmanRow[]> = {
+      "40(a)(ia) to resident": [],
+      "40(a)(i) to non-resident": [],
+      "40(a)(ib) - Equalisation Levy": [],
+      "40(a)(iii)": [],
+    };
+    for (const r of lastNoTds) {
+      const done = doneKeyOf(r.sheet);
+      const deposited = depositedKeyOf(r.sheet);
+      const row: WinmanRow = {
+        DEDUCTEENAME: { kind: "text", value: r.party },
+        DATEOFPAYMENT: { kind: "date", ymd: r.date },
+        [amountKeyOf(r.sheet)]: { kind: "number", value: r.amount },
+        ...(done && r.tdsDone > 0 ? { [done]: { kind: "number", value: r.tdsDone } } : {}),
+        ...(deposited && r.tdsDeposited > 0 ? { [deposited]: { kind: "number", value: r.tdsDeposited } } : {}),
+        ...(r.section !== null ? { TDSSECTION: { kind: "text", value: r.section } } : {}),
+        ...(r.nature !== null ? { NATUREOFPAYMENT: { kind: "text", value: r.nature } } : {}),
+        ...(r.address !== null ? { ADDRESS: { kind: "text", value: r.address } } : {}),
+        ...(r.city !== null ? { CITY: { kind: "text", value: r.city } } : {}),
+        ...(r.state !== null ? { STATE: { kind: "text", value: r.state } } : {}),
+        ...(r.pin !== null ? { PINZIP: { kind: "text", value: r.pin } } : {}),
+        ...(r.country !== null ? { COUNTRY: { kind: "text", value: r.country } } : {}),
+        ...(r.pan !== null ? { PANAADHAAR: { kind: "text", value: r.pan } } : {}),
+      };
+      bySheet[r.sheet].push(row);
+    }
+    let out = pkg;
+    for (const sheetName of notdsSheets) {
+      if (bySheet[sheetName].length > 0) out = writeSheetRows(out, sheetName, bySheet[sheetName]);
+    }
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const stem = basename(opts.sourcePath, extname(opts.sourcePath));
+    if (!opts.outPath) throw new Error("no output location for the filled workbook was given");
+    const target =
+      extname(opts.outPath).toLowerCase() === ".xlsm"
+        ? opts.outPath
+        : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    const sourceId = await realPathId(opts.sourcePath);
+    if (sourceId === (await realPathId(target))) {
+      throw new Error("the outPath target resolves to the source workbook itself; write the copy somewhere else");
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, writeXlsm(out));
+    const rowsBySheet = Object.fromEntries(notdsSheets.map((s) => [s, bySheet[s].length])) as Record<NotdsSheetKey, number>;
+    return { path: target, rowsBySheet };
   }
 
   /**
@@ -4550,5 +4635,6 @@ async function realPathId(p: string): Promise<string> {
     tds3cdResult: () => lastTds3cd,
     noTdsReview,
     notdsRows: () => lastNoTds,
+    write3cdNoTds,
   };
 }
