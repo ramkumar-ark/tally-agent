@@ -632,6 +632,39 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   not-yet-exercised until the operator re-exports the day book with the updated
   `scripts/export-daybook.mjs` (which now runs `tally_get_ledgers` verbose:true).
 
+## Sharp edges found implementing clause 44 (GST expenditure breakup, 2026-09-25)
+
+- Design of record: `docs/design/2026-09-24-gst-44-clause-44-design.md`; plan at
+  `/home/ram/firstmate/data/ta-3cd-gst-breakup-plan/report.md`; code
+  `src/gst44*.ts`, tools `tb_write_gst44_template` / `tb_gst44_review` /
+  `tb_write_3cd_gst44` / `tb_write_gst44_report`; operator walkthrough
+  `docs/operator/gst-44-operator-template.md`.
+- **The Winman row-2 key `REGISTEREDUNDERGST` names the *not-registered*
+  column F** — the registered-entity split rides C/D/E (`TOWARDSSUPPLIES`
+  exempt, `COMPOSITIONSUPPLIER`, `OTHERS`). Never map columns by key-name
+  intuition; the inversion imports the form backwards.
+- `writeSheetRows` drops pre-existing rows ≥ firstDataRow, and the real
+  workbook pre-fills only the `Capital Expenditure`/`Revenue Expenditure`
+  labels in column A (rows 8/9) — the writer must carry the
+  `PARTICULARS` labels itself or the import gets two label-less rows.
+- The real workbook's xf 88 (quotePrefix numFmt 1) has no style twin, so the
+  first clause-44 write also rewrites `xl/styles.xml` via
+  `resolveStyleTwins`' append path (PF/ESI's workbook did not); the sheet's
+  column G has no row-2 key and is never written.
+- Day-book `ledgers[]` carry no GSTIN, so `gst44Review` calls the narrow M2
+  `ledgersTax()` channel **live even beside a day book** (approved Decision 2,
+  Q3) — a standing deviation from the PF/ESI "never alongside" rule.
+  With no GSTIN evidence and uncovered spend-carrying parties it throws a hard
+  operator-facing error (never fabricates unregistered by default).
+- Bills of mixed evidence per party are split across buckets per voucher (Q5);
+  composition is reachable only through the operator template's GST Status
+  sheet; a GSTIN master with no tax charged defaults to the exempt column with
+  a `gst44_composition_unknown` ambiguity finding (C6).
+- The report's Clause 44 sheet title also echoes
+  `Total expenditure: money(sum)` — numbers only, no names — so the C5
+  attributed-sum invariant is checkable on-sheet; findings ordinals are
+  TB-space 15–18 (`GST44-015..018-%d` ids).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
