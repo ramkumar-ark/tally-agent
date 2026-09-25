@@ -22,7 +22,8 @@ export type CheckId =
   | "loans_269st_payment"
   | "loans_splitting_suspect"
   | "loans_max_amount_estimated"
-  | "loans_party_unmastered";
+  | "loans_party_unmastered"
+  | "loans_auto_exempt";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const CHECK_ORDINAL: Record<CheckId, number> = {
@@ -50,6 +51,8 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   loans_splitting_suspect: 24,
   loans_max_amount_estimated: 25,
   loans_party_unmastered: 26,
+  // Addendum 2 (2026-09-26): auto-exempt advisory (bank name / OD ancestry).
+  loans_auto_exempt: 27,
 };
 
 export type GstCheckId =

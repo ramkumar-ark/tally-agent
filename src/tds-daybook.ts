@@ -57,13 +57,30 @@ import { displayDate } from "./format.js";
 const truthy = (v: unknown): boolean =>
   v === true || /^(yes|true|1)$/i.test(String(v ?? "").trim());
 
+/**
+ * Additive bundle ledger pair (2026-09-26): the base {name, parent} pair that
+ * every consumer already handled, optionally enriched by the exporter with
+ * identity fields and the opening balance. `openingBalance` follows the
+ * gateway boundary convention — positive = debit — for the RUN's period, so
+ * a loan-liability credit opening arrives negative; consumers resolve the
+ * sign for their own side once, at their seam.
+ */
+export interface DayBookLedgerPair {
+  name: string;
+  parent: string;
+  pan?: string | null;
+  gstin?: string | null;
+  address?: string | null;
+  openingBalance?: number | null;
+}
+
 export interface DayBookInput {
   shape: "array" | "envelope" | "bundle" | "tallymessage";
   vouchers: VoucherRow[];
   /** Declared by a bundle; null for the shapes that cannot say. */
   company: string | null;
   groups: { name: string; parent: string }[] | null;
-  ledgers: { name: string; parent: string }[] | null;
+  ledgers: DayBookLedgerPair[] | null;
   /** YYYYMMDD, from the vouchers themselves. */
   observedFrom: string;
   observedTo: string;
@@ -228,12 +245,35 @@ export function readDayBook(
 
   const masters = (
     key: "groups" | "ledgers",
-  ): { name: string; parent: string }[] | null => {
+  ): DayBookLedgerPair[] | null => {
     const v = envelope[key];
     if (!Array.isArray(v)) return null;
+    const normUpper = (v: unknown): string | null => {
+      const s = typeof v === "string" ? v.trim().toUpperCase() : "";
+      return s !== "" ? s : null;
+    };
     return v
       .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
-      .map((x) => ({ name: String(x.name ?? ""), parent: String(x.parent ?? "") }))
+      .map((x) => ({
+        name: String(x.name ?? ""),
+        parent: String(x.parent ?? ""),
+        // Additive (2026-09-26): identity fields ride only when present, so
+        // older bundles parse identically.
+        ...(key === "ledgers"
+          ? {
+              pan: normUpper(x.pan),
+              gstin: normUpper(x.gstin),
+              address:
+                typeof x.address === "string" && x.address.trim() !== ""
+                  ? x.address.trim()
+                  : null,
+              openingBalance:
+                typeof x.openingBalance === "number" && Number.isFinite(x.openingBalance)
+                  ? x.openingBalance
+                  : null,
+            }
+          : {}),
+      }))
       .filter((x) => x.name !== "");
   };
 
@@ -276,6 +316,65 @@ export function readDayBookLedgerNames(text: string, company?: string): string[]
     .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
     .map((x) => String(x.name ?? "").trim())
     .filter((n) => n !== "");
+}
+
+/**
+ * Addendum 2 (2026-09-26): the ledger-master pairs (+ groups) a bundle
+ * declares, without the period validation `readDayBook` applies — the loans
+ * template generator needs groups + parents to compute the Exempt pre-fill.
+ * Mirrors readDayBookLedgerNames' envelope checks; not a bundle ⇒ nulls.
+ */
+export function readDayBookMasterPairs(
+  text: string,
+  company?: string,
+): { ledgers: DayBookLedgerPair[]; groups: { name: string; parent: string }[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ledgers: [], groups: [] };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ledgers: [], groups: [] };
+  }
+  const env = parsed as Record<string, unknown>;
+  const declared = typeof env.company === "string" ? env.company.trim() : "";
+  if (declared && company && canonicalKey(declared) !== canonicalKey(company)) {
+    throw new Error(
+      "the day-book file was exported from a different company than the one under review; re-export it from the company under review",
+    );
+  }
+  const pairs = (key: "ledgers" | "groups") => {
+    if (!Array.isArray(env[key])) return [];
+    return (env[key] as unknown[])
+      .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+      .map((x) => ({
+        name: String(x.name ?? "").trim(),
+        parent: String(x.parent ?? "").trim(),
+        ...(key === "ledgers"
+          ? {
+              pan:
+                typeof x.pan === "string" && x.pan.trim() !== ""
+                  ? x.pan.trim().toUpperCase()
+                  : null,
+              gstin:
+                typeof x.gstin === "string" && x.gstin.trim() !== ""
+                  ? x.gstin.trim().toUpperCase()
+                  : null,
+              address:
+                typeof x.address === "string" && x.address.trim() !== ""
+                  ? x.address.trim()
+                  : null,
+              openingBalance:
+                typeof x.openingBalance === "number" && Number.isFinite(x.openingBalance)
+                  ? x.openingBalance
+                  : null,
+            }
+          : {}),
+      }))
+      .filter((x) => x.name !== "");
+  };
+  return { ledgers: pairs("ledgers") as DayBookLedgerPair[], groups: pairs("groups") };
 }
 
 /** Read the file, refusing anything over the configured ceiling before it is read into memory.

@@ -52,6 +52,15 @@ export interface LoansBooksCtx {
   isLoanLedger: (ledger: string) => boolean;
   isBankLedger: (ledger: string) => boolean;
   isCashLedger: (ledger: string) => boolean;
+  /**
+   * Addendum 2026-09-26: Bank OD A/c / Bank OCC A/c ancestry. An OD/OCC
+   * ledger IS a bank for mode inference and for the 269ST external-counter
+   * exclusion, and (when it also sits under Loans (Liability)) it is NOT a
+   * clause-31 loan — banking-company borrowings are s.269SS/T-exempt.
+   */
+  isBankOdLedger: (ledger: string) => boolean;
+  /** A Loans-(Liability) ledger that is also OD/OCC — excluded from clause 31. */
+  isBankOdLoan: (ledger: string) => boolean;
 }
 
 /**
@@ -65,9 +74,82 @@ const LOANS_GROUP = "loans (liability)";
 const BANK_GROUP = "bank accounts";
 const CURRENT_ASSETS = "current assets";
 const CASH_GROUP = /^cash/i;
+/** Tally spells the overdraft groups with the spaces around the slash. */
+const BANK_OD_GROUPS = ["bank od a/c", "bank occ a/c"];
+
+/**
+ * Addendum 2 (2026-09-26): curated Indian banking-company name tokens for
+ * auto-exempt pre-fill/review. Whole-word, case-insensitive; extend with new
+ * bank names here (and their tests) rather than special-casing callers.
+ */
+const BANK_LENDER_TOKENS = [
+  "IDFC",
+  "Union Bank",
+  "SBI",
+  "State Bank",
+  "HDFC Bank",
+  "ICICI",
+  "Axis",
+  "Kotak",
+  "Indian Bank",
+  "Canara",
+  "Bank of Baroda",
+  "PNB",
+  "IOB",
+  "Indian Overseas",
+  "Karur Vysya",
+  "KVB",
+  "City Union",
+  "CUB",
+  "TMB",
+  "Federal",
+  "IndusInd",
+  "Yes Bank",
+  "Bank of India",
+];
+
+/** NBFC names must never auto-exempt even when they carry a bank token. */
+const NBFC_GUARD_TOKENS = ["Financ", "Capital", "Fincorp"];
+
+const tokenRe = (token: string): RegExp =>
+  new RegExp(`(?:^|[^a-z0-9])${token.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^a-z0-9])`, "i");
+
+const BANK_LENDER_RES = BANK_LENDER_TOKENS.map(tokenRe);
+const NBFC_GUARD_RES = NBFC_GUARD_TOKENS.map(tokenRe);
 
 const isRootEnd = (parent: string | undefined): boolean =>
   !parent || parent === ROOT_OF_PRIMARIES;
+
+/**
+ * Addendum 2 (2026-09-26): a loan-ledger NAME that matches a banking-company
+ * token (after the NBFC guard refuses). Guard-first: "Bajaj Finance" with a
+ * stray bank token is an NBFC and stays a clause-31 loan.
+ */
+export function bankLenderNameMatch(name: string): boolean {
+  const s = String(name ?? "");
+  if (NBFC_GUARD_RES.some((re) => re.test(s))) return false;
+  return BANK_LENDER_RES.some((re) => re.test(s));
+}
+
+/**
+ * Addendum 2 (2026-09-26): auto-exempt candidates from the master pairs.
+ * Loan ledgers only (clause 31 scope): "bank OD/OCC ancestry" (ignores the
+ * NBFC guard — ancestry is book evidence, not a name guess), else
+ * "bank name match". Keys are canonical.
+ */
+export function loanAutoExemptNames(
+  masters: { name: string; parent: string; openingBalance?: number | null }[],
+  groups: { name: string; parent: string }[],
+): Map<string, string> {
+  const ctx = buildLoansCtx(masters, groups);
+  const out = new Map<string, string>();
+  for (const m of masters) {
+    if (!ctx.isLoanLedger(m.name)) continue;
+    if (ctx.isBankOdLedger(m.name)) out.set(canonicalKey(m.name), "bank OD/OCC ancestry");
+    else if (bankLenderNameMatch(m.name)) out.set(canonicalKey(m.name), "bank name match");
+  }
+  return out;
+}
 
 /**
  * Build the ancestry predicates from ledger-master pairs (`[{name,parent}]`,
@@ -106,7 +188,28 @@ export function buildLoansCtx(
   }
 
   function isBankLedger(ledger: string): boolean {
-    return chainOf(ledger).some((n) => canonicalKey(n) === BANK_GROUP);
+    const chain = chainOf(ledger).map(canonicalKey);
+    return (
+      chain.includes(BANK_GROUP) ||
+      // Addendum 2026-09-26: an OD/OCC ledger is a bank account for every
+      // loans purpose — mode inference and the 269ST contra exclusion —
+      // whatever its formal primary group (Bank OD A/c hangs under
+      // Loans (Liability), not Bank Accounts).
+      chain.some((n) => BANK_OD_GROUPS.includes(n))
+    );
+  }
+
+
+/** Bank OD / OCC ancestry alone (OD groups outside the bank accounts). */
+  function isBankOdLedger(ledger: string): boolean {
+    return chainOf(ledger)
+      .map(canonicalKey)
+      .some((n) => BANK_OD_GROUPS.includes(n));
+  }
+
+  /** A Loans (Liability) ledger that is ALSO OD/OCC: exempt, never a clause-31 loan. */
+  function isBankOdLoan(ledger: string): boolean {
+    return isLoanLedger(ledger) && isBankOdLedger(ledger);
   }
 
   /** A cash group matches /^Cash/i AND sits in a Current Assets ancestry. */
@@ -118,7 +221,15 @@ export function buildLoansCtx(
     );
   }
 
-  return { parentOf: rawParent, chainOf, isLoanLedger, isBankLedger, isCashLedger };
+  return {
+    parentOf: rawParent,
+    chainOf,
+    isLoanLedger,
+    isBankLedger,
+    isCashLedger,
+    isBankOdLedger,
+    isBankOdLoan,
+  };
 }
 
 /** Filter a voucher's entries into the real, numeric, non-blank ones. */
@@ -141,6 +252,11 @@ function realEntries(v: V): Array<{ ledger: string; amount: number }> {
  * also present — conservative for the breach side); else any bank-ancestry
  * counter ⇒ "bank"; else "journal". Non-loan ledgers and cash↔bank contra
  * vouchers (no loan ledger in the voucher) emit nothing.
+ *
+ * Addendum 2026-09-26: a Bank OD/OCC ledger under Loans (Liability) is a
+ * banking-company borrowing, not a clause-31 loan — its events are skipped
+ * entirely (no sheets, no findings), while every other true loan ledger
+ * under Loans (Liability) is untouched.
  */
 export function loanLedgerEvents(vouchers: V[], ctx: LoansBooksCtx): LoanEvent[] {
   const events: LoanEvent[] = [];
@@ -155,6 +271,9 @@ export function loanLedgerEvents(vouchers: V[], ctx: LoansBooksCtx): LoanEvent[]
 
     for (const entry of entries) {
       if (!ctx.isLoanLedger(entry.ledger)) continue;
+      // Addendum 2026-09-26: OD/OCC "loans" are banking-company borrowings —
+      // out of s.269SS/T entirely.
+      if (ctx.isBankOdLoan(entry.ledger)) continue;
       const others = entries.filter((e) => e !== entry);
       let mode: ModeClass = "journal";
       if (others.some((e) => ctx.isCashLedger(e.ledger))) mode = "cash";
@@ -188,6 +307,12 @@ export interface LoansOperatorParty {
   address?: string;
   /** C6: government / banking company / statutory corporation counterparty. */
   exempt?: boolean;
+  /**
+   * Addendum 2 (2026-09-26): operator's explicit "not exempt" (template N),
+   * which blocks a name/ancestry auto-exemption — the operator value always
+   * wins in both directions.
+   */
+  exemptNot?: boolean;
   modeOverrideAccepted?: ReceiptMode | "Cash-breach-declared";
   modeOverrideRepaid?: ReceiptMode | "Cash-breach-declared";
 }
@@ -305,21 +430,53 @@ const overrideFor = (
   d === "accepted" ? op?.modeOverrideAccepted : op?.modeOverrideRepaid;
 
 /**
- * Build the clause-31 sheet rows and 269SS/269T findings. Movement stats
- * (maxAmount / squaredUp) are per party over both directions from a 0
- * opening; `opts.mastersPresent === false` means the opening balance is
- * unknowable offline (C7) — the run is still computed, but a
- * `loans_max_amount_estimated` advisory fires once per party with movement.
+  * Build the clause-31 sheet rows and 269SS/269T findings. Movement stats
+  * (maxAmount / squaredUp) are per party over both directions from the
+  * party's opening where `opts.openings` supplies it (addendum 3), else
+  * from a 0 opening; an unavailable opening is honest about itself via a
+  * `loans_max_amount_estimated` advisory once per party with movement.
  * Sheets 6/7 belong to Task 4's `scan269St` and come out empty here.
+ *
+ * Addendum 2 (2026-09-26): `opts.autoExempt` maps canonical ledger key →
+ * reason ("bank name match" / "bank OD/OCC ancestry") for parties with no
+ * operator row. Exempted parties are skipped like `exempt` rows, but one
+ * `loans_auto_exempt` review advisory per party states the reason verbatim.
+ * `opts.masterFacts` supplies PAN (pre-derived; GSTIN fallback happens at
+ * the caller) and address from the ledger masters — the operator template
+ * takes precedence field by field.
  */
 export function buildLoansRows(
   events: LoanEvent[],
   operator: LoansOperator,
-  opts: { mastersPresent: boolean },
+  opts: {
+    mastersPresent: boolean;
+    autoExempt?: Map<string, string>;
+    masterFacts?: Map<string, { pan?: string; address?: string }>;
+    /**
+     * Addendum 3 (2026-09-26): canonical ledger key → opening balance for the
+     * party's loan ledger, resolved by the caller as the loan-liability
+     * OUTSTANDING (positive = money owed). A positive credit opening carries
+     * into the running balance before the first movement, so MAXAMOUNT is the
+     * peak across the year of (opening + cumulative movements) — movements
+     * alone no longer own the peak. Parties missing from the map (old
+     * bundles, no opening channel) keep the 0-opening estimate and the
+     * `loans_max_amount_estimated` advisory. Passing the map at all switches
+     * the advisory gate to per-party presence; omitting it keeps the legacy
+     * mastersPresent gate.
+     */
+    openings?: Map<string, number>;
+  },
 ): LoansBooksResult {
   const opByCanonical = new Map<string, LoansOperatorParty>();
   for (const p of operator.parties) opByCanonical.set(canonicalKey(p.ledger), p);
 
+  // Addendum 2: auto-exemption applies only where the operator has not spoken.
+  const autoReasonOf = (key: string): string | undefined => {
+    const op = opByCanonical.get(key);
+    if (op && (op.exempt || op.exemptNot)) return undefined;
+    return opts.autoExempt?.get(key);
+  };
+  const autoAdvised = new Set<string>();
   const byParty = new Map<string, LoanEvent[]>();
   for (const e of events) {
     const key = canonicalKey(e.party);
@@ -338,8 +495,11 @@ export function buildLoansRows(
   const stats = new Map<string, PartyStat>();
   for (const [key, list] of byParty) {
     const ordered = [...list].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    let balance = 0;
-    let peak = 0;
+    // Addendum 3: the running balance starts from the ledger's true opening
+    // (as loan-liability outstanding, caller-resolved); 0 only when the
+    // opening channel is absent.
+    let balance = opts.openings?.get(key) ?? 0;
+    let peak = Math.max(balance, 0);
     let journalAmount = 0;
     for (const x of ordered) {
       balance += x.direction === "accepted" ? x.amount : -x.amount;
@@ -422,7 +582,20 @@ export function buildLoansRows(
     const key = canonicalKey(bucket.party);
     const stat = stats.get(key)!;
     const op = opByCanonical.get(key);
-    if (op?.exempt && !overrideFor(op, bucket.direction)) continue;
+    const auto = autoReasonOf(key);
+    if ((op?.exempt || auto) && !overrideFor(op, bucket.direction)) {
+      if (auto && !autoAdvised.has(key)) {
+        autoAdvised.add(key);
+        res.findings.push(finding(
+          "loans_auto_exempt",
+          "review",
+          bucket.party,
+          bucket.amount,
+          `auto-exempt: ${auto}`,
+        ));
+      }
+      continue;
+    }
 
     const ov = overrideFor(op, bucket.direction);
     const declared = ov === "Cash-breach-declared";
@@ -465,8 +638,12 @@ export function buildLoansRows(
       maxAmount: stat.maxAmount,
       mode,
       ...(cashTreatmentFinal ? { nonAcMode: "Cash" as NonAcMode } : {}),
-      ...(op?.panOrAadhaar ? { panAlias: op.panOrAadhaar } : {}),
-      ...(op?.address ? { address: op.address } : {}),
+      ...(op?.panOrAadhaar || opts.masterFacts?.get(key)?.pan
+        ? { panAlias: op?.panOrAadhaar ?? opts.masterFacts!.get(key)!.pan }
+        : {}),
+      ...(op?.address || opts.masterFacts?.get(key)?.address
+        ? { address: op?.address ?? opts.masterFacts!.get(key)!.address }
+        : {}),
     };
 
     // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment.
@@ -517,20 +694,24 @@ export function buildLoansRows(
     b.amount - a.amount || (a.party < b.party ? -1 : a.party > b.party ? 1 : 0);
   for (const sheet of [res.sheet1, res.sheet3, res.sheet4]) sheet.sort(byAmount);
 
-  if (!opts.mastersPresent) {
-    for (const [key, stat] of stats) {
-      const op = opByCanonical.get(key);
-      if (op?.exempt) continue;
-      res.findings.push(finding(
-        "loans_max_amount_estimated",
-        "review",
-        stat.party,
-        stat.maxAmount,
-        `Opening balance unavailable, so the peak running amount of ${money(stat.maxAmount)} for ` +
-          `${stat.party} is computed from movements only (0 opening assumed); MAXAMOUNT is an ` +
-          `estimate and SQUAREDUP ("Yes" = closing movement zero) may be imprecise.`,
-      ));
-    }
+  for (const [key, stat] of stats) {
+    // Addendum 3: when the caller passes an openings channel, per-party
+    // presence decides (a party whose opening is unknown advises exactly as
+    // before, a known one stays silent). Callers that never pass the channel
+    // keep the legacy mastersPresent gate, so old bundles and old wiring
+    // behave identically.
+    if (opts.openings ? opts.openings.has(key) : opts.mastersPresent) continue;
+    const op = opByCanonical.get(key);
+    if (op?.exempt || autoReasonOf(key)) continue;
+    res.findings.push(finding(
+      "loans_max_amount_estimated",
+      "review",
+      stat.party,
+      stat.maxAmount,
+      `Opening balance unavailable, so the peak running amount of ${money(stat.maxAmount)} for ` +
+        `${stat.party} is computed from movements only (0 opening assumed); MAXAMOUNT is an ` +
+        `estimate and SQUAREDUP ("Yes" = closing movement zero) may be imprecise.`,
+    ));
   }
 
   const splitByPartyDate = new Set<string>();
@@ -538,7 +719,7 @@ export function buildLoansRows(
     if (s.count < 2) continue;
     const key = canonicalKey(s.party);
     const op = opByCanonical.get(key);
-    if (op?.exempt) continue;
+    if (op?.exempt || autoReasonOf(key)) continue;
     if (splitByPartyDate.has(`${key}|${s.date}|${s.direction}`)) continue;
     splitByPartyDate.add(`${key}|${s.date}|${s.direction}`);
     res.findings.push(finding(

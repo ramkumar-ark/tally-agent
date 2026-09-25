@@ -119,6 +119,7 @@ describe("check ordinals 19-26 are the loans checks and are stable", () => {
       ["loans_splitting_suspect", 24],
       ["loans_max_amount_estimated", 25],
       ["loans_party_unmastered", 26],
+      ["loans_auto_exempt", 27],
     ];
     for (const [check, ordinal] of expected) {
       expect((CHECK_ORDINAL as Record<string, number>)[check]).toBe(ordinal);
@@ -144,11 +145,12 @@ describe("check ordinals 19-26 are the loans checks and are stable", () => {
     for (const [check, ordinal] of landed) {
       expect(CHECK_ORDINAL[check as keyof typeof CHECK_ORDINAL]).toBe(ordinal);
     }
-    // Nothing else sits in CHECK_ORDINAL beyond these fourteen lands and the
-    // eight loans pins above (22 total): a newly inserted check — including
-    // the clause-44 lane's future 15-18 — must not mint ids silently; pinning
-    // the total forces this test to be revisited when CheckId grows.
-    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(22);
+    // Nothing else sits in CHECK_ORDINAL beyond these fourteen lands, the
+    // eight loans pins above and the addendum-2 auto-exempt advisory (23
+    // total): a newly inserted check — including the clause-44 lane's future
+    // 15-18 — must not mint ids silently; pinning the total forces this test
+    // to be revisited when CheckId grows.
+    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(23);
   });
 });
 

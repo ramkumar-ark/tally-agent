@@ -108,9 +108,16 @@ const ledgerValidation = (lastRow: number): Sheet["columns"][number]["validation
  * validations (the mode tokens contain no commas, unlike ledger names).
  */
 export function buildLoansTemplateWorkbook(
-  parties: { name: string }[],
+  parties: { name: string; exempt?: boolean }[],
   opts: { defaultBankMode?: ReceiptMode },
 ): { sheets: Sheet[] } {
+  // Addendum 2 (2026-09-26): the caller pre-fills the Exempt column — Y for
+  // Bank OD/OCC-ancestry ledgers and banking-company name matches. The
+  // operator can overwrite it with N (or blank) either way.
+  const exemptOf = new Map<string, string>();
+  for (const p of parties) {
+    if (p.exempt) exemptOf.set(canonicalKey(p.name), "Y");
+  }
   const ledgers = dedupeLedgers(parties.map((p) => p.name));
   const ledgerCol = (
     width: number,
@@ -134,7 +141,7 @@ export function buildLoansTemplateWorkbook(
         { header: "Mode accepted", width: 22, format: "text", validation: ledgerModeDropdown },
         { header: "Mode repaid", width: 22, format: "text", validation: ledgerModeDropdown },
       ],
-      rows: ledgers.map((l) => [l]),
+      rows: ledgers.map((l) => [l, null, null, exemptOf.get(canonicalKey(l)) ?? null]),
     },
     {
       name: "Specified Sums",
@@ -243,11 +250,13 @@ export function parseLoansTemplate(buf: Buffer): LoansTemplateParsed {
 
     const exemptCol = partyCols.get("Exempt")!;
     let exempt: boolean | undefined;
+    let exemptNot: boolean | undefined;
     const exemptRaw = String(raw(r.cells.get(exemptCol)).value ?? "").trim().toLowerCase();
     if (exemptRaw === "y" || exemptRaw === "yes") exempt = true;
+    else if (exemptRaw === "n" || exemptRaw === "no") exemptNot = true;
     else if (exemptRaw !== "") {
       throw new Error(
-        `template Parties row ${r.row}, column ${colLetter(exemptCol)} (Exempt): enter Y or leave it blank`,
+        `template Parties row ${r.row}, column ${colLetter(exemptCol)} (Exempt): enter Y, N or leave it blank`,
       );
     }
 
@@ -264,6 +273,7 @@ export function parseLoansTemplate(buf: Buffer): LoansTemplateParsed {
     const row: LoansOperatorParty = { ledger };
     if (panValue !== undefined) row.panOrAadhaar = panValue;
     if (exempt === true) row.exempt = true;
+    if (exemptNot === true) row.exemptNot = true;
     if (accepted !== undefined) row.modeOverrideAccepted = accepted as LoansOperatorParty["modeOverrideAccepted"];
     if (repaid !== undefined) row.modeOverrideRepaid = repaid as LoansOperatorParty["modeOverrideRepaid"];
     const addressCol = partyCols.get("Address")!;

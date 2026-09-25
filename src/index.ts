@@ -50,8 +50,19 @@ import {
   type Session,
   type TdsReviewResult,
 } from "./review.js";
-import { LOANS_SHEET_NAMES, type LoansReviewResult } from "./loans.js";
-import { loadDayBookText, readDayBook, readDayBookLedgerNames, type DayBookInput } from "./tds-daybook.js";
+import {
+  LOANS_SHEET_NAMES,
+  bankLenderNameMatch,
+  buildLoansCtx,
+  type LoansReviewResult,
+} from "./loans.js";
+import {
+  loadDayBookText,
+  readDayBook,
+  readDayBookLedgerNames,
+  readDayBookMasterPairs,
+  type DayBookInput,
+} from "./tds-daybook.js";
 
 export type ToolRegistrar = (
   name: string,
@@ -830,16 +841,33 @@ export function registerTools(
       outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
+      const masterPairsInfo: {
+        ledgers: { name: string; parent: string }[];
+        groups: { name: string; parent: string }[];
+      } = { ledgers: [], groups: [] };
       let ledgerList: string[] = [];
       if (args.dayBookPath) {
         const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
-        ledgerList = readDayBookLedgerNames(text, args.company ?? cfg.defaultCompany);
+        const mp = readDayBookMasterPairs(text, args.company ?? cfg.defaultCompany);
+        masterPairsInfo.ledgers = mp.ledgers;
+        masterPairsInfo.groups = mp.groups;
+        ledgerList = mp.ledgers.map((p) => p.name);
       }
       // Degrade honestly: a template without a list is still useful (the
       // operator types party names by hand); the warning says so.
       if (ledgerList.length === 0) {
-        ledgerList = await session.ledgerNames(args.company ?? cfg.defaultCompany);
+        const pairsInfo = await session.ledgerPairs(args.company ?? cfg.defaultCompany);
+        masterPairsInfo.ledgers = pairsInfo.ledgers;
+        masterPairsInfo.groups = pairsInfo.groups;
+        ledgerList = pairsInfo.ledgers.map((p) => p.name);
       }
+      // Addendum 2 (2026-09-26): pre-fill Exempt = Y for Bank OD/OCC-ancestry
+      // loan ledgers and banking-company name matches; the operator can
+      // overwrite with N either way.
+      const exemptCtx = buildLoansCtx(masterPairsInfo.ledgers, masterPairsInfo.groups);
+      const exemptPrefill = (name: string): boolean =>
+        exemptCtx.isLoanLedger(name) &&
+        (exemptCtx.isBankOdLedger(name) || bankLenderNameMatch(name));
       if (ledgerList.length === 0) {
         console.error(
           "tally-agent: no ledger names available (no day-book list and live masters unavailable) — " +
@@ -851,7 +879,10 @@ export function registerTools(
         outDir,
         loansTemplateFileName(args.company, new Date().toISOString().slice(0, 10).replace(/-/g, "")),
       );
-      const { sheets } = buildLoansTemplateWorkbook(ledgerList.map((n) => ({ name: n })), {});
+      const { sheets } = buildLoansTemplateWorkbook(
+        ledgerList.map((n) => ({ name: n, ...(exemptPrefill(n) ? { exempt: true } : {}) })),
+        {},
+      );
       await writeFile(outPath, buildWorkbook(sheets));
       await audit(
         "tb_write_loans_template",

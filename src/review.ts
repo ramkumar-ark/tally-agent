@@ -45,6 +45,7 @@ import {
   LOANS_SHEET_NAMES,
   buildLoansCtx,
   buildLoansRows,
+  loanAutoExemptNames,
   loanLedgerEvents,
   scan269St,
   type LoansOperator,
@@ -481,6 +482,14 @@ export interface Session {
    * unavailable — the template is still useful without a list.
    */
   ledgerNames(company: string | undefined): Promise<string[]>;
+  /**
+   * Addendum 2 (2026-09-26): ledger master pairs + groups for the loans
+   * template's Exempt-column pre-fill. Degrades to empty lists (with a
+   * warning) when masters are unavailable.
+   */
+  ledgerPairs(
+    company: string | undefined,
+  ): Promise<{ ledgers: { name: string; parent: string }[]; groups: { name: string; parent: string }[] }>;
   /**
    * Winman Form 3CD clause 20(b) (design of record: docs/design/2026-09-23-
    * winman-3cd-pf-esi-design.md). The operator challan template arrives
@@ -1990,7 +1999,7 @@ export function createSession(
     lastCompany = company;
 
     let groups: Array<{ name: string; parent: string }>;
-    let masterPairs: Array<{ name: string; parent: string }>;
+    let masterPairs: Array<{ name: string; parent: string; openingBalance?: number | null }>;
     let voucherList: VoucherRow[];
     let mastersSource: "bundle" | "live" | "absent";
     if (opts.dayBookPath) {
@@ -2016,6 +2025,35 @@ export function createSession(
     for (const l of masterPairs) groupOfLedger.set(canonicalKey(l.name), l.parent);
     const groupOf = (ledger: string): string =>
       groupOfLedger.get(canonicalKey(ledger)) ?? "";
+
+    // Addendum 2 (2026-09-26): master identity facts for row pre-fill. PAN
+    // precedence: master PAN, else derived from the master GSTIN; address
+    // keeps its case. The live path enriches from the verbose ledgers export
+    // (degrades silently — PAN/address are best-effort pre-fill only).
+    const masterFacts = new Map<string, { pan?: string; address?: string }>();
+    const putFact = (pair: { name: string; pan?: string | null; gstin?: string | null; address?: string | null }): void => {
+      const key = canonicalKey(pair.name);
+      if (key === "") return;
+      const pan =
+        pair.pan && PAN_SHAPE.test(pair.pan.toUpperCase())
+          ? pair.pan.toUpperCase()
+          : panFromGstin(pair.gstin ?? null);
+      const address = pair.address && pair.address.trim() !== "" ? pair.address.trim() : null;
+      if (pan || address) {
+        masterFacts.set(key, {
+          ...(pan ? { pan } : {}),
+          ...(address ? { address } : {}),
+        });
+      }
+    };
+    for (const l of masterPairs) putFact(l);
+    if (!opts.dayBookPath) {
+      try {
+        for (const l of await d.ledgersTax(company)) putFact(l);
+      } catch {
+        console.error("tally-agent: verbose ledger masters unavailable for loans PAN/address pre-fill (degraded)");
+      }
+    }
 
     const template = opts.templatePath
       ? parseLoansTemplate(await readFile(opts.templatePath))
@@ -2044,8 +2082,37 @@ export function createSession(
 
     const ctx = buildLoansCtx(masterPairs, groups);
     const events = loanLedgerEvents(voucherList, ctx);
+
+    // Addendum 3 (2026-09-26): opening balances feed MAXAMOUNT. The caller
+    // resolves each loan ledger's opening into the loan-liability OUTSTANDING
+    // (positive = money owed): the gateway/bundle convention is positive =
+    // debit, so a liability's credit opening arrives negative and is
+    // negated here — the single flip at this seam.
+    const openings = new Map<string, number>();
+    const putOpening = (name: string, openingDebit: number | null | undefined): void => {
+      if (typeof openingDebit !== "number" || !Number.isFinite(openingDebit)) return;
+      const key = canonicalKey(name);
+      if (key === "" || ctx.isBankOdLoan(name) || !ctx.isLoanLedger(name)) return;
+      openings.set(key, -openingDebit);
+    };
+    for (const l of masterPairs) putOpening(l.name, l.openingBalance);
+    if (!opts.dayBookPath) {
+      try {
+        const tb = await d.trialBalance(company, dayBefore(fromDate));
+        for (const row of tb.rows) putOpening(row.name, row.balance);
+      } catch {
+        console.error("tally-agent: opening trial balance unavailable for loans MAXAMOUNT (degraded, estimated)");
+      }
+    }
+
     const books = buildLoansRows(events, operator, {
       mastersPresent: mastersSource !== "absent",
+      // Addendum 2 (2026-09-26): auto-exempt bank lenders / OD-OCC ancestry
+      // where the operator template has not spoken; the rows engine resolves
+      // op.exempt/exemptNot precedence itself.
+      autoExempt: loanAutoExemptNames(masterPairs, groups),
+      masterFacts,
+      openings,
     });
     // Called ONCE per run: the per-scan ordinal state lives inside scan269St.
     const st = scan269St(voucherList, ctx, operator, events);
@@ -2520,6 +2587,21 @@ async function realPathId(p: string): Promise<string> {
           "tally-agent: ledger masters unavailable — the 26AS mapping template ships without a ledger list",
         );
         return [];
+      }
+    },
+
+    // Addendum 2 (2026-09-26): pairs + groups for the loans template's
+    // Exempt pre-fill; degrades to empty lists with a warning (the template
+    // is still useful with a hand-filled party list).
+    async ledgerPairs(company) {
+      try {
+        const [g, m] = await Promise.all([d.groups(company), d.ledgers(company)]);
+        return { ledgers: m, groups: g };
+      } catch {
+        console.error(
+          "tally-agent: ledger/group masters unavailable — the loans template ships without the Exempt pre-fill",
+        );
+        return { ledgers: [], groups: [] };
       }
     },
 

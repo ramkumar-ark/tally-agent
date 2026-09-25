@@ -55,9 +55,21 @@ notify("notifications/initialized", {});
 const started = Date.now();
 const [groups, ledgers, vouchers] = [
   await call("tally_get_groups", {}),
-  await call("tally_get_ledgers", {}),
+  // verbose:true is what carries PartYGSTIN (gstin) per ledger; the PAN
+  // (IncomeTaxNumber) rides l.pan once the upstream fetches it — absent
+  // today, so it exports as null and the bundle is still valid.
+  await call("tally_get_ledgers", { verbose: true }),
   await call("tally_get_vouchers", { fromDate, toDate, includeLines: true }),
 ];
+
+const norm = (v) => {
+  const s = typeof v === "string" ? v.trim().toUpperCase() : "";
+  return s === "" ? null : s;
+};
+const keepCase = (v) => {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s === "" ? null : s;
+};
 
 const bundle = {
   tallyAgentExport: 1,
@@ -66,7 +78,13 @@ const bundle = {
   toDate,
   exportedAt: new Date().toISOString().slice(0, 10).replace(/-/g, ""),
   groups: groups.map((g) => ({ name: g.name, parent: g.parent ?? "" })),
-  ledgers: ledgers.map((l) => ({ name: l.name, parent: l.parent ?? "" })),
+  ledgers: ledgers.map((l) => ({
+    name: l.name,
+    parent: l.parent ?? "",
+    pan: norm(l.pan ?? l.IncomeTaxNumber),
+    gstin: norm(l.gstin),
+    address: keepCase(l.address),
+  })),
   vouchers,
 };
 await writeFile(outPath, JSON.stringify(bundle), "utf8");

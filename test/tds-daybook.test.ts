@@ -156,7 +156,10 @@ describe("readDayBook", () => {
     };
     const out = readDayBook(JSON.stringify(bundle), { ...opts, company: "example infra" });
     expect(out.shape).toBe("bundle");
-    expect(out.ledgers).toEqual([{ name: "Site Expenses", parent: "Indirect Expenses" }]);
+    // Additive identity fields null out for an old-shape ledger row (2026-09-26).
+    expect(out.ledgers).toEqual([
+      { name: "Site Expenses", parent: "Indirect Expenses", pan: null, gstin: null, address: null, openingBalance: null },
+    ]);
   });
 
   it("refuses a truncated file without mentioning its contents", () => {
