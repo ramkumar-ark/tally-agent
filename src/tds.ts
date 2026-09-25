@@ -200,6 +200,15 @@ export interface TdsEvents {
   reductions?: TdsReduction[];
 }
 
+export interface TdsLiability {
+  booking: TdsBooking;
+  section: string;          // law key, e.g. "194-I(a)"
+  liableBase: number;       // the engine's per-booking base (194Q: cumulative excess rule)
+  liability: number;        // round2(rate * liableBase) as the engine computed it
+  rate: number;             // rate applied (certificate/206AA-adjusted)
+  deduction: TdsDeduction | null;  // joined by the engine (d.booking === booking)
+}
+
 export interface TdsSectionTotals {
   section: string;
   gross: number;
@@ -762,7 +771,7 @@ export function analyzeTds(
   expenseLedgers: TdsLedgerRows[],
   partyLedgers: TdsLedgerRows[],
   ctx: TdsCtx & { operator: OperatorFile },
-): { events: TdsEvents; findings: TdsFinding[]; totals: TdsTotals } {
+): { events: TdsEvents; findings: TdsFinding[]; totals: TdsTotals; liabilities: TdsLiability[] } {
   const events = extractEvents(dutyLedgers, expenseLedgers, partyLedgers, ctx);
   // Debit notes and charge reversals reduce the charge bases before any
   // threshold or liability is measured (2026-09-26o items 4/5).
@@ -922,6 +931,7 @@ export function analyzeTds(
 
   // Aggregate the gross base per deductee key (PAN-else-ledger) per section.
   const findings: TdsFinding[] = [];
+  const liabilities: TdsLiability[] = [];
   const ordinals = new Map<TdsCheckId, number>();
   const nextOrd = (check: TdsCheckId): number => {
     const n = (ordinals.get(check) ?? 0) + 1;
@@ -1054,6 +1064,11 @@ export function analyzeTds(
           deducteeKeyOf(ctx, d.party) === deducteeKeyOf(ctx, b.party) &&
           d.section === section,
       );
+      // Per-booking liability fact, additive: the exact figures the findings
+      // above derive from, captured here so the 194Q running-cumulative and
+      // whole-year rules are never re-derived in a second module. `ded` is
+      // null for an undeducted booking; no other filtering is applied.
+      liabilities.push({ booking: b, section, liableBase, liability, rate: rate.rate, deduction: ded ?? null });
       if (!ded) {
         // A timing-only section (194T, 2026-09-26o item 035) never raises a
         // not-deducted finding: its deductee is a partner's Capital Account,
@@ -1518,6 +1533,7 @@ export function analyzeTds(
   return {
     events,
     findings,
+    liabilities,
     totals: {
       bySection: [...bySection.values()],
       notDeducted: round2(notDeducted),
