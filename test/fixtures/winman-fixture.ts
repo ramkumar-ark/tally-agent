@@ -32,35 +32,83 @@ const INTER_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 const SS = ["EmployeePFESIfunds", "P.F.", "7", "4.03.50.10.*.00", "DUEDATE", "PAIDON", "AMOUNTPAID", "AMOUNTCOLLECTED", "Due date", "P.F.Contributions", "-", "$WiNsArAlXlImPoRt2$", "9.6.1", "1623", "2026-2027", "F"];
 
+/**
+ * The clause-44 "Break-up of GST expenditure" sheet (design §2.1): row 1 gives
+ * form id / sheet key / first data row / empty field path, row 2 gives the six
+ * machine keys (cols A–F), row 7 is the hidden '-' prototype (first data row 8
+ * minus one), rows 8/9 are pre-filled labels — invented values only.
+ */
+const GST44_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:F9"/><sheetData>
+<row r="1" hidden="1"><c r="A1" s="81" t="s"><v>17</v></c><c r="B1" s="81" t="s"><v>18</v></c><c r="C1" s="81" t="s"><v>19</v></c><c r="D1" s="81" t="s"><v>20</v></c></row>
+<row r="2" hidden="1"><c r="A2" s="81" t="s"><v>21</v></c><c r="B2" s="81" t="s"><v>22</v></c><c r="C2" s="81" t="s"><v>23</v></c><c r="D2" s="81" t="s"><v>24</v></c><c r="E2" s="81" t="s"><v>25</v></c><c r="F2" s="81" t="s"><v>26</v></c></row>
+<row r="7" hidden="1"><c r="A7" s="87" t="s"><v>10</v></c><c r="B7" s="88" t="s"><v>10</v></c><c r="C7" s="88" t="s"><v>10</v></c><c r="D7" s="88" t="s"><v>10</v></c><c r="E7" s="88" t="s"><v>10</v></c><c r="F7" s="88" t="s"><v>10</v></c></row>
+<row r="8"><c r="A8" s="81" t="s"><v>27</v></c></row>
+<row r="9"><c r="A9" s="81" t="s"><v>28</v></c></row>
+</sheetData></worksheet>`;
+
+const GST44_SS = [
+  "3CDGSTbreakup44", "Break-up of GST expenditure", "8", "",
+  "PARTICULARS", "TOTALEXPENDITURE", "TOWARDSSUPPLIES", "COMPOSITIONSUPPLIER", "OTHERS", "REGISTEREDUNDERGST",
+  "Capital Expenditure", "Revenue Expenditure",
+];
+
 /** cellXfs indices mirror the real workbook: 88/89 are quotePrefix prototypes, 80/84 their twins. */
-const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+const DEFAULT_XF = `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>`;
+const styleSheetOf = (specials: Readonly<Record<number, string>>): string => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <numFmts count="1"><numFmt numFmtId="172" formatCode="dd\\-mmm\\-yy"/></numFmts>
-<cellXfs count="94">${Array.from({ length: 94 }, (_, i) => {
-  if (i === 80) return `<xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`;
-  if (i === 84) return `<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`;
-  if (i === 88) return `<xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`;
-  if (i === 89) return `<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`;
-  if (i === 93) return `<xf numFmtId="49" fontId="0" fillId="4" borderId="0" xfId="0" quotePrefix="1"/>`;
-  return `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>`;
-}).join("")}</cellXfs></styleSheet>`;
+<cellXfs count="94">${Array.from({ length: 94 }, (_, i) => specials[i] ?? DEFAULT_XF).join("")}</cellXfs></styleSheet>`;
+
+const DEFAULT_SPECIALS: Readonly<Record<number, string>> = {
+  80: `<xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`,
+  84: `<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`,
+  88: `<xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`,
+  89: `<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`,
+  93: `<xf numFmtId="49" fontId="0" fillId="4" borderId="0" xfId="0" quotePrefix="1"/>`,
+};
+
+const STYLES = styleSheetOf(DEFAULT_SPECIALS);
+
+/**
+ * The clause-44 workbook's styles: 87 is a quotePrefix text prototype whose
+ * twin (81, same minus quotePrefix) already exists, while 88 is a quotePrefix
+ * numFmt-1 prototype that has NO twin — so writing rows 8+ exercises
+ * `resolveStyleTwins`' append path through this fixture.
+ */
+const GST44_STYLES = styleSheetOf({
+  ...DEFAULT_SPECIALS,
+  81: `<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0"/>`,
+  87: `<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" quotePrefix="1"/>`,
+  88: `<xf numFmtId="1" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`,
+});
 
 export const PF_PART = "xl/worksheets/sheet1.xml";
 export const ESI_PART = "xl/worksheets/sheet2.xml";
+export const GST44_PART = "xl/worksheets/sheet4.xml";
 
-export function makeWinmanFixture(opts: { esiSheet?: boolean } = {}): Buffer {
+interface WinmanZipOpts {
+  esiSheet?: boolean;
+  gst44Sheet?: boolean;
+  styles?: string;
+  extraSs?: readonly string[];
+}
+
+function winmanZip(opts: WinmanZipOpts): Buffer {
+  const { esiSheet, gst44Sheet, styles = STYLES, extraSs = [] } = opts;
   const parts = [
     part("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>`),
     part("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
     // sheetId deliberately disagrees with the part number: resolution must go
     // through the rels, never through sheetN.xml == sheetId N.
-    part("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="P.F." sheetId="2" state="hidden" r:id="rId1"/>${opts.esiSheet === false ? "" : `<sheet name="E.S.I." sheetId="3" state="hidden" r:id="rId2"/>`}<sheet name="INTER" sheetId="9" state="hidden" r:id="rId3"/></sheets></workbook>`),
-    part("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>`),
+    part("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="P.F." sheetId="2" state="hidden" r:id="rId1"/>${esiSheet === false ? "" : `<sheet name="E.S.I." sheetId="3" state="hidden" r:id="rId2"/>`}${gst44Sheet ? `<sheet name="Break-up of GST expenditure" sheetId="5" state="hidden" r:id="rId4"/>` : ""}<sheet name="INTER" sheetId="9" state="hidden" r:id="rId3"/></sheets></workbook>`),
+    part("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>${gst44Sheet ? `<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>` : ""}</Relationships>`),
     part(PF_PART, PF_SHEET),
     part(ESI_PART, PF_SHEET.replace("<v>1</v>", "<v>16</v>")),
     part("xl/worksheets/sheet3.xml", INTER_SHEET),
-    part("xl/styles.xml", STYLES),
-    part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${SS.length + 1}" uniqueCount="${SS.length + 1}">${[...SS, "E.S.I."].map((s) => `<si><t>${s}</t></si>`).join("")}</sst>`),
+    ...(gst44Sheet ? [part(GST44_PART, GST44_SHEET)] : []),
+    part("xl/styles.xml", styles),
+    part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${SS.length + 1 + extraSs.length}" uniqueCount="${SS.length + 1 + extraSs.length}">${[...SS, "E.S.I.", ...extraSs].map((s) => `<si><t>${s}</t></si>`).join("")}</sst>`),
   ];
   // A STORED (method 0) binary entry plus deflated macro parts: the entries that
   // must survive verbatim (Task 3 writes through these).
@@ -205,6 +253,22 @@ export function makeLoansWinmanFixture(opts: { formId?: string } = {}): Buffer {
     ["xl/vbaProjectSignature.bin", Buffer.from("SIG\u0000\u00ff", "binary"), 8],
   ];
   return zipOf([...parts.map(([n, b]) => [n, b, 8] as const), ...bins]);
+}
+
+const WINMAN_ZIP_DEFAULTS: WinmanZipOpts = { esiSheet: true, gst44Sheet: false, styles: STYLES, extraSs: [] };
+
+export function makeWinmanFixture(opts: { esiSheet?: boolean } = {}): Buffer {
+  return winmanZip({ ...WINMAN_ZIP_DEFAULTS, ...opts });
+}
+
+/**
+ * The same workbook with a fourth worksheet: the clause-44 GST break-up sheet.
+ * Everything else (INTER handshake, binary parts) is identical to
+ * makeWinmanFixture; the qa styles add a no-twin prototype so the write path
+ * must append an xf.
+ */
+export function makeWinmanGst44Fixture(): Buffer {
+  return winmanZip({ esiSheet: true, gst44Sheet: true, styles: GST44_STYLES, extraSs: GST44_SS });
 }
 
 function zipOf(files: ReadonlyArray<readonly [string, Buffer, 0 | 8]>): Buffer {
