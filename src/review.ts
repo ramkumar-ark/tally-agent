@@ -38,7 +38,21 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { readXlsm, writeXlsm } from "./xlsm.js";
 import { readSchema, readHandshake, writeSheetRows, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
-import { projectLedgerRows, type DayBookInput } from "./tds-daybook.js";
+import { projectLedgerRows, readDayBook, type DayBookInput } from "./tds-daybook.js";
+import {
+  EMPTY_LOANS_OPERATOR,
+  LOANS_SHEET_LABELS,
+  LOANS_SHEET_NAMES,
+  buildLoansCtx,
+  buildLoansRows,
+  loanLedgerEvents,
+  scan269St,
+  type LoansOperator,
+  type LoansReviewResult,
+  type LoansSheetName,
+  type LoansSheetRow,
+} from "./loans.js";
+import { parseLoansTemplate } from "./loans-file.js";
 
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
 const DAY_BOOK_FINDING = "(day-book file)";
@@ -49,6 +63,7 @@ import {
   TOTALS_TOLERANCE,
   ZERO_TOLERANCE,
   type Finding,
+  findingId,
   type GroupRole,
   type GstKind,
   type Severity,
@@ -495,6 +510,37 @@ export interface Session {
    * review result's own rows are display-formatted for the model.
    */
   pfEsiRows(): Clause20bRow[] | undefined;
+  /**
+   * Winman 3CD clause 31 (l.269SS/l.269T) and l.269ST. The books come from
+   * the operator day-book export by path (primary: the day-book path makes
+   * no downstream call) or live Tally; no day book means live is REQUIRED —
+   * the PF/ESI degradation is mirrored (live is awaited and a live fetch
+   * failure throws), never a silent empty run. mastersSource "absent"
+   * arises only from a day-book bundle that carries no ledger masters: the
+   * run still proceeds over the bundle's vouchers.
+   * The filled operator template travels by path only; the operator
+   * overrides (parties' PAN/mode, declared specified sums) flow into the
+   * review inside the gateway.
+   */
+  loansReview(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    dayBookPath?: string;
+    templatePath?: string;
+    overridesPath?: string;
+  }): Promise<LoansReviewResult>;
+  /**
+   * The cached clause-31/269ST per-sheet rows (sheets 1..7) with REAL names,
+   * raw PANs and raw YYYYMMDD dates, plus the vault snapshot of the last
+   * loansReview — write3cdLoans (Task 7) consumes them unchanged.
+   */
+  loansRows():
+    | {
+        sheets: Record<LoansSheetName, LoansSheetRow[]>;
+        vault: Array<{ real: string; alias: string }>;
+      }
+    | undefined;
   vault: Vault;
 }
 
@@ -516,6 +562,9 @@ export function createSession(
   let lastAs26: As26ReviewResult | undefined;
   /** Paperback of the review: unmasked clause 20(b) rows for the Winman writer. */
   let lastPfEsi: Clause20bRow[] | undefined;
+  /** Paperback of the loans review: raw unmasked per-sheet rows + vault map (write3cdLoans, Task 7). */
+  let lastLoansSheets: Record<LoansSheetName, LoansSheetRow[]> | undefined;
+  let lastLoansVault: Array<{ real: string; alias: string }> | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -1908,6 +1957,226 @@ export function createSession(
   }
 
   /**
+   * Winman 3CD clause 31 (l.269SS/l.269T) and l.269ST books side
+   * (Session.loansReview, task-6). Source: day-book primary by absolute path
+   * (the path-only channel: the gateway reads the file, nothing rides the
+   * session), else live `d.groups/d.ledgers/d.vouchers` — mirrored from
+   * pfEsiReview. The day-book loader is readDayBook: it validates company
+   * and period coverage before any engine work.
+   */
+  async function loansReview(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    dayBookPath?: string;
+    templatePath?: string;
+    overridesPath?: string;
+  }): Promise<LoansReviewResult> {
+    const { company, fromDate, toDate } = opts;
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    if (opts.overridesPath) {
+      console.error(
+        "tally-agent: overridesPath is accepted for interface parity with pfEsiReview but carries no loans-specific key yet — ignored",
+      );
+    }
+    lastCompany = company;
+
+    let groups: Array<{ name: string; parent: string }>;
+    let masterPairs: Array<{ name: string; parent: string }>;
+    let voucherList: VoucherRow[];
+    let mastersSource: "bundle" | "live" | "absent";
+    if (opts.dayBookPath) {
+      const text = await readFile(opts.dayBookPath, "utf8");
+      const dayBook = readDayBook(text, { company, fromDate, toDate });
+      voucherList = dayBook.vouchers;
+      groups = dayBook.groups ?? [];
+      masterPairs = dayBook.ledgers ?? [];
+      mastersSource = dayBook.ledgers ? "bundle" : "absent";
+    } else {
+      const [g, m, v] = await Promise.all([
+        d.groups(company),
+        d.ledgers(company),
+        d.vouchers(company, fromDate, toDate),
+      ]);
+      groups = g;
+      masterPairs = m;
+      voucherList = v;
+      mastersSource = "live";
+    }
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const l of masterPairs) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    const groupOf = (ledger: string): string =>
+      groupOfLedger.get(canonicalKey(ledger)) ?? "";
+
+    const template = opts.templatePath
+      ? parseLoansTemplate(await readFile(opts.templatePath))
+      : null;
+    const operator: LoansOperator = template
+      ? {
+          parties: template.parties,
+          ...(template.defaultBankMode ? { defaultBankMode: template.defaultBankMode } : {}),
+          specifiedSums: template.specifiedSums,
+          st26Declarations: template.st26Declarations,
+        }
+      : EMPTY_LOANS_OPERATOR;
+
+    // Vault every operator-held identity before any row or detail is touched:
+    // PAN/Aadhaar as tax_id aliases, addresses as other-role aliases (whole
+    // values in, pseudonyms out — the aliases later ride the masked rows and
+    // the sweep, and lastLoansVault lets write3cdLoans resolve them back).
+    for (const p of template?.parties ?? []) {
+      if (p.panOrAadhaar) vault.pseudonym(p.panOrAadhaar, "tax_id");
+      if (p.address) vault.pseudonym(p.address, "other");
+    }
+    for (const r of template?.specifiedSums ?? []) {
+      if (r.panAlias) vault.pseudonym(r.panAlias, "tax_id");
+      if (r.address) vault.pseudonym(r.address, "other");
+    }
+
+    const ctx = buildLoansCtx(masterPairs, groups);
+    const events = loanLedgerEvents(voucherList, ctx);
+    const books = buildLoansRows(events, operator, {
+      mastersPresent: mastersSource !== "absent",
+    });
+    // Called ONCE per run: the per-scan ordinal state lives inside scan269St.
+    const st = scan269St(voucherList, ctx, operator, events);
+
+    // Honest absence: a day-book bundle without its ledger masters cannot
+    // even discover loan ledgers (no chains) — the run proceeds over the
+    // vouchers but reports the gap under the allocated loans_party_unmastered
+    // id instead of silently returning an all-empty review (R-MCP-4 analog).
+    const unmasteredFinding: Finding | null =
+      mastersSource === "absent" && voucherList.length > 0
+        ? {
+            id: findingId("loans_party_unmastered", 1),
+            check: "loans_party_unmastered",
+            severity: "warning",
+            ledger: "",
+            group: "",
+            amount: 0,
+            side: null,
+            expected: null,
+            detail:
+              `The day-book export carries no ledger masters, so loan-ledger discovery and ` +
+              `cash/bank ancestry are unavailable: ${voucherList.length} vouchers were read and the ` +
+              `clause-31/269ST scans could not identify any loan ledger. Re-export the day book ` +
+              `with its groups and ledgers and run again.`,
+          }
+        : null;
+    const rawFindings: Finding[] = [
+      ...(unmasteredFinding ? [unmasteredFinding] : []),
+      ...books.findings,
+      ...st.findings,
+    ];
+
+    const rawSheets: Record<LoansSheetName, LoansSheetRow[]> = {
+      sheet1: books.sheet1,
+      sheet2: books.sheet2,
+      sheet3: books.sheet3,
+      sheet4: books.sheet4,
+      sheet5: books.sheet5,
+      sheet6: st.sheet6,
+      sheet7: st.sheet7,
+    };
+
+    // Loan parties (both scans) vault as the real name, "other" role;
+    // everything that is not a loan party masks through the same classifier
+    // rule maskLedgerName applies everywhere else.
+    const loanPartyReal = new Map<string, string>();
+    for (const e of events) {
+      if (!loanPartyReal.has(canonicalKey(e.party))) {
+        loanPartyReal.set(canonicalKey(e.party), e.party);
+      }
+    }
+    for (const p of operator.parties) {
+      if (!loanPartyReal.has(canonicalKey(p.ledger))) {
+        loanPartyReal.set(canonicalKey(p.ledger), p.ledger);
+      }
+    }
+    for (const r of [...rawSheets.sheet2, ...rawSheets.sheet7]) {
+      if (r.party && !loanPartyReal.has(canonicalKey(r.party))) {
+        loanPartyReal.set(canonicalKey(r.party), r.party);
+      }
+    }
+    const maskLoanName = (name: string): string => {
+      if (!name) return "";
+      const real = loanPartyReal.get(canonicalKey(name));
+      if (real) return vault.pseudonym(real, "other" satisfies GroupRole);
+      return maskLedgerName(name, groupOf(name), c, vault);
+    };
+
+    // Order matters: PSEUDONYM FIRST (party names quoted whole in details),
+    // then the whole-token sweep over free text, then scrubSecrets behind it.
+    for (const f of rawFindings) {
+      if (f.ledger) {
+        realLedgerByFinding.set(f.id, f.ledger);
+        maskLoanName(f.ledger);
+      }
+    }
+    const findings: Finding[] = rawFindings.map((f) => ({
+      id: f.id,
+      check: f.check,
+      severity: f.severity,
+      ledger: f.ledger ? maskLoanName(f.ledger) : "",
+      group: scrubSecrets(f.group),
+      amount: f.amount,
+      side: null,
+      expected: null,
+      detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+    }));
+
+    const maskRow = (r: LoansSheetRow): LoansSheetRow => {
+      // model side never carries the raw address; the raw cache keeps it.
+      const { address: _dropped, ...rest } = r;
+      const out: LoansSheetRow = { ...rest, party: maskLoanName(r.party) };
+      // PanAlias from the template rows may still hold the RAW operator value
+      // (see the LoansSheetRow contract): ride the tax_id alias onward.
+      if (r.panAlias) out.panAlias = vault.pseudonym(r.panAlias, "tax_id");
+      if (r.date) out.date = displayDate(r.date);
+      // Free text (nature = voucher narration) gets the same sweep as details.
+      if (r.nature) out.nature = scrubSecrets(maskKnownNames(r.nature, vault));
+      return out;
+    };
+    const maskedSheets: Record<LoansSheetName, LoansSheetRow[]> = {
+      sheet1: rawSheets.sheet1.map(maskRow),
+      sheet2: rawSheets.sheet2.map(maskRow),
+      sheet3: rawSheets.sheet3.map(maskRow),
+      sheet4: rawSheets.sheet4.map(maskRow),
+      sheet5: rawSheets.sheet5.map(maskRow),
+      sheet6: rawSheets.sheet6.map(maskRow),
+      sheet7: rawSheets.sheet7.map(maskRow),
+    };
+
+    // Paperback first (raw, unmasked, raw dates), then the vault snapshot so
+    // write3cdLoans can resolve every alias back to its real value.
+    lastLoansSheets = rawSheets;
+    lastLoansVault = vault.entries();
+
+    const sheets: Record<LoansSheetName, number> = {
+      sheet1: maskedSheets.sheet1.length,
+      sheet2: maskedSheets.sheet2.length,
+      sheet3: maskedSheets.sheet3.length,
+      sheet4: maskedSheets.sheet4.length,
+      sheet5: maskedSheets.sheet5.length,
+      sheet6: maskedSheets.sheet6.length,
+      sheet7: maskedSheets.sheet7.length,
+    };
+
+    return {
+      findings,
+      rows: LOANS_SHEET_NAMES.flatMap((n) => maskedSheets[n]),
+      sheets,
+      mastersSource,
+      sectionSummary: LOANS_SHEET_NAMES.map(
+        (n) => `${LOANS_SHEET_LABELS[n]}: ${sheets[n]} rows`,
+      ),
+    };
+  }
+
+  /**
    * Rewrite the P.F. / E.S.I. sheets of a Winman 3CD COPY from the cached
    * review's rows (§2.3 + §3 column sourcing). The source is read once and
    * never written; the copy lands beside `outPath` (the report directory by
@@ -2097,5 +2366,10 @@ async function realPathId(p: string): Promise<string> {
     pfEsiReview,
     write3cdPfEsi,
     pfEsiRows: () => lastPfEsi,
+    loansReview,
+    loansRows: () =>
+      lastLoansSheets
+        ? { sheets: lastLoansSheets, vault: lastLoansVault ?? [] }
+        : undefined,
   };
 }

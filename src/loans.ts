@@ -548,6 +548,44 @@ export function buildLoansRows(
 }
 
 /**
+ * Session-surface types (Task 6). The clause-31/269ST families keyed 1..7 as
+ * the engine's sheet arrays — the Winman writer (Task 7) consumes the last
+ * review's raw per-sheet rows back through the same names.
+ */
+export type LoansSheetName =
+  | "sheet1"
+  | "sheet2"
+  | "sheet3"
+  | "sheet4"
+  | "sheet5"
+  | "sheet6"
+  | "sheet7";
+
+export const LOANS_SHEET_NAMES: LoansSheetName[] = [
+  "sheet1", "sheet2", "sheet3", "sheet4", "sheet5", "sheet6", "sheet7",
+];
+
+export const LOANS_SHEET_LABELS: Record<LoansSheetName, string> = {
+  sheet1: "s.269SS — sums of money received (acceptances)",
+  sheet2: "s.269SS — specified sums (operator-declared)",
+  sheet3: "s.269T — sums repaid",
+  sheet4: "s.269T — Cash-breach-declared repayments",
+  sheet5: "s.269T — operator declarations (no books evidence)",
+  sheet6: "s.269ST — receipts / payments register",
+  sheet7: "s.269ST — bearer cheque/DD character declarations",
+};
+
+/** The loansReview session result: findings and rows MODEL-SIDE (masked). */
+export interface LoansReviewResult {
+  findings: Finding[];
+  /** Masked rows, sheets 1..7 flattened in order; numeric amounts intact. */
+  rows: LoansSheetRow[];
+  sheets: Record<LoansSheetName, number>;
+  mastersSource: "bundle" | "live" | "absent";
+  sectionSummary: string[];
+}
+
+/**
  * Part 3 of the loans engine — the s.269ST register (sheets 6/7) and the
  * `loans_269st_receipt` / `loans_269st_payment` findings.
  *
