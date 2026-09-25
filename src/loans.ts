@@ -457,8 +457,6 @@ export function buildLoansRows(
       }
       continue;
     }
-    if (!stat.crossed) continue;
-
     const cashTreatmentFinal = mode === "Non-A/c payee modes";
     const row: LoansSheetRow = {
       party: bucket.party,
@@ -470,6 +468,15 @@ export function buildLoansRows(
       ...(op?.panOrAadhaar ? { panAlias: op.panOrAadhaar } : {}),
       ...(op?.address ? { address: op.address } : {}),
     };
+
+    // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment.
+    // The gate is on the declaration, NOT on `stat.crossed`: declaration rows
+    // are reporting (operator-declared) and ride regardless of the threshold,
+    // which is why this push sits BEFORE the crossed gate below.
+    if (bucket.direction === "repaid" && declared) res.sheet4.push(row);
+
+    if (!stat.crossed) continue;
+
     const sheet = bucket.direction === "accepted" ? res.sheet1 : res.sheet3;
     sheet.push(row);
 
@@ -484,10 +491,6 @@ export function buildLoansRows(
     // honest rule, stated in the fix report.
     const breachCheck: CheckId =
       bucket.direction === "accepted" ? "loans_cash_acceptance" : "loans_cash_repayment";
-    // C5: sheet 4 receives rows ONLY from a Cash-breach-declared repayment.
-    // That gate is on `ov`, NOT on `stat.crossed`: declaration rows are
-    // reporting (operator-declared) and ride regardless of the threshold.
-    if (bucket.direction === "repaid" && ov === "Cash-breach-declared") res.sheet4.push(row);
 
     // Reviewer fix: a critical s.269SS/T breach is claimed only when THIS
     // bucket crossed the limit on its own (aggregate > LOANS_LIMIT, or a

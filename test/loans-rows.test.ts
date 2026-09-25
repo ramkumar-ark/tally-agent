@@ -195,6 +195,28 @@ describe("buildLoansRows", () => {
     expect(undeclared.sheet4).toEqual([]);
   });
 
+  it("rule 7b: a sub-threshold Cash-breach-declared repayment still rows into sheet4 with no breach finding", () => {
+    const op: LoansOperator = {
+      parties: [{ ledger: "Party Gamma", modeOverrideRepaid: "Cash-breach-declared" }],
+    };
+    const res = buildLoansRows(
+      [ev("20251005", "Party Gamma", "repaid", 15_000, "bank", "repayment")],
+      op,
+      { mastersPresent: true },
+    );
+    // C5: the declaration rides regardless of stat.crossed
+    expect(res.sheet4).toHaveLength(1);
+    expect(res.sheet4[0]).toMatchObject({
+      party: "Party Gamma",
+      amount: 15_000,
+      mode: "Non-A/c payee modes",
+      nonAcMode: "Cash",
+    });
+    // never crossed: no sheet-3 row and no findings
+    expect(res.sheet3).toEqual([]);
+    expect(res.findings).toEqual([]);
+  });
+
   it("rule 8: sheet 2 is operator-specified sums only", () => {
     const op: LoansOperator = {
       parties: [],
