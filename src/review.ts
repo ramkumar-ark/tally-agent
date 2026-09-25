@@ -36,7 +36,7 @@ import { lawFor, type FundKey } from "./pf-esi-law.js";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { readXlsm, writeXlsm } from "./xlsm.js";
-import { readSchema, readHandshake, writeSheetRows, type WinmanRow } from "./winman3cd.js";
+import { readSchema, readHandshake, writeSheetRows, findSheetPart, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
 import { projectLedgerRows, readDayBook, type DayBookInput } from "./tds-daybook.js";
 import {
@@ -504,6 +504,12 @@ export interface Session {
    * never written to.
    */
   write3cdPfEsi(opts: { sourcePath: string; outPath?: string }): Promise<string>;
+  /**
+   * Rewrite the seven clause-31/269ST sheets of a Winman 3CD workbook COPY
+   * from the cached loans review's raw rows (write3cdPfEsi mechanics). Only
+   * non-empty sheets are written; the source is never written to.
+   */
+  write3cdLoans(opts: { sourcePath: string; outPath?: string }): Promise<{ written: string }>;
   /**
    * The cached clause 20(b) rows from the last pfEsiReview, with raw dates —
    * the report writer (tb_write_pf_esi_report) consumes them unchanged; the
@@ -2250,6 +2256,135 @@ export function createSession(
     return target;
   }
 
+  /**
+   * Rewrite the clause-31 / 269ST sheets of a Winman 3CD COPY from the cached
+   * loans review's raw rows (write3cdPfEsi mechanics; design of record §2 of
+   * the loans 269SS/T/ST plan). Unlike PF/ESI's date+number-only sheets, these
+   * carry text columns: the workbook is an on-disk operator artifact and
+   * carries REAL names/addresses/mode tokens — every vault alias in the raw
+ * rows is resolved back through the cached vault snapshot (the 26AS-template
+ * write-side precedent). Only non-empty sheets are written; an empty sheet's
+ * pre-existing machinery rows stay untouched, and a sheet the workbook does
+ * not carry at all is skipped (a workbook with none of the seven refuses).
+ */
+  async function write3cdLoans(opts: {
+    sourcePath: string;
+    outPath?: string;
+  }): Promise<{ written: string }> {
+    if (!lastLoansSheets) {
+      throw new Error("run tb_loans_review first: there are no clause-31/269ST rows to write");
+    }
+    const rowsBySheet = lastLoansSheets;
+    const hasRows = LOANS_SHEET_NAMES.some((n) => (rowsBySheet[n]?.length ?? 0) > 0);
+    if (!hasRows) {
+      throw new Error("run tb_loans_review first: there are no clause-31/269ST rows to write");
+    }
+    // Alias -> real: the raw cache's aliases (party names, PAN/Aadhaar,
+    // addresses) resolve back to the operator's real values here.
+    const realByAlias = new Map<string, string>();
+    for (const { alias, real } of lastLoansVault ?? []) realByAlias.set(alias, real);
+    const demask = (alias: string | undefined): string | undefined => {
+      if (alias === undefined) return undefined;
+      const real = realByAlias.get(alias);
+      return real !== undefined ? real : alias;
+    };
+
+    const pkg = readXlsm(await readFile(opts.sourcePath));
+    // The handshake is the only reliable Winman discriminator; asserting it
+    // (and the loans form id on every writable sheet) refuses anything else
+    // loudly, exactly as write3cdPfEsi does.
+    readHandshake(pkg);
+    const sheetNameOf: Record<LoansSheetName, string> = {
+      sheet1: "Sec.269SS Loans & Deposits",
+      sheet2: "Sec.269SS Specified sums",
+      sheet3: "sec.269T",
+      sheet4: "Sec.269T Repayments Others",
+      sheet5: "Sec.269T Repayments Cheque & DD",
+      sheet6: "Sec.269ST_others",
+      sheet7: "Sec.269ST_Cheque & DD",
+    };
+
+    let out = pkg;
+    let wroteAny = false;
+    for (const name of LOANS_SHEET_NAMES) {
+      const rows = rowsBySheet[name] ?? [];
+      if (rows.length === 0) continue;
+      const sheetName = sheetNameOf[name];
+      // A Winman loans workbook can carry fewer clause-31 sheets than the
+      // review produced rows for; a sheet the workbook does not carry is not
+      // writable, and refusing the whole fill for it would strand every other
+      // sheet's rows. Skip it — the wroteAny guard below still refuses the
+      // degenerate workbook that carries none of the seven sheets at all.
+      if (findSheetPart(pkg, sheetName) === undefined) continue;
+      const schema = readSchema(pkg, sheetName);
+      if (schema.formId !== "269SS/269T_LoansAc/RpinCash") {
+        throw new Error(
+          `${sheetName} belongs to form "${schema.formId || "unknown"}": this tool fills the Winman 269SS/269T/269ST loans workbook`,
+        );
+      }
+      const winmanRows: WinmanRow[] = rows.map((r) => {
+        const cells: WinmanRow = {
+          NAME: { kind: "text", value: demask(r.party) ?? "" },
+          AMOUNT: { kind: "number", value: Math.round(r.amount * 100) / 100 },
+          ...(r.panAlias !== undefined && schema.keys.has("PANORAADHAAR")
+            ? { PANORAADHAAR: { kind: "text", value: demask(r.panAlias) ?? "" } }
+            : {}),
+          ...(r.squaredUp !== undefined && schema.keys.has("SQUAREDUP")
+            ? { SQUAREDUP: { kind: "text", value: r.squaredUp } }
+            : {}),
+          ...(r.maxAmount !== undefined && schema.keys.has("MAXAMOUNT")
+            ? { MAXAMOUNT: { kind: "number", value: Math.round(r.maxAmount * 100) / 100 } }
+            : {}),
+          ...(r.mode !== undefined && schema.keys.has("RECEIPT")
+            ? { RECEIPT: { kind: "text", value: r.mode } }
+            : {}),
+          ...(r.nonAcMode !== undefined && schema.keys.has("RECIEPTNONAC")
+            ? { RECIEPTNONAC: { kind: "text", value: r.nonAcMode } }
+            : {}),
+          ...(r.type !== undefined && schema.keys.has("TYPEOFTRANSACTION")
+            ? { TYPEOFTRANSACTION: { kind: "text", value: r.type } }
+            : {}),
+          ...(r.date !== undefined && schema.keys.has("DATE")
+            ? { DATE: { kind: "date", ymd: String(r.date) } }
+            : {}),
+          ...(r.nature !== undefined && schema.keys.has("NATUREOFTRANSACTION")
+            ? { NATUREOFTRANSACTION: { kind: "text", value: r.nature } }
+            : {}),
+          ...(r.bearer !== undefined && schema.keys.has("BEARER")
+            ? { BEARER: { kind: "text", value: r.bearer } }
+            : {}),
+          ...(r.address !== undefined && schema.keys.has("ADDRESS")
+            ? { ADDRESS: { kind: "text", value: demask(r.address) ?? "" } }
+            : {}),
+        };
+        return cells;
+      });
+      out = writeSheetRows(out, sheetName, winmanRows);
+      wroteAny = true;
+    }
+    if (!wroteAny) {
+      throw new Error("the workbook carries none of the Sec.269SS/269T/269ST sheets this tool fills");
+    }
+
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const stem = basename(opts.sourcePath, extname(opts.sourcePath));
+    if (!opts.outPath) throw new Error("no output location for the filled workbook was given");
+    const target =
+      extname(opts.outPath).toLowerCase() === ".xlsm"
+        ? opts.outPath
+        : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    // Copying onto the source would destroy the operator's template before
+    // its contents were used; both entries are resolved through their real
+    // paths where they exist so a dot-dotted outPath cannot slip past.
+    const sourceId = await realPathId(opts.sourcePath);
+    if (sourceId === (await realPathId(target))) {
+      throw new Error("the outPath target resolves to the source workbook itself; write the copy somewhere else");
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, writeXlsm(out));
+    return { written: target };
+  }
+
 /**
  * An identity for a possibly-not-yet-existing path: its realpath when the
  * entry is there, else its parent directory's realpath joined with its
@@ -2386,5 +2521,6 @@ async function realPathId(p: string): Promise<string> {
       lastLoansSheets
         ? { sheets: lastLoansSheets, vault: lastLoansVault ?? [] }
         : undefined,
+    write3cdLoans,
   };
 }

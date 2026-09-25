@@ -255,6 +255,21 @@ function resolveSheetPart(pkg: XlsmPackage, sheetName: string): string {
   throw new Error(`${NOT_WINMAN}: no sheet named "${sheetName}"`);
 }
 
+/**
+ * Resolve a sheet name to its worksheet part without throwing: `undefined`
+ * when the workbook does not carry a writable sheet of that name (absent from
+ * workbook.xml, or listed with a rels target that resolves to nothing). The
+ * clause-31 writer uses this to skip cached rows whose sheet the operator's
+ * workbook does not carry, instead of refusing the whole fill.
+ */
+export function findSheetPart(pkg: XlsmPackage, sheetName: string): string | undefined {
+  try {
+    return resolveSheetPart(pkg, sheetName);
+  } catch {
+    return undefined;
+  }
+}
+
 function sharedStringsOf(pkg: XlsmPackage): string[] {
   const e = pkg.entries.find((x) => x.name === "xl/sharedStrings.xml");
   return e ? readSharedStrings(partText(pkg, e.name)) : [];
