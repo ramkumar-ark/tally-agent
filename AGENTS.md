@@ -483,6 +483,32 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   in one afternoon); checks 009/010 extend `AS26_CHECK_ORDINAL` (frozen table
   in the design doc §6 was not renumbered — new checks are appended).
 
+### FD auto-assignment (addendum 3/3a, 2026-09-26, `src/as26.ts`)
+
+- The Bank Interest sheet's FD column is **optional**; FD ledgers are
+  auto-detected (`isFdLedgerName`: ancestry hits canonical `deposits
+  (asset)` — only when ledger masters exist, `masterPairs.length > 0` in
+  `as26Review` — AND the name carries whole-token FD/F.D/F-D/FIXED+
+  DEPOSIT; EMD/security/retention never). Assignment: distinctive token or
+  short form of exactly ONE listed bank → name-match; else exactly one
+  bank listed → only-bank; else unassigned ⇒ one review finding
+  AS26-011 `fd_ledgers_unassigned` (count + credit total via `money()`,
+  names only in the workbook "FD ledger auto-assign" sheet).
+- Short forms = curated rows (`BANK_CURATED_SHORTFORMS`, extend by adding a
+  row; canonical-key match — a branch suffix in the 26AS name breaks the
+  curated hit) + derived initialisms over tokens where **trailing generic
+  words after the last "of" are stripped while keeping the first tail word**
+  (so "United Bank of India" keeps UBI — stripping its INDIA made the
+  derived UBI a UB and mis-assigned; and a grand filter is pointless —
+  initial of every word, words-but-"of", words-before-"of"). Generic words
+  (`BANK_GENERIC_WORDS`) include city names; extend on misfires.
+- Matching is whole-token; a run of single-letter tokens joins, so "U.B.I"
+  tokenises as U/B/I and still matches UBI (initials are punctuated).
+  Two-letter forms are standalone tokens only — inside words never match.
+  A short form fitting 2+ listed banks matches none (unassigned).
+- Everything 3a-derived is simulated in tests: no real-data run — counts/
+  amounts only on live verification.
+
 ## Masking sharp edges (whole-token substitution, 2026-09-23)
 
 - `maskKnownNames`, `demaskText` and `maskFinding`'s ledger substitution in
