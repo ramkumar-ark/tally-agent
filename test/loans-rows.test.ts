@@ -121,7 +121,7 @@ describe("buildLoansRows", () => {
     expect(bare.sheet1).toEqual([]);
     expect(bare.findings.map((f) => f.check)).toContain("loans_mode_unknown");
     const f = bare.findings.find((x) => x.check === "loans_mode_unknown");
-    expect(f?.severity).toBe("warning");
+    expect(f?.severity).toBe("review");
     expect(f?.ledger).toBe("Party Beta");
 
     const overridden = buildLoansRows(
@@ -219,6 +219,7 @@ describe("buildLoansRows", () => {
     const splits = res.findings.filter((f) => f.check === "loans_splitting_suspect");
     expect(splits).toHaveLength(1);
     expect(splits.map((f) => f.amount)).toEqual([30_000]);
+    expect(splits[0]?.severity).toBe("review");
     // the 15-Apr accepted pair is the only multi-event (party, date, direction)
     const f = splits[0]!;
     expect(f.detail).toContain("2");
@@ -226,6 +227,36 @@ describe("buildLoansRows", () => {
     expect(f.detail).toContain("15-Apr-2025");
     // bucket aggregate is the honest sum (3 x 15,000 accepted), advisory never shrinks it
     expect(res.sheet1[0]?.amount).toBe(45_000);
+  });
+
+  it("rule 2 strict: exactly 20,000 is no breach; 20,001 crosses (s.269SS 'exceeds')", () => {
+    const exact = buildLoansRows(
+      [ev("20250415", "Party Alpha", "accepted", 20_000, "cash")],
+      EMPTY_LOANS_OPERATOR,
+      { mastersPresent: true },
+    );
+    expect(exact.sheet1).toEqual([]);
+    expect(exact.findings.filter((f) => f.check === "loans_cash_acceptance")).toHaveLength(0);
+
+    const over = buildLoansRows(
+      [ev("20250415", "Party Alpha", "accepted", 20_001, "cash")],
+      EMPTY_LOANS_OPERATOR,
+      { mastersPresent: true },
+    );
+    expect(over.sheet1).toHaveLength(1);
+    expect(over.findings.map((f) => f.check)).toContain("loans_cash_acceptance");
+
+    // two sub-limit events still caught by the running balance > 20k test
+    const split = buildLoansRows(
+      [
+        ev("20250501", "Party Beta", "accepted", 19_999, "cash"),
+        ev("20250502", "Party Beta", "accepted", 19_999, "cash"),
+      ],
+      EMPTY_LOANS_OPERATOR,
+      { mastersPresent: true },
+    );
+    expect(split.sheet1).toHaveLength(1);
+    expect(split.sheet1[0]?.amount).toBe(39_998);
   });
 
   it("C7: mastersPresent=false fires loans_max_amount_estimated once per party with movement", () => {

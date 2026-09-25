@@ -239,14 +239,16 @@ export interface LoansBooksResult {
 const ZERO = 0.005;
 
 /**
- * s.269SS/T uses "of Rs. 20,000 or more", so the crossing test is >= 20,000
- * (single event) or a running balance strictly above 20,000 (mirrors the
- * 269SS outstanding test), never the brief's literal `>` typo.
+ * s.269SS/T apply when the amount EXCEEDS twenty thousand rupees — strictly
+ * greater (captain ruling 2026-09-25; exactly 20,000 is not a breach; two
+ * 19,999s are still caught by the running balance > 20,000 test). Strictly
+ * greater stays correct even if a shared helper ever meets 269ST, whose
+ * statute ("Rs 2,00,000 or more") is >= and stays ≥ in its owner task.
  */
 const crossedTest = (orderedByDate: LoanEvent[]): boolean => {
   let balance = 0;
   for (const x of orderedByDate) {
-    if (x.amount >= LOANS_LIMIT) return true;
+    if (x.amount > LOANS_LIMIT) return true;
     balance += x.direction === "accepted" ? x.amount : -x.amount;
     if (balance > LOANS_LIMIT + ZERO) return true;
   }
@@ -418,7 +420,7 @@ export function buildLoansRows(
       )) {
         res.findings.push(finding(
           "loans_mode_unknown",
-          "warning",
+          "review",
           bucket.party,
           stat.journalAmount,
           `Loan movement of ${money(stat.journalAmount)} for ${bucket.party} has no cash or bank ` +
@@ -472,7 +474,7 @@ export function buildLoansRows(
       if (op?.exempt) continue;
       res.findings.push(finding(
         "loans_max_amount_estimated",
-        "warning",
+        "review",
         stat.party,
         stat.maxAmount,
         `Opening balance unavailable, so the peak running amount of ${money(stat.maxAmount)} for ` +
@@ -492,7 +494,7 @@ export function buildLoansRows(
     splitByPartyDate.add(`${key}|${s.date}|${s.direction}`);
     res.findings.push(finding(
       "loans_splitting_suspect",
-      "warning",
+      "review",
       s.party,
       s.total,
       `${moneyCount(s.count)} same-direction loan events for ${s.party} on ${displayDate(s.date)} ` +
