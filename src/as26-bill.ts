@@ -32,6 +32,20 @@ export function partyTxsOf(file: As26File, kind: As26Kind, nameKey: string): As2
 
 const normRef = (x: unknown): string => String(x ?? "").trim().toLowerCase();
 
+/**
+ * Lookup-only section normalizer (I-1): real TRACES writes rent as `194I(a)`
+ * / `194I(b)` (no hyphen, any case), while `src/tds-law.ts` only knows
+ * `194-I(a)` / `194-I(b)`. Everything else is returned unchanged, so a
+ * section absent from the law table (`194R`, `206CL`) honestly stays
+ * unmatched and the link falls to approximate. The displayed section is
+ * always the row's original string — this only feeds `lawOf`.
+ */
+const RENT_SECTION = /^194\s*-?\s*i\s*\(\s*([ab])\s*\)$/i;
+export function normalizeAs26Section(section: string): string {
+  const m = RENT_SECTION.exec(section.trim());
+  return m ? `194-I(${m[1].toLowerCase()})` : section;
+}
+
 const latestUpdate = (best: BooksSale | null, s: BooksSale): BooksSale =>
   !best || s.date > best.date ? s : best;
 
@@ -51,7 +65,7 @@ export function linkInvoice(
     const hit = sales.find((s) => s.ref != null && normRef(s.ref) === ref);
     if (hit) return { sale: hit, basis: "reference" };
   }
-  const law = item.section ? lawOf(item.section) : null;
+  const law = item.section ? lawOf(normalizeAs26Section(item.section)) : null;
   if (law) {
     const rate = law.rates.standard;
     let hit: BooksSale | null = null;

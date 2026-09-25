@@ -390,6 +390,8 @@ describe("analyzeAs26 — findings 001–008", () => {
     expect(f.severity).toBe("warning");
     expect(f.amount).toBe(7200);
     expect(f.detail).toMatch(/books taxable of/);
+    expect(f.detail).toMatch(/Bill-level value rows, where present, carry the per-invoice detail\./);
+    expect(f.detail).not.toMatch(/Bill-level rows carry the detail/);
     expect(f.detail).not.toMatch(/GST-inclusive/i);
   });
   it("003 stays silent when the taxable comparison matches within tolerance", () => {

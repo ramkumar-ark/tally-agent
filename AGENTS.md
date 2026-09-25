@@ -357,10 +357,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   (`Amount Paid / Credited(Rs.)` ≠ `amountpaidcredited`); first bind wins,
   which is also what keeps `GROSSRECEIPT` from stealing its
   `GROSSRECEIPTSASPER26AS` column.
-- check 003's captain-deviation wording: when only the GST-inclusive
-  interpretation matches, the finding detail says "matched on the
-  GST-inclusive value" (also in the written report), and it fires only when
-  BOTH interpretations miss by > `AS26_VALUE_TOLERANCE` (1000).
+- check 003 is **taxable-only** since D3: `assessable_value_mismatch` compares
+  26AS gross against books taxable (Sales-Accounts-root debit magnitudes) with
+  `AS26_VALUE_TOLERANCE` (1000); the GST-inclusive reading was dropped from the
+  check and re-homesteaded on the Deductors sheet. Its detail ends with the
+  honest pointer "Bill-level value rows, where present, carry the per-invoice
+  detail." — never promise a sheet that may be empty.
 - `matchParties` is mapping-only (captain deviation): no canonical
   auto-match exists anymore — unmapped/ambiguous pairs become `mapping_gap`
   findings; `config/as26-map.json` follows the overrides-file semantics
@@ -423,6 +425,34 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   cannot happen and stays refused. `maskReconMatch` masks `ledgerNames`
   element-wise as well as `ledgerName`, so the original-case array never
   escapes through the `...m` spread.
+- **Bill-level drill-down shipped 2026-09-24** (`src/as26-bill.ts`, pure;
+  wiring/masking in `src/review.ts`; three sheets in `src/report.ts`; design
+  doc §11):
+  - **Section strings are normalized before `lawOf`.** TRACES writes rent as
+    `194I(a)`/`194I(b)`; `normalizeAs26Section` maps those onto
+    `194-I(a)`/`194-I(b)` (case/hyphen/space tolerant) at the `linkInvoice`
+    lookup only. Every other string passes through unchanged, so sections
+    absent from the law table (`194R`, `206CL`) honestly fall to
+    `approximate`. The row always stores/emits the ORIGINAL section — never
+    rewrite a displayed section.
+  - **`linkBasis` is the four-step A2 scheme** `reference` → `taxable-rate`
+    → `invoice-rate` → `approximate` (no sale ⇒ `none`); rate steps use
+    `lawOf(section).rates.standard` (a decimal) and are date-gated. The
+    `Bill value mismatch` sheet's V rows are emitted ONLY for non-approximate
+    links whose delta exceeds `AS26_VALUE_TOLERANCE`; an approximate link
+    never produces a V row.
+  - **The day-book channel has no bill reference**: `BILLALLOCATIONS.LIST`
+    NAME is empty in the reviewed company and `parseVoucherRows` drops bill
+    allocations anyway, while `projectLedgerRows` hard-sets `reference: ""`.
+    Only the live channel surfaces `LedgerVoucherRow.reference` (carried into
+    `BooksDeduction.reference`), so linkage step 1 fires live only; steps 2–4
+    carry a `dayBookPath` run. Documented gap, no code change (M-5).
+  - **The three new sheets exist with ids matching the pointers**: `Books
+    not in 26AS` (`B1..`), `26AS unmatched` (`D1..`), `Bill value mismatch`
+    (`V1..`), each with `link basis` + `window` columns; combination-consumed
+    entries are absent from the two unmatched sheets. Finding details append
+    `see <sheet> rows <ids>.` AFTER masking (001/008→B, 002/005→D, 007→B+D,
+    003→V) and omit the pointer when the party has no such rows.
 
 ## Masking sharp edges (whole-token substitution, 2026-09-23)
 

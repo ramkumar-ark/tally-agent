@@ -485,7 +485,7 @@ export function analyzeAs26(
         push(
           "assessable_value_mismatch", "warning", match.ledgerName, match.kind, summary?.section ?? null,
           dTok,
-          `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)}: the books taxable is out by ${money(dTok)} (tolerance ${money(AS26_VALUE_TOLERANCE)}). Bill-level rows carry the detail.`,
+          `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)}: the books taxable is out by ${money(dTok)} (tolerance ${money(AS26_VALUE_TOLERANCE)}). Bill-level value rows, where present, carry the per-invoice detail.`,
         );
       }
     }

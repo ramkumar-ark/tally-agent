@@ -37,7 +37,7 @@ Out of scope (unchanged from the plan): two-FY netting, per-section rate compari
 | Symbol | Value | Meaning |
 |---|---|---|
 | `AS26_TAX_TOLERANCE` | 1.00 | rupee tolerance on paired tax amounts |
-| `AS26_VALUE_TOLERANCE` | 1,000.00 | check 003's value deltas, applied to both GST interpretations (captain-set) |
+| `AS26_VALUE_TOLERANCE` | 1,000.00 | check 003's value deltas, taxable-only since D3 (captain-set) |
 | `ZERO_TOLERANCE` | 0.005 | export self-consistency |
 | `COMBINATION_MAX_SIZE` | 4 | max parts in a subset combination |
 | `COMBINATION_MAX_ITEMS` | 40 | per-side unmatched cap beyond which the search is skipped |
@@ -83,4 +83,102 @@ A tax edge may be explained by a bounded subset of the other side's unmatched ro
 6. Both loaders share the overrides-file semantics: missing → empty map + warn; malformed input / duplicate ledger-or-as26Name key / blank field → throw citing the NUMBER only (JSON entry index, template Excel ROW number), never a name.
 
 Operator-facing walkthrough: `docs/operator/26as-mapping-template.md`.
+
+## 11. Bill-level drill-down (A2/A5, shipped 2026-09-24)
+
+Tax-level reconciliation stays as above; this layer adds per-invoice evidence
+behind each finding. `src/as26-bill.ts` is pure and masking-free; the session
+wiring and masking are in `src/review.ts`; the three sheets are written by
+`src/report.ts`.
+
+### 11.1 D2 — four-step invoice linkage
+
+A 26AS transaction links to one books sale drawn from the party's whole mapped
+ledger group (`match.ledgerKeys`). First hit wins, and every row carries its
+`linkBasis`:
+
+1. `reference` — the 26AS transaction's reference, or the books deduction's
+   surfaced `reference`, canonical-matches a sale's invoice ref (any date).
+2. `taxable-rate` — `round2(sale.taxable × rate)` is within
+   `AS26_TAX_TOLERANCE` of the transaction tax, over sales on or before the
+   item date.
+3. `invoice-rate` — the same over `sale.gross` (the GST-inclusive invoice
+   value).
+4. `approximate` — otherwise the latest sale on or before the item date; no
+   sale at all ⇒ `none` (and `linked` is null).
+
+`rate` is `lawOf(section).rates.standard`, a decimal (e.g. 0.02) from
+`src/tds-law.ts`. Real TRACES writes rent as `194I(a)`/`194I(b)` (no hyphen),
+which `lawOf` does not know, so `linkInvoice` first applies a minimal pure
+normalizer, `normalizeAs26Section` (`194I(a)` → `194-I(a)`, tolerant of case,
+optional hyphen and surrounding spaces). Every other section string is
+returned unchanged, so a section absent from the law table (`194R`, `206CL`)
+honestly stays unmatched and the link falls through to `approximate` — no
+key-hacking. The row's stored and displayed `section` is always the original
+string; normalization is lookup-only.
+
+### 11.2 D2 investigation — why step 1 rarely fires from the day book
+
+Requested by the firstmate amendment, the reference channel was traced end to
+end:
+
+- The raw day-book export carries a `BILLALLOCATIONS.LIST` per voucher entry,
+  but its `NAME` is empty in the reviewed company, and the gateway's
+  `parseVoucherRows` (`src/downstream.ts`) does not project bill allocations
+  at all — it reads only `LEDGERNAME`/`AMOUNT` per entry.
+- The day-book channel hard-sets `reference: ""` in `projectLedgerRows`
+  (`src/tds-daybook.ts`), so a `BooksDeduction.reference` built from a day
+  book is always null.
+- The live channel's `ledgerVoucherRows` does surface
+  `LedgerVoucherRow.reference` (`src/downstream.ts`), and `deductionEvents`
+  carries it additively into `BooksDeduction.reference`.
+
+Net effect: linkage step 1 can only fire where a reference is already
+surfaced (the live channel); on a `dayBookPath` run steps 2–4 carry every
+link. This gap is a documented limitation, not a code defect (M-5).
+
+### 11.3 D3 — check 003 compares taxable only
+
+`assessable_value_mismatch` compares 26AS gross (`summary.gross`) against
+books taxable (Sales-Accounts-root debit magnitudes) with
+`AS26_VALUE_TOLERANCE` (1,000). The earlier GST-inclusive reading was dropped
+from the check and re-homesteaded on the Deductors sheet (`gross incl GST` /
+`delta value`). The finding detail now ends with the honest pointer
+"Bill-level value rows, where present, carry the per-invoice detail." — value
+rows are emitted only for non-approximate links, so the sentence never
+promises a sheet that may be empty.
+
+### 11.4 D4 — the three drill-down sheets
+
+`writeAs26Report` writes three sheets alongside the existing four, one per
+`billRows` `sheetId`:
+
+- `Books not in 26AS` — ids `B1..Bn`; unmatched books deductions only
+  (combination-consumed entries were already removed by `reconcileParty`).
+  Columns include `link basis` and `window`.
+- `26AS unmatched` — ids `D1..Dn`; unmatched 26AS transactions (combination
+  parts likewise excluded). Columns include `link basis` and `window`.
+- `Bill value mismatch` — ids `V1..Vn`; one row per non-approximate 26AS
+  transaction of a matched party whose `delta` (26AS amount − linked invoice
+  taxable) exceeds `AS26_VALUE_TOLERANCE` in magnitude.
+
+`window` reads `pre-period`/`post-period` and is blank when in-period. Rows
+arrive masked; `writeWorkbook` de-masks on disk only.
+
+### 11.5 D5 — finding pointers
+
+After every finding detail has passed `maskKnownNames`, the session appends a
+pointer sentence naming that party's drill-down rows, e.g. `see Books not in
+26AS rows B1, B2.` Mappings: 001/008 → B; 002/005 → D (005 restricted to
+out-of-window D ids); 007 → B and D; 003 → V. When a party has no rows of the
+named kind, no pointer is appended. The appending happens after masking so
+row ids can never be re-masked.
+
+### 11.6 D6 — masking boundary unchanged
+
+All masking of bill rows, pointers and refs happens in `src/review.ts` only;
+`src/as26-bill.ts` and `src/report.ts` stay masking-free. The workbook is
+de-masked on disk via `writeWorkbook` + vault, exactly as the rest of the 26AS
+report, and party labels on the sheets equal the findings' masked labels
+(R-P-5).
 

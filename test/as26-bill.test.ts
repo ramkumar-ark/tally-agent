@@ -71,9 +71,23 @@ describe("reconcileParty items carry their source indexes", () => {
   });
 });
 
-import { linkInvoice, buildBillRows, partyTxsOf, type BillRow } from "../src/as26-bill.js";
+import { linkInvoice, buildBillRows, partyTxsOf, normalizeAs26Section, type BillRow } from "../src/as26-bill.js";
 import { analyzeAs26, round2 } from "../src/as26.js";
 import type { As26File } from "../src/as26-file.js";
+
+describe("normalizeAs26Section (I-1)", () => {
+  it("maps the TRACES rent spellings onto the law-table keys", () => {
+    expect(normalizeAs26Section("194I(a)")).toBe("194-I(a)");
+    expect(normalizeAs26Section("194i(B)")).toBe("194-I(b)");
+    expect(normalizeAs26Section(" 194-I(a) ")).toBe("194-I(a)");
+    expect(normalizeAs26Section("194-I(b)")).toBe("194-I(b)");
+  });
+  it("leaves every other section unchanged", () => {
+    expect(normalizeAs26Section("194R")).toBe("194R");
+    expect(normalizeAs26Section("206CL")).toBe("206CL");
+    expect(normalizeAs26Section("194C")).toBe("194C");
+  });
+});
 
 describe("linkInvoice (A2 four-step linkage)", () => {
   const ALPHA = canonicalKey("Alpha Traders");
@@ -94,6 +108,17 @@ describe("linkInvoice (A2 four-step linkage)", () => {
     const link = linkInvoice([s1], { date: "20250701", tax: 2000, reference: null, section: "194C" });
     expect(link?.basis).toBe("taxable-rate");
     expect(link?.sale.ref).toBe("CUST-REF-1");
+  });
+  it("(b2) a TRACES `194I(a)` section normalizes so rent rate-links, not approximates", () => {
+    // 194-I(a) rate 2%: taxable 100000 -> 2000 matches the tax within tolerance.
+    const rent = sale("20250415", null, 100000, 118000);
+    const link = linkInvoice([rent], { date: "20250701", tax: 2000, reference: null, section: "194I(a)" });
+    expect(link?.basis).toBe("taxable-rate");
+  });
+  it("a section absent from the law table honestly falls to approximate", () => {
+    const s = sale("20250415", null, 100000, 118000);
+    const link = linkInvoice([s], { date: "20250701", tax: 2000, reference: null, section: "194R" });
+    expect(link?.basis).toBe("approximate");
   });
   it("(c) an invoice-rate hit when taxable x rate does not match the tax", () => {
     // taxable 90000 -> 1800 (no), gross 100000 -> 2000 (yes)
