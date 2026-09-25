@@ -32,6 +32,7 @@ import {
   writeDepreciationReport,
   writeFaRegisterReport,
   writeGstReport,
+  writeGst44Report,
   writeLedgerReport,
   writeReport,
   writeAs26Report,
@@ -846,6 +847,45 @@ export function registerTools(
       });
       await audit("tb_write_3cd_gst44", { sourcePath: args.sourcePath, outPath: args.outPath ?? null }, 0, 0);
       return JSON.stringify({ outPath }, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_gst44_report",
+    "Write the clause 44 review workbook to disk: a Findings sheet, the Clause 44 break-up " +
+      "matrix (capital/revenue rows split by supplier GST status - what Winman will import) and " +
+      "the per-party long format (Party | Bucket | Capital | Revenue) so each bucket can be traced " +
+      "to ledgers. Real names are restored on write; compose nothing by hand - it is generated " +
+      "from the last tb_gst44_review.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+    },
+    async (args) => {
+      if (!lastGst44) throw new Error("run tb_gst44_review first: there are no clause 44 findings to write");
+      const paths = await writeGst44Report({
+        reportDir: cfg.reportDir,
+        result: {
+          company: args.company ?? lastGst44.company,
+          fromDate: lastGst44.fromDate,
+          toDate: lastGst44.toDate,
+          findings: lastGst44.findings,
+          // The matrix cells come from the cached raw rows; the review
+          // result's own rows are display-shaped for the model.
+          rows: session.gst44Rows() ?? [],
+          parties: lastGst44.parties,
+        },
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_gst44_report",
+        { company: args.company ?? lastGst44.company ?? null },
+        lastGst44.findings.length,
+        maskedCount(lastGst44.findings),
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
     },
   );
 

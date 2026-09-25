@@ -294,6 +294,7 @@ describe("no secret leaves the gateway", () => {
       "tb_write_3cd_pf_esi",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
+      "tb_write_gst44_report",
       "tb_write_gst44_template",
       "tb_write_gst_report",
       "tb_write_ledger_report",

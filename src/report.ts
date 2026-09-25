@@ -5,14 +5,25 @@ import type { Finding, Severity } from "./types.js";
 import { count, money, displayDate } from "./format.js";
 import { round2, type BlockResult, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
 import { AS26_VALUE_TOLERANCE } from "./as26.js";
-import type { TdsMaskedFinding as TdsCsvFinding, DepMaskedFinding, PfEsiMaskedFinding, As26ReviewResult } from "./review.js";
+import type {
+  TdsMaskedFinding as TdsCsvFinding,
+  DepMaskedFinding,
+  PfEsiMaskedFinding,
+  As26ReviewResult,
+  Gst44MaskedFinding,
+  Gst44MaskedParty,
+} from "./review.js";
 import type { Clause20bRow } from "./pf-esi.js";
+import type { Gst44Row } from "./gst44.js";
+import { GST44_BUCKETS } from "./gst44-law.js";
 import type { Vault } from "./vault.js";
 import { LOANS_SHEET_LABELS, LOANS_SHEET_NAMES, type LoansSheetName, type LoansSheetRow } from "./loans.js";
 
 /**
  * Structural shape both the trial-balance and the GST findings CSV need. GST
- * findings carry no side/expected and extra fields are not written.
+ * findings carry no side/expected and extra fields are not written. Amount is
+ * nullable because the gst44 unknown-override warning carries none; such a row
+ * reads an empty amount field everywhere findings render.
  */
 export interface CsvFinding {
   id: string;
@@ -20,7 +31,7 @@ export interface CsvFinding {
   severity: Severity;
   ledger: string;
   group: string;
-  amount: number;
+  amount: number | null;
   side?: string | null;
   expected?: string | null;
   detail: string;
@@ -60,7 +71,7 @@ export function findingsCsv(findings: CsvFinding[], vault: Vault): string {
       f.severity,
       demaskText(f.ledger, vault),
       f.group,
-      f.amount.toFixed(2),
+      f.amount === null ? "" : f.amount.toFixed(2),
       f.side ?? "",
       f.expected ?? "",
       demaskText(f.detail, vault),
@@ -1110,6 +1121,91 @@ export async function writeLoansReport(opts: {
     reportDir: opts.reportDir,
     fileName: `loans-review-${stem}.xlsx`,
     sheets: loansSheets(opts.result),
+    vault: opts.vault,
+  });
+  return { workbookPath };
+}
+
+/**
+ * The clause 44 review as the workbook writer consumes it: findings and
+ * parties already masked (de-masking is writeWorkbook's), the cached raw
+ * clause 44 rows from session.gst44Rows() — the Winman RowKeys keep the
+ * numbers exact while the result's own rows are display-shaped.
+ */
+export interface Gst44ReportResult {
+  company?: string;
+  fromDate?: string;
+  toDate?: string;
+  findings: Gst44MaskedFinding[];
+  rows: Gst44Row[];
+  parties: Gst44MaskedParty[];
+}
+
+/**
+ * The clause 44 working papers (R-R-4): a Findings sheet, the Clause 44
+ * matrix mirroring the Winman sheet's two label rows and four bucket columns,
+ * and the per-party detail as a long-format Party|Bucket|Capital|Revenue
+ * sheet. Masked in, masked out: writeWorkbook de-masks.
+ */
+export function gst44Sheets(result: Gst44ReportResult): Sheet[] {
+  const findings = findingsSheet(
+    result.findings.map((f) => ({
+      id: f.id, check: f.check, severity: f.severity,
+      ledger: f.ledger, group: f.group, amount: f.amount, detail: f.detail,
+    })),
+  );
+  const clause: Sheet = {
+    name: "Clause 44",
+    title: [
+      `Break-up of total expenditure, ${displayDate(result.fromDate ?? "")} to ${displayDate(result.toDate ?? "")}`,
+      `What Winman will import (C5): totals are the attributed sums; unattributed expenditure is a finding, never spread.`,
+      `Rows: ${result.rows.length}; total expenditure: ${money(GST44_ROWS_TOTAL(result.rows))}.`,
+    ],
+    columns: [
+      textCol("Row", 22),
+      moneyCol("Total expenditure", 18),
+      moneyCol("Exempt (registered)", 18),
+      moneyCol("Composition", 16),
+      moneyCol("Others (registered)", 18),
+      moneyCol("Unregistered", 16),
+    ],
+    rows: result.rows.map((r) => [r.label, r.total, r.exempt, r.composition, r.others, r.unregistered]),
+  };
+  const partyRows: Array<[string, string, number, number]> = [];
+  for (const p of result.parties) {
+    for (const b of GST44_BUCKETS) {
+      if (p.capital[b] || p.revenue[b]) partyRows.push([p.party, b, p.capital[b], p.revenue[b]]);
+    }
+  }
+  const parties: Sheet = {
+    name: "Parties",
+    title: ["Per-party detail; de-masked on disk only. 'ambiguous' parties (see Findings) default to the exempt column (C6)."],
+    columns: [textCol("Party", 30), textCol("Bucket", 14), moneyCol("Capital", 14), moneyCol("Revenue", 14)],
+    rows: partyRows,
+  };
+  return [findings, clause, parties];
+}
+
+/** The attribute a total can only be: the attributed sum itself (C5). */
+function GST44_ROWS_TOTAL(rows: Gst44Row[]): number {
+  return round2(rows.reduce((s, r) => s + r.total, 0));
+}
+
+/**
+ * The clause 44 workbook (R-R-4): Findings, the Clause 44 matrix and the
+ * Parties detail, de-masked on the way to disk by writeWorkbook.
+ */
+export async function writeGst44Report(opts: {
+  reportDir: string;
+  result: Gst44ReportResult;
+  vault: Vault;
+}): Promise<{ workbookPath: string }> {
+  const stem = `${slug(opts.result.company ?? "gst44")}-${opts.result.fromDate ?? ""}-${opts.result.toDate ?? ""}`;
+  const workbookPath = join(opts.reportDir, `gst44-review-${stem}.xlsx`);
+  await writeWorkbook({
+    reportDir: opts.reportDir,
+    fileName: `gst44-review-${stem}.xlsx`,
+    sheets: gst44Sheets(opts.result),
     vault: opts.vault,
   });
   return { workbookPath };
