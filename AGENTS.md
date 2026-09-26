@@ -681,3 +681,27 @@ When updating this file, preserve this bar for all agents and keep entries conci
   carry the derivation note. The drop is the expected direction (many masters
   carry a GSTIN but no PAN); the residual 206AA findings are masters with
   neither.
+
+## Sharp edges found implementing grouped 26AS matching + addendum 5a (2026-09-26)
+
+- **The day-book channel has no `d.reference`** — invoice ties for the
+  ref-group stage (`reconcileParty`, addendum 5) must be recomputed with
+  `linkInvoice` (moved into `src/as26.ts`, re-exported by `src/as26-bill.ts`;
+  circular dep now flows one way). Key the groups by `normRef(link.sale.ref)`;
+  approximate-basis links count (the live 194C party's whole tie is
+  approximate). The workbook "linked invoice ref" column and the engine
+  agree by construction.
+- **Grouped fit is unique-both-ways or nothing**: exactly one group per
+  target AND one target per group; more fits ⇒ `ambiguous`, item stays
+  unmatched. Combined with the bounded subset search, 11+1 book-journals
+  against one 26AS row is the canonical case (B1–B11/D1).
+- `as26Review`'s 5th argument is the MAP PATH STRING, not a parsed map.
+- Findings/billRows/byParty party labels are the **26AS name masked with
+  `vault.pseudonym(_, "debtor")`** everywhere consistently (findings, bill
+  rows, fd20, byLedgerParty) — mixing roles breaks the sheet row-id pointer
+  join. Party cells no longer show the ledger join.
+- Bank parties report ONE books-tax channel (the operator-mapped events),
+  both in check 009 and on the Deductors sheet; value delta picks the
+  closest basis (taxable / GST-inclusive / interest) and names it.
+- The bounded search's skip bound is 40 unmatched items per side; the skip
+  is stated in plain words on the party's findings (append after masking).

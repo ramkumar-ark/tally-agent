@@ -1119,7 +1119,7 @@ export function createSession(
       });
       return {
         ...f,
-        party: pseudoName(f.party),
+        party: vault.pseudonym(f.party, "debtor"),
         detail: scrubSecrets(maskKnownNames(f.detail, vault)),
         ...(schedule ? { schedule } : {}),
       };
@@ -1181,20 +1181,33 @@ export function createSession(
 
     // --- bill rows (masking R-P-5): the engine rows pseudonymed like the
     // findings, so every row's party label equals its party's finding label
-    // and the row-id pointers below line up ---
-    const partyLabel = new Map(result.recon.map((r) => [r.match.as26NameKey, pseudoName(r.match.ledgerName)]));
-    const partyIndex = new Map(result.recon.map((r, i) => [r.match.as26NameKey, i]));
+    // and the row-id pointers below line up. Party labels are the masked
+    // 26AS deductor names (addendum 5a); booksded rows key on a ledger key,
+    // so canonic both label maps and look up either. ---
+    const byLedgerParty = new Map<string, string>(); // canonical ledger key → masked 26AS name
+    const ledgerOrder = new Map<string, number>();   // canonical ledger key → recon index (min)
+    const partyIndex = new Map<string, number>();    // as26NameKey → recon index
+    const partyLabel = new Map<string, string>();    // as26NameKey → masked 26AS name
+    recon.forEach((m, i) => {
+      if (!partyIndex.has(m.match.as26NameKey)) partyIndex.set(m.match.as26NameKey, i);
+      if (!partyLabel.has(m.match.as26NameKey)) partyLabel.set(m.match.as26NameKey, m.match.as26Name);
+      for (const k of m.match.ledgerKeys) {
+        byLedgerParty.set(k, m.match.as26Name);
+        const prev = ledgerOrder.get(k);
+        if (prev === undefined || i < prev) ledgerOrder.set(k, i);
+      }
+    });
     const KIND_ORDER: Record<BillKind, number> = { booksded: 0, as26: 1, value: 2 };
     const sortedRows = [...billRowsEngine].sort((a, b) => {
-      const pa = partyIndex.get(a.nameKey) ?? Number.MAX_SAFE_INTEGER;
-      const pb = partyIndex.get(b.nameKey) ?? Number.MAX_SAFE_INTEGER;
-      if (pa !== pb) return pa - pb;
+      const ia = partyIndex.get(a.nameKey) ?? ledgerOrder.get(a.nameKey) ?? Number.MAX_SAFE_INTEGER;
+      const ib = partyIndex.get(b.nameKey) ?? ledgerOrder.get(b.nameKey) ?? Number.MAX_SAFE_INTEGER;
+      if (ia !== ib) return ia - ib;
       if (a.kind !== b.kind) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
       if (a.date !== b.date) return a.date < b.date ? -1 : 1;
       return a.tax - b.tax;
     });
     const billRows = sortedRows.map((r) => ({
-      party: partyLabel.get(r.nameKey) ?? pseudoKey(r.ledgerKey),
+      party: partyLabel.get(r.nameKey) ?? byLedgerParty.get(r.nameKey) ?? pseudoKey(r.ledgerKey),
       date: displayDate(r.date),
       tax: r.tax,
       gross: r.gross,
@@ -1259,7 +1272,7 @@ export function createSession(
       if (parts.length > 0) f.detail += ` ${parts.join("; ")}.`;
     }
 
-    const fd20BankLabel = new Map(result.recon.map((r) => [r.match.as26NameKey, pseudoName(r.match.ledgerName)]));
+    const fd20BankLabel = new Map(recon.map((r) => [r.match.as26NameKey, r.match.as26Name]));
     const fd20 = result.fd20.map((e) => ({
       party: fd20BankLabel.get(e.nameKey) ?? pseudoKey(e.nameKey),
       date: displayDate(e.date),

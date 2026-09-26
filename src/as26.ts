@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { canonicalKey } from "./key.js";
+import { lawOf } from "./tds-law.js";
 import type { As26File, As26Kind } from "./as26-file.js";
+
+export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "none";
 
 export interface BooksDeduction { ledgerKey: string; kind: As26Kind; date: string; tax: number; voucherType: string; voucherNumber: string | null; reference: string | null; }
 export interface BooksSale { ledgerKey: string; date: string; ref: string | null; taxable: number; gross: number; }
@@ -421,7 +424,7 @@ export function assignFdLedgers(fdLedgerNames: string[], banks: string[]): FdAss
   });
 }
 
-export interface ReconItem { date: string; tax: number; dedIdx?: number; txIdx?: number; gross?: number; status?: string | null; }
+export interface ReconItem { date: string; tax: number; dedIdx?: number; txIdx?: number; gross?: number; status?: string | null; ref?: string | null; }
 
 export interface PartyRecon {
   match: PartyMatch;
@@ -437,6 +440,11 @@ export interface PartyRecon {
   booksTaxableValue?: number;
   booksGrossValue?: number;
   as26GrossValue?: number;
+  /** Addendum 5a: books interest credited (bank parties) and the value-basis
+   * interpretation the Deductors sheet's value delta is measured on. */
+  booksInterestValue?: number;
+  valueBasis?: string;
+  valueDelta?: number;
   /** Totals-only party (design §12.1): every 26AS section is 194R, or 194A
    * with the operator-marked bank — no bill-level findings or rows. */
   totalsOnly?: boolean;
@@ -547,12 +555,51 @@ function pairEqualLeftovers(
  * combination explanation. The search never
  * mutates the totals — it only explains leftovers, honestly: more than one
  * fitting subset means the item stays unmatched and is counted ambiguous. */
+const normRef = (x: unknown): string => String(x ?? "").trim().toLowerCase();
+
+const RENT_SECTION = /^194\s*-?\s*i\s*\(\s*([ab])\s*\)$/i;
+export function normalizeAs26Section(section: string): string {
+  const m = RENT_SECTION.exec(section.trim());
+  return m ? `194-I(${m[1].toLowerCase()})` : section;
+}
+
+const latestUpdate = (best: BooksSale | null, s: BooksSale): BooksSale =>
+  !best || s.date > best.date ? s : best;
+
+export function linkInvoice(
+  sales: BooksSale[],
+  item: { date: string; tax: number; reference: string | null; section: string | null },
+): { sale: BooksSale; basis: LinkBasis } | null {
+  const cands = sales.filter((s) => s.date <= item.date);
+  const ref = item.reference ? normRef(item.reference) : "";
+  if (ref) {
+    const hit = sales.find((s) => s.ref != null && normRef(s.ref) === ref);
+    if (hit) return { sale: hit, basis: "reference" };
+  }
+  const law = item.section ? lawOf(normalizeAs26Section(item.section)) : null;
+  if (law) {
+    const rate = law.rates.standard;
+    let hit: BooksSale | null = null;
+    for (const s of cands) {
+      if (Math.abs(round2(s.taxable * rate) - item.tax) <= AS26_TAX_TOLERANCE) hit = latestUpdate(hit, s);
+    }
+    if (hit) return { sale: hit, basis: "taxable-rate" };
+    for (const s of cands) {
+      if (Math.abs(round2(s.gross * rate) - item.tax) <= AS26_TAX_TOLERANCE) hit = latestUpdate(hit, s);
+    }
+    if (hit) return { sale: hit, basis: "invoice-rate" };
+  }
+  let ap: BooksSale | null = null;
+  for (const s of cands) ap = latestUpdate(ap, s);
+  return ap ? { sale: ap, basis: "approximate" } : null;
+}
+
 export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
   const keySet = new Set(match.ledgerKeys);
   const booksItems: ReconItem[] = [];
   facts.deductions.forEach((d, dedIdx) => {
     if (keySet.has(d.ledgerKey) && d.kind === match.kind) {
-      booksItems.push({ date: d.date, tax: d.tax, dedIdx });
+      booksItems.push({ date: d.date, tax: d.tax, dedIdx, ref: d.reference });
     }
   });
   const rows = file.transactions.filter((t) => t.kind === match.kind && t.nameKey === match.as26NameKey);
@@ -599,6 +646,83 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
 
   const combinations: PartyRecon["combinations"] = [];
   let ambiguous = 0;
+
+  // Invoice-linked groups (addendum 5): several book entries sharing one
+  // linked Tally invoice can collectively explain a single 26AS row. The
+  // book-entry reference is empty on the day-book channel, so the tie is
+  // recomputed with the same linkInvoice the bill drill-down uses — the
+  // workbook and the engine agree by construction; an item whose link falls
+  // back to nothing contributes no group. Runs before the bounded subset
+  // search and is NOT size-bounded: cost stays linear in the pool because
+  // whole groups (never sub-subsets) are tested. Only a UNIQUE fit — one
+  // group for the target, and the group wanted by only that target — is
+  // consumed; anything else stays unmatched and counts ambiguous. Tax fit
+  // uses the ordinary tolerance; dates never block the fit.
+  {
+    const secsOfParty = new Set(
+      file.summaries
+        .filter((s) => s.kind === match.kind && s.nameKey === match.as26NameKey)
+        .map((s) => s.section),
+    );
+    const section = secsOfParty.size === 1 ? [...secsOfParty][0] : null;
+    const salesPool = facts.sales.filter((s) => keySet.has(s.ledgerKey));
+    const refGroups = new Map<string, ReconItem[]>();
+    for (const b of unmatchedBooks) {
+      const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
+      if (!d) continue;
+      const link = linkInvoice(salesPool, { date: d.date, tax: d.tax, reference: d.reference, section });
+      if (!link || !link.sale.ref) continue;
+      const key = normRef(link.sale.ref);
+      const list = refGroups.get(key);
+      if (list) list.push(b);
+      else refGroups.set(key, [b]);
+    }
+    const candsByTarget = new Map<number, ReconItem[][]>();
+    unmatchedAs26.forEach((a, j) => {
+      const cands: ReconItem[][] = [];
+      for (const g of refGroups.values()) {
+        if (g.length < 2) continue;
+        if (fits(round2(sumTax(g)), a.tax)) cands.push(g);
+      }
+      if (cands.length > 0) candsByTarget.set(j, cands);
+    });
+    const contended = new Set<ReconItem[]>();
+    for (const cands of candsByTarget.values()) {
+      if (cands.length > 1) {
+        for (const g of cands) contended.add(g);
+        continue;
+      }
+      const g = cands[0];
+      let wants = 0;
+      for (const other of candsByTarget.values()) {
+        if (other.some((x) => x[0] === g[0])) wants += 1;
+      }
+      if (wants > 1) contended.add(g);
+    }
+    const gTakenBooks = new Set<number>();
+    const gTakenAs26 = new Set<number>();
+    for (const [j, cands] of candsByTarget) {
+      if (gTakenAs26.has(j)) continue;
+      if (cands.length > 1) {
+        ambiguous += 1;
+        continue;
+      }
+      const parts = cands[0];
+      if (contended.has(parts)) {
+        ambiguous += 1;
+        continue;
+      }
+      combinations.push({ target: unmatchedAs26[j], parts, side: "as26" });
+      for (const p of parts) {
+        const k = unmatchedBooks.findIndex((x) => x === p);
+        if (k >= 0) gTakenBooks.add(k);
+      }
+      gTakenAs26.add(j);
+    }
+    unmatchedBooks = unmatchedBooks.filter((_, i) => !gTakenBooks.has(i));
+    unmatchedAs26 = unmatchedAs26.filter((_, i) => !gTakenAs26.has(i));
+  }
+
   const searchSkipped =
     unmatchedBooks.length > COMBINATION_MAX_ITEMS || unmatchedAs26.length > COMBINATION_MAX_ITEMS;
 
@@ -724,6 +848,7 @@ export function analyzeAs26(
    * separately (design §12.4). */
   const fd20All: BankBooksEvent[] = [];
   for (const match of matches) {
+    const pushedFrom = findings.length;
     const r = reconcileParty(file, facts, match, opts.toDate);
     recons.push(r);
     const partySales = match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []);
@@ -765,11 +890,32 @@ export function analyzeAs26(
         const fdInterest = round2(fd20Entries.reduce((s, e) => s + e.interest, 0));
         const fdTax = round2(fd20Entries.reduce((s, e) => s + e.tax, 0));
         fd20All.push(...fd20Entries);
-        push("fd_20pct_tds", "review", match.ledgerName, match.kind, summary?.section ?? null, fdTax,
+        push("fd_20pct_tds", "review", match.as26Name, match.kind, summary?.section ?? null, fdTax,
           `${fd20Entries.length} FD interest entry/entries carry books TDS of approx 20% of the interest ` +
           `(interest ${money(fdInterest)}, tax ${money(fdTax)}): the bank deducted the higher rate, often for a ` +
           "missing PAN, and these entries are not expected to reflect in 26AS. Listed on the 'FD interest 20% TDS' sheet.");
       }
+    }
+    // Aggregate parties' Deductors cells must use one books-tax channel: a
+    // bank's mapped-activity tax total is the operator-ledger channel the
+    // totals check uses, so the per-party recon reports the same figure.
+    if (isBank && bankMapEntry) r.booksTax = compTax;
+
+    // Deductors value basis (addendum 5a): the value delta picks whichever
+    // books interpretation is closest to the 26AS gross — sale taxable,
+    // GST-inclusive gross, or (for interest parties) the books interest
+    // credited — and the basis is reported next to the delta.
+    r.booksInterestValue = booksInterest;
+    const valueCands: Array<[string, number]> = [];
+    if (partySales.length > 0) {
+      valueCands.push(["taxable", booksTaxable], ["GST-inclusive", booksGross]);
+    }
+    if (booksInterest > 0) valueCands.push(["interest", booksInterest]);
+    if (valueCands.length > 0) {
+      const best = valueCands.reduce((b, x) =>
+        Math.abs(x[1] - as26Gross) < Math.abs(b[1] - as26Gross) ? x : b);
+      r.valueBasis = best[0];
+      r.valueDelta = round2(best[1] - as26Gross);
     }
 
     // 001 — books tax beyond what 26AS declares
@@ -786,7 +932,7 @@ export function analyzeAs26(
       const schedule = capSchedule(partySales.map((s) => ({
         label: s.ref ?? displayDate(s.date), amount: s.gross, date: s.date,
       })));
-      push("books_tax_not_in_26as", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
+      push("books_tax_not_in_26as", "critical", match.as26Name, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
     }
     }
 
@@ -801,7 +947,7 @@ export function analyzeAs26(
         `26AS ${match.kind.toUpperCase()} tax of ${money(r.as26Tax)} against books tax of ${money(r.booksTax)}` +
         (latest !== "00000000" ? `; latest booking date ${displayDate(latest)}` : "") +
         (statuses ? `; booking statuses seen: ${statuses}` : "");
-      push("as26_tax_not_in_books", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessAs26, detail);
+      push("as26_tax_not_in_books", "critical", match.as26Name, match.kind, summary?.section ?? null, excessAs26, detail);
     }
     }
 
@@ -812,7 +958,7 @@ export function analyzeAs26(
       const dTok = Math.abs(round2(as26Gross - booksTaxable));
       if (dTok > AS26_VALUE_TOLERANCE) {
         push(
-          "assessable_value_mismatch", "warning", match.ledgerName, match.kind, summary?.section ?? null,
+          "assessable_value_mismatch", "warning", match.as26Name, match.kind, summary?.section ?? null,
           dTok,
           `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)}: the books taxable is out by ${money(dTok)} (tolerance ${money(AS26_VALUE_TOLERANCE)}). Bill-level value rows, where present, carry the per-invoice detail.`,
         );
@@ -831,7 +977,7 @@ export function analyzeAs26(
         ...r.unmatchedAs26.map((i) => ({ label: displayDate(i.date), amount: i.tax, date: i.date })),
       ]);
       push(
-        "unresolved_combination", "review", match.ledgerName, match.kind, summary?.section ?? null,
+        "unresolved_combination", "review", match.as26Name, match.kind, summary?.section ?? null,
         Math.max(sumB, sumA),
         `Totals reconcile within tolerance (${money(r.booksTax)} books against ${money(r.as26Tax)} 26AS) but ` +
         `${r.unmatchedBooks.length} books item(s) and ${r.unmatchedAs26.length} 26AS item(s) stay unexplained` +
@@ -845,7 +991,7 @@ export function analyzeAs26(
     // 005 — 26AS credits landed outside the reviewed window
     if (r.lateBookedTax > 0) {
       push(
-        "late_booking", "review", match.ledgerName, match.kind, summary?.section ?? null, r.lateBookedTax,
+        "late_booking", "review", match.as26Name, match.kind, summary?.section ?? null, r.lateBookedTax,
         `${money(r.lateBookedTax)} of 26AS tax was booked after ${displayDate(opts.toDate)} — outside the reviewed window, so books and export totals may reconcile once the window is extended (timing possible).`,
       );
     }
@@ -854,7 +1000,7 @@ export function analyzeAs26(
     if (!totalsOnly) {
     if (r.booksTax > 0 && partySales.length === 0) {
       push(
-        "deduction_without_sale", "review", match.ledgerName, match.kind, summary?.section ?? null, r.booksTax,
+        "deduction_without_sale", "review", match.as26Name, match.kind, summary?.section ?? null, r.booksTax,
         "Books carry the deduction but no sale entry exists for this customer in the period — the deduction may sit against a prior-period sale or a receipt (not asserted).",
       );
     }
@@ -880,13 +1026,13 @@ export function analyzeAs26(
         const head = `26AS ${match.kind.toUpperCase()} ${secLabel} totals: tax ${money(r.as26Tax)}` +
           (as26Gross > 0 ? `, amount paid/credited ${money(as26Gross)}` : "");
         if (mappingEmpty) {
-          push("as26_totals_mismatch", "review", match.ledgerName, match.kind, summary?.section ?? null, r.as26Tax,
+          push("as26_totals_mismatch", "review", match.as26Name, match.kind, summary?.section ?? null, r.as26Tax,
             `${head}. The Bank Interest mapping names this bank but none of its interest income or FD ledgers, ` +
             "so no books totals could be compared; fill the ledger names and re-run.");
         } else {
           const bits = [`books tax total ${money(compTax)}`];
           if (valMiss) bits.unshift(`books interest total ${money(booksInterest)} against`);
-          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", match.ledgerName, match.kind,
+          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", match.as26Name, match.kind,
             summary?.section ?? null, taxMiss ? Math.abs(taxDelta) : Math.abs(round2(as26Gross - booksInterest)),
             taxMiss
               ? `${head}; ${bits.join(", ")}. These sections reconcile on totals, never bill by bill.`
@@ -894,6 +1040,14 @@ export function analyzeAs26(
           );
         }
       }
+    }
+    // Plain words on skip (addendum 5a): when the bounded item-combination
+    // search was skipped for this party, every finding raised for the party
+    // says so in plain words — the reader must know those items were not
+    // tried. Invoice-linked group matching still ran; it is not bounded.
+    if (r.combinationSearchSkipped && pushedFrom < findings.length) {
+      const note = ` The bounded item-combination search was skipped for this party (${r.unmatchedBooks.length} books and ${r.unmatchedAs26.length} 26AS items were already too many to search — invoice-linked group matching still ran), so its leftover items were not tried one by one.`;
+      for (let k = pushedFrom; k < findings.length; k += 1) findings[k].detail += note;
     }
   }
 

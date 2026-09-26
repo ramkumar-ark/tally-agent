@@ -30,58 +30,8 @@ export function partyTxsOf(file: As26File, kind: As26Kind, nameKey: string): As2
   return file.transactions.filter((t) => t.kind === kind && t.nameKey === nameKey);
 }
 
-const normRef = (x: unknown): string => String(x ?? "").trim().toLowerCase();
-
-/**
- * Lookup-only section normalizer (I-1): real TRACES writes rent as `194I(a)`
- * / `194I(b)` (no hyphen, any case), while `src/tds-law.ts` only knows
- * `194-I(a)` / `194-I(b)`. Everything else is returned unchanged, so a
- * section absent from the law table (`194R`, `206CL`) honestly stays
- * unmatched and the link falls to approximate. The displayed section is
- * always the row's original string — this only feeds `lawOf`.
- */
-const RENT_SECTION = /^194\s*-?\s*i\s*\(\s*([ab])\s*\)$/i;
-export function normalizeAs26Section(section: string): string {
-  const m = RENT_SECTION.exec(section.trim());
-  return m ? `194-I(${m[1].toLowerCase()})` : section;
-}
-
-const latestUpdate = (best: BooksSale | null, s: BooksSale): BooksSale =>
-  !best || s.date > best.date ? s : best;
-
-/**
- * A2 linkage — four steps, first hit wins:
- * 1. reference (any date); 2. taxable-rate; 3. invoice-rate; 4. approximate —
- * both rate steps and the approximation date-gated to s.date <= item.date,
- * ties pick the latest date, same-date ties the earliest in array order.
- */
-export function linkInvoice(
-  sales: BooksSale[],
-  item: { date: string; tax: number; reference: string | null; section: string | null },
-): { sale: BooksSale; basis: LinkBasis } | null {
-  const cands = sales.filter((s) => s.date <= item.date);
-  const ref = item.reference ? normRef(item.reference) : "";
-  if (ref) {
-    const hit = sales.find((s) => s.ref != null && normRef(s.ref) === ref);
-    if (hit) return { sale: hit, basis: "reference" };
-  }
-  const law = item.section ? lawOf(normalizeAs26Section(item.section)) : null;
-  if (law) {
-    const rate = law.rates.standard;
-    let hit: BooksSale | null = null;
-    for (const s of cands) {
-      if (Math.abs(round2(s.taxable * rate) - item.tax) <= AS26_TAX_TOLERANCE) hit = latestUpdate(hit, s);
-    }
-    if (hit) return { sale: hit, basis: "taxable-rate" };
-    for (const s of cands) {
-      if (Math.abs(round2(s.gross * rate) - item.tax) <= AS26_TAX_TOLERANCE) hit = latestUpdate(hit, s);
-    }
-    if (hit) return { sale: hit, basis: "invoice-rate" };
-  }
-  let ap: BooksSale | null = null;
-  for (const s of cands) ap = latestUpdate(ap, s);
-  return ap ? { sale: ap, basis: "approximate" } : null;
-}
+import { linkInvoice, normalizeAs26Section } from "./as26.js";
+export { linkInvoice, normalizeAs26Section };
 
 const inWindow = (d: string, o: { fromDate: string; toDate: string }): boolean =>
   d >= o.fromDate && d <= o.toDate;

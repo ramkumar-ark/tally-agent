@@ -718,3 +718,34 @@ describe("FD ledger auto-detection and assignment (addendum 3/3a)", () => {
     expect(r.fdAuto).toEqual([{ ledger: "FD - 100099222 A", bank: "Union Bank of India", rule: "name-match" }]);
   });
 });
+
+describe("addendum 5a — Deductors basis, channel unity, skip wording", () => {
+  it("value delta measures the taxable basis when that is closest, and 0 when it ties", () => {
+    const sales = [{ ledgerKey: NK, date: "20250612", ref: "CS/9", taxable: 180000, gross: 212400 }];
+    const r = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 180000 });
+    expect(r.recon[0].valueBasis).toBe("taxable");
+    expect(r.recon[0].valueDelta).toBe(0);
+    const g = result([["20250612", 18000]], [txn(18000)], 18000, { sales, gross: 214000 });
+    expect(g.recon[0].valueBasis).toBe("GST-inclusive");
+    expect(g.recon[0].valueDelta).toBe(-1600); // selected books gross 2,12,400 vs 26AS 2,14,000
+  });
+  it("a bank's Deductors books-tax cell uses the same operator channel the 009 compare uses", () => {
+    const file = tx194("194A", [tx194n(5000, "194A", "20250801", null, 50000)], 5000, 50000);
+    const bankMap = { mappings: [], banks: [{ as26Name: nameOf, interestLedgers: ["Sample Bank FD Int A/c"], fdLedgers: [] }] };
+    const facts: BooksFacts = {
+      // raw mapped-ledger deductions would read 4,600 under the old channel
+      deductions: [{ ledgerKey: NK, kind: "tds" as const, date: "20250801", tax: 4600, voucherType: "Journal" }],
+      sales: [],
+      bankEvents: [{ nameKey: NK, events: [{ nameKey: NK, date: "20250801", interest: 50000, tax: 0, fdDebit: 50000 }] }],
+    };
+    const r = analyzeAs26(file, facts, bankMap, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    expect(r.recon[0].totalsOnly).toBe(true);
+    expect(r.recon[0].booksTax).toBe(0);
+  });
+  it("when the bounded search is skipped, the party's findings say so in plain words", () => {
+    const items = Array.from({ length: 41 }, (_, i) => txn(1000 + i, "20250612"));
+    const r = result([], items, 43000, {});
+    const f = r.findings.find((x) => x.check === "as26_tax_not_in_books")!;
+    expect(f.detail).toMatch(/item-combination search was skipped/);
+  });
+});
