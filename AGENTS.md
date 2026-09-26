@@ -768,6 +768,20 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   for `gross`. `winmanSectionKey` (`src/tds-file.ts`) already normalizes Winman
   labels to law keys, so `a.section === d.section` challan matching is correct
   — a "deposited 0" row means genuinely uncovered, not a spelling mismatch.
+- **`Clause21bBookRow.gross` is the UNDEDUCTED expense, not the payment**
+  (captain 2026-09-26): on a `not_deducted`/`short_deducted` row it is
+  `liable tax / applicable rate` (194Q party-month: only the liable excess
+  beyond the ₹50 lakh crossing), and `tdsDone`/`tdsDeposited` are **0** — no tax
+  was deducted on that portion. Only a `not_deposited` row still carries the
+  payment base with `tdsDone` = the deduction. The engine's clause21b push
+  sites own this (src/tds.ts); `booksCandidates` stays a pure projector, so
+  never re-derive an amount in `src/notds.ts`. Rate guards there must test
+  `rate > 0`, never `> ZERO` — `ZERO = 0.005` is a money tolerance and the
+  194Q rate is 0.001, so `> ZERO` silently falls back to the full base.
+- The clause-21(b) lane reads the TDS operator template, so it must be rebased
+  onto whichever main carries the TDS lane's current `Settings` schema (e.g.
+  `Late Deduction Interest`, 26o 061-067). `parseOperatorTemplate` throws on an
+  unknown Settings row by design — do not loosen it to unblock a stale base.
 
 ## Maintaining this file
 
