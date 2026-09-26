@@ -833,20 +833,27 @@ export function registerTools(
 
   register(
     "tb_write_3cd_gst44",
-    "Write the clause 44 rows of the last tb_gst44_review into the Break-up of GST expenditure sheet of a COPY " +
-      "of the operator's Winman 3CD workbook and return the copy's path. The copy is written to the report " +
-      "directory (or outPath) as '<source stem> - filled - <date>.xlsm'; the source workbook is never modified. " +
-      "Compose nothing by hand: the sheet carries the capital/revenue break-up from the review.",
+    "Write the clause 44 rows into the Break-up of GST expenditure sheet of a COPY of the operator's Winman 3CD " +
+      "workbook and return the copy's path. The copy is written to the report directory (or outPath) as " +
+      "'<source stem> - filled - <date>.xlsm'; the source workbook is never modified. Compose nothing by hand. " +
+      "By default the rows come from the last tb_gst44_review; pass worksheetPath to take them from the " +
+      "operator's APPROVED GST nature-wise break-up working sheet instead (its per-ledger treatments are the " +
+      "authority — only use a sheet the captain has approved).",
     {
       sourcePath: z.string().describe("Path to the operator's Winman `Break-up of GST expenditure.xlsm`; read only, never written"),
       outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+      worksheetPath: z
+        .string()
+        .optional()
+        .describe("Optional path to the approved GST nature-wise break-up working sheet to source the totals from"),
     },
     async (args) => {
       const outPath = await session.write3cdGst44({
         sourcePath: args.sourcePath,
         outPath: args.outPath ?? cfg.reportDir,
+        ...(args.worksheetPath ? { worksheetPath: args.worksheetPath } : {}),
       });
-      await audit("tb_write_3cd_gst44", { sourcePath: args.sourcePath, outPath: args.outPath ?? null }, 0, 0);
+      await audit("tb_write_3cd_gst44", { sourcePath: args.sourcePath, outPath: args.outPath ?? null, worksheetPath: args.worksheetPath ?? null }, 0, 0);
       return JSON.stringify({ outPath }, null, 2);
     },
   );

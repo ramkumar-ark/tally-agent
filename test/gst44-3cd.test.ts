@@ -9,6 +9,9 @@ import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { EMPTY_GST44 } from "../src/gst44.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { GST44_PART, makeWinmanGst44Fixture } from "./fixtures/winman-fixture.js";
+import { buildGstWorksheet } from "../src/gst44-worksheet-template.js";
+import { readWorksheetTotals } from "../src/gst44-worksheet-read.js";
+import type { WsLedgerRow } from "../src/gst44-worksheet.js";
 import type { VoucherRow } from "../src/downstream.js";
 
 describe("winman gst44 fixture", () => {
@@ -154,6 +157,82 @@ describe("write3cdGst44", () => {
     await expect(session.write3cdGst44({ sourcePath: src, outPath: dir })).rejects.toThrow(
       /run tb_gst44_review first/,
     );
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ------------------- approved working sheet as the write source -------------------
+
+const seed = (over: Partial<Record<"d" | "e" | "h" | "j", number>>) => ({
+  d: 0,
+  e: 0,
+  h: 0,
+  j: 0,
+  treatment: "others" as const,
+  kind: "policy keyword" as const,
+  reason: "test seed",
+  ...over,
+});
+
+const WS_REVENUE: WsLedgerRow[] = [
+  { ledger: "Alpha", group: "Purchase Accounts", rowKey: "revenue", amount: 100000, seed: seed({}) },
+  { ledger: "Beta", group: "Indirect Expenses", rowKey: "revenue", amount: 50000, seed: seed({ d: 30000, j: 20000 }) },
+  { ledger: "Gamma", group: "Indirect Expenses", rowKey: "revenue", amount: 8000, seed: seed({ h: 8000 }) },
+];
+const WS_CAPITAL: WsLedgerRow[] = [
+  { ledger: "Plant", group: "Fixed Assets", rowKey: "capital", amount: 40000, seed: seed({}) },
+];
+
+const workingSheet = (): Buffer =>
+  buildGstWorksheet({
+    company: "Test Co",
+    period: "FY 25-26",
+    revenueRows: WS_REVENUE,
+    capitalRows: WS_CAPITAL,
+    rules: [],
+    priorYearUsed: false,
+  });
+
+describe("readWorksheetTotals", () => {
+  it("recomputes the clause-44 rows from the sheet's literal cells (F/G/I are formulas)", () => {
+    const rows = readWorksheetTotals(workingSheet());
+    expect(rows.map((r) => r.key)).toEqual(["capital", "revenue"]);
+    const [capital, revenue] = rows;
+    expect(capital.label).toBe("Capital Expenditure");
+    expect(capital).toMatchObject({ total: 40000, exempt: 0, composition: 0, others: 40000, unregistered: 0 });
+    expect(revenue.label).toBe("Revenue Expenditure");
+    // D=30000 exempt, H=8000 unregistered, others = B - H - J - E - D = 100000
+    expect(revenue).toMatchObject({
+      total: 138000,
+      exempt: 30000,
+      composition: 0,
+      others: 100000,
+      unregistered: 8000,
+    });
+    // Winman C5 invariant: total = exempt + composition + others + unregistered.
+    expect(revenue.total).toBe(revenue.exempt + revenue.composition + revenue.others + revenue.unregistered);
+  });
+
+  it("errors clearly when the workbook is not a working sheet", () => {
+    expect(() => readWorksheetTotals(makeWinmanGst44Fixture())).toThrow(/no "CAPITAL" sheet/);
+  });
+});
+
+describe("write3cdGst44 from the approved working sheet", () => {
+  it("writes the worksheet totals without a review having run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gst44-ws-"));
+    const src = join(dir, "wb.xlsm");
+    const sheetPath = join(dir, "ws.xlsx");
+    writeFileSync(src, makeWinmanGst44Fixture());
+    writeFileSync(sheetPath, workingSheet());
+    // Deliberately NO gst44Review: the worksheet path must stand alone.
+    const session = createSession(stubFor([]), EMPTY_OVERRIDES);
+    const out = await session.write3cdGst44({ sourcePath: src, outPath: dir, worksheetPath: sheetPath });
+    expect(readFileSync(src).equals(makeWinmanGst44Fixture())).toBe(true);
+    const xml = partText(readXlsm(readFileSync(out)), GST44_PART);
+    for (const v of [138000, 30000, 100000, 8000, 40000]) expect(xml).toMatch(new RegExp(`<v>${v}</v>`));
+    expect(xml).toContain("Capital Expenditure");
+    expect(xml).toContain("Revenue Expenditure");
     rmSync(dir, { recursive: true, force: true });
   });
 });

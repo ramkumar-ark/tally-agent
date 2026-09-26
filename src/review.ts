@@ -15,6 +15,7 @@ import { gst44, partySpend, type Gst44Row, type OperatorGst44 } from "./gst44.js
 import { GST44_CONFIRMS, GST44_FORM_ID, GST44_SHEET, type Gst44Bucket } from "./gst44-law.js";
 import { gst44Worksheet, type WsLedgerRow, WS_TREATMENT_LABELS } from "./gst44-worksheet.js";
 import { buildGstWorksheet, fyLabel } from "./gst44-worksheet-template.js";
+import { readWorksheetTotals } from "./gst44-worksheet-read.js";
 import { readPriorWorksheet } from "./gst44-prior.js";
 import { loadGst44TreatmentRules } from "./gst44-treatments.js";
 import type { ReturnRow } from "./returns.js";
@@ -704,10 +705,11 @@ export interface Session {
   gst44Rows(): Gst44Row[] | undefined;
   /**
    * Rewrite the `Break-up of GST expenditure` sheet of a Winman 3CD workbook
-   * COPY from the cached review's rows and return the written path. The
-   * source is never written to.
+   * COPY and return the written path. The source is never written to. With
+   * `worksheetPath` the totals come from the operator's approved GST
+   * nature-wise break-up working sheet; otherwise from the cached review rows.
    */
-  write3cdGst44(opts: { sourcePath: string; outPath?: string }): Promise<string>;
+  write3cdGst44(opts: { sourcePath: string; outPath?: string; worksheetPath?: string }): Promise<string>;
   /**
    * The GST nature-wise break-up WORKING SHEET (captain's addendum
    * 2026-09-26, Phase B): per-ledger REVENUE/CAPITAL rows seeded from the
@@ -3098,17 +3100,34 @@ export function createSession(
   }
 
   /**
-   * Rewrite the "Break-up of GST expenditure" sheet of a Winman 3CD COPY from
-   * the cached review's rows (clause 44, mirror of write3cdPfEsi). Both rows
-   * are written always, zeros included: writeSheetRows replaces rows at or
-   * after the first data row wholesale, so the sheet's pre-filled labels are
-   * re-written by us. The sheet columns are a text label and five numbers —
+   * Rewrite the "Break-up of GST expenditure" sheet of a Winman 3CD COPY.
+   * Both rows are written always, zeros included: writeSheetRows replaces rows
+   * at or after the first data row wholesale, so the sheet's pre-filled labels
+   * are re-written by us. The sheet columns are a text label and five numbers —
    * no vault-held name exists in them, so de-masking has nothing to restore
    * by construction.
+   *
+   * Two sources, mutually exclusive by what the caller passes (captain's
+   * addendum 2026-09-27, Q-F approval flow):
+   * - `worksheetPath`: the operator's APPROVED GST nature-wise break-up
+   *   working sheet (tb_write_gst_working_sheet). Its per-ledger treatments are
+   *   the authority; readWorksheetTotals recomputes the two clause-44 rows from
+   *   its literal cells. This is the flow when the operator edits the sheet.
+   * - otherwise: the cached tb_gst44_review rows (mirror of write3cdPfEsi).
    */
-  async function write3cdGst44(opts: { sourcePath: string; outPath?: string }): Promise<string> {
-    if (!lastGst44 || lastGst44.length === 0) {
-      throw new Error("run tb_gst44_review first: there are no clause 44 rows to write");
+  async function write3cdGst44(opts: {
+    sourcePath: string;
+    outPath?: string;
+    worksheetPath?: string;
+  }): Promise<string> {
+    let clauseRows: Gst44Row[];
+    if (opts.worksheetPath) {
+      clauseRows = readWorksheetTotals(await readFile(opts.worksheetPath));
+    } else {
+      if (!lastGst44 || lastGst44.length === 0) {
+        throw new Error("run tb_gst44_review first: there are no clause 44 rows to write");
+      }
+      clauseRows = lastGst44;
     }
     const pkg = readXlsm(await readFile(opts.sourcePath));
     // The handshake is the only reliable Winman discriminator; asserting it
@@ -3120,7 +3139,7 @@ export function createSession(
         `"${GST44_SHEET}" belongs to form "${schema.formId || "unknown"}": this tool fills the Winman ${GST44_FORM_ID} workbook`,
       );
     }
-    const rows: WinmanRow[] = lastGst44.map((r) => ({
+    const rows: WinmanRow[] = clauseRows.map((r) => ({
       PARTICULARS: { kind: "text", value: r.label },
       TOTALEXPENDITURE: { kind: "number", value: r.total },
       TOWARDSSUPPLIES: { kind: "number", value: r.exempt },
