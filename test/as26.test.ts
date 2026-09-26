@@ -223,19 +223,15 @@ describe("deductorKey / rekeyDeductionsToDeductor (addendum 9)", () => {
     );
     const { events } = deductionEvents(byLedger.get("tds receivable") ?? [], "tds");
     expect(events).toHaveLength(2);
-    // Item 7 (26o): the projector itself now attributes a duty/party-line row
-    // to the voucher's party ledger, so the gross-up row already shows D-Engineer.
-    expect(events[0].ledgerKey).toBe("d-engineer");
+    // The projector is display-faithful: the gross-up row shows the income ledger.
+    expect(events[0].ledgerKey).toBe("exempt contract income");
     const rekeyed = rekeyDeductionsToDeductor(events, [grossUp, normal], isPartyLedger);
     expect(rekeyed[0].ledgerKey).toBe("d-engineer");
     expect(rekeyed[0].tax).toBe(30000);
-    // Item 7 also attributes the normal row to the voucher's party line
-    // ("Contractee Receivable", itself a party ledger), so rekey leaves it as
-    // the projector produced it — normal rows are untouched.
-    expect(rekeyed[1].ledgerKey).toBe("contractee receivable");
+    expect(rekeyed[1].ledgerKey).toBe("d-engineer");
     // An event whose voucher is gone keeps its key rather than guessing.
     const orphan = rekeyDeductionsToDeductor(
-      [{ ...events[0], ledgerKey: "exempt contract income", voucherNumber: "nope" }], [grossUp, normal], isPartyLedger,
+      [{ ...events[0], voucherNumber: "nope" }], [grossUp, normal], isPartyLedger,
     );
     expect(orphan[0].ledgerKey).toBe("exempt contract income");
   });

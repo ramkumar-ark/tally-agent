@@ -1220,7 +1220,6 @@ export function analyzeTds(
         ded.interestI = interest;
       }
       // Deposit checks: the joined deposit was matched in joinEvents.
-      const dep = events.deposits.find((e) => e.deduction === ded);
       // 2026-09-26t (inbox 075, captain): where a Winman return challan covers
       // the deduction, its date is the deposit date for lateness — overriding an
       // in-window book remittance (1:1 or month-pool). The book remittance date
