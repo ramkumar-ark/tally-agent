@@ -10,7 +10,7 @@ const seededRow = (ledger: string, amount: number): WsLedgerRow => ({
   group: "Indirect Expenses",
   rowKey: "revenue",
   amount,
-  seed: { d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence", reason: "party GSTIN evidence: registered with tax" },
+  seed: { d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence", reason: "party GSTIN evidence: registered purchase" },
 });
 const blankRow = (ledger: string, amount: number): WsLedgerRow => ({
   ledger,

@@ -691,6 +691,19 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Prior-year `Rates and Taxes` carried not_supply (J ₹40.46 lakh), agreeing with
   the policy rule, so it raises no change finding; the only prior_year_changed
   finding on the real run is Pooja Expenses (split profile, largest column kept).
+- Addendum 2026-09-26f fixes (two halves, same regen `...-20260926e.xlsx`):
+  supplier GSTINs live in Tally's `LEDGSTREGDETAILS.LIST` sub-blocks
+  (APPLICABLEFROM-dated, multi-registration capable), NOT in `PartYGSTIN` —
+  `FETCH` cannot see them, only `NATIVEMETHOD LEDGSTREGDETAILS` (verified TDL
+  mechanics; fix lives in the sibling `tally_prime_mcp_server` as `regListGstin()`,
+   latest-dated non-empty block wins).
+  The gateway needed no change: `writeGstWorksheet` already gap-fills bundle
+  GSTINs from live `ledgersTax`. And the engine no longer seeds exempt from
+  "GSTIN + no tax lines" (blocked-credit s.17(5) tax can sit inside the asset
+  cost, e.g. the Creta) — a registered supplier with no tax now seeds others
+  with a move-to-exempt-only-with-evidence note (`Acc.noTaxGstin`, mirroring
+  26e's `taxNoGstin`). Exempt from party evidence is therefore dead; only
+  policy/evidence/prior/`0%`-pattern seeds reach column D.
 - Addendum 2026-09-26e fixes (`src/gst44-worksheet.ts`, `src/gst44-treatments.ts`):
   capital drops zero-debit rows (year-end depreciation credits); a voucher that
   charged GST seeds others even when the supplier master carries no GSTIN (the

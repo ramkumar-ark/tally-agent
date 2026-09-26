@@ -24,7 +24,11 @@ import type { PriorYearSheets } from "./gst44-prior.js";
  *
  *   1. policy keyword rule   (taxes, payroll, depreciation, ... -> not supply)
  *   2. prior-year exact name (the FY 24-25 hand-prepared sheet, when given)
- *   3. evidence keyword rule (URD markers -> unregistered)
+ *   3. evidence keyword rule (URD markers -> unregistered, insurance always
+ *      others, credit-card spend always others)
+ *   4. party GSTIN evidence  (per-party registered/unregistered pots; a
+ *      registered supplier with no tax lines on its vouchers still seeds
+ *      others — no-tax is not by itself evidence of exempt, 26f)
  *   4. party GSTIN evidence  (per-party registered/unregistered pots)
  *   5. rate-suffix pattern   (explicit "- 18%" -> others, "0%" -> exempt)
  *   6. nothing               -> the row stays blank + a review finding
@@ -118,6 +122,14 @@ interface Acc {
    * the supplier's registration.
    */
   taxNoGstin: number;
+  /**
+   * Spend routed to `others` from a GST-registered supplier (master carries a
+   * GSTIN) whose vouchers carried no tax lines (26f: no tax lines on a
+   * registered supplier is not by itself evidence of exempt — the tax may sit
+   * in the asset cost, e.g. blocked credit booked gross). Quoted in the seed
+   * reason so the operator moves it to exempt only with evidence.
+   */
+  noTaxGstin: number;
   seed: WorksheetSeed | null;
 }
 
@@ -147,6 +159,7 @@ export function gst44Worksheet(
         pots: emptyPots(),
         noParty: 0,
         taxNoGstin: 0,
+        noTaxGstin: 0,
         seed: null,
       };
       accs.set(key, acc);
@@ -199,7 +212,15 @@ export function gst44Worksheet(
         continue;
       }
       if (partyGstin) {
-        acc.pots[taxCharged ? "others" : "exempt"] += e.amount;
+        // A GST-registered supplier is a registered purchase whether or not
+        // its vouchers carried tax lines (addendum 2026-09-26f): GST on a
+        // blocked-credit s.17(5) purchase can sit inside the asset cost with
+        // no tax lines, so no-tax on a registered supplier is not by itself
+        // evidence of exempt. Exempt needs positive evidence (a policy,
+        // evidence-keyword or prior-year seed, or an explicit "0%" pattern);
+        // unregistered needs a known party with no GSTIN and no tax.
+        acc.pots.others += e.amount;
+        if (!taxCharged) acc.noTaxGstin += e.amount;
       } else if (taxCharged) {
         // The voucher itself charged GST (Input CGST/SGST lines), so this is
         // a registered purchase even though the supplier master carries no
@@ -315,28 +336,31 @@ export function gst44Worksheet(
 
     const unknownAmount = acc.pots.unknown + acc.noParty;
     if (Math.abs(unknownAmount) <= ZERO) {
-      const { others, exempt, unregistered } = acc.pots;
+      const { others, unregistered } = acc.pots;
       if (Math.abs(acc.debit) <= ZERO) {
         acc.seed = { d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "zero balance", reason: "no expenditure in the period (zero balance)" };
         continue;
       }
       const parts: string[] = [];
-      if (Math.abs(others) > ZERO) parts.push(`registered with tax ${money(others)}`);
-      if (Math.abs(exempt) > ZERO) parts.push(`registered without tax ${money(exempt)}`);
+      if (Math.abs(others) > ZERO) parts.push(`registered purchase ${money(others)}`);
       if (Math.abs(unregistered) > ZERO) parts.push(`unregistered ${money(unregistered)}`);
       const nonzeroPots = parts.length;
       const taxNote =
         Math.abs(acc.taxNoGstin) > ZERO
           ? `; ${money(Math.abs(acc.taxNoGstin))} of it charged GST on its vouchers while the supplier carries no GSTIN in the masters — treated as a registered purchase, verify the supplier's registration`
           : "";
+      const noTaxNote =
+        Math.abs(acc.noTaxGstin) > ZERO
+          ? `; ${money(Math.abs(acc.noTaxGstin))} of it came from a GST-registered supplier whose vouchers carried no tax lines — treated as a registered purchase, not exempt (move to exempt only with evidence)`
+          : "";
       acc.seed = {
-        d: exempt,
+        d: 0,
         e: 0,
         h: unregistered,
         j: 0,
-        treatment: nonzeroPots > 1 ? "mixed" : others ? "others" : exempt ? "exempt" : "unregistered",
+        treatment: nonzeroPots > 1 ? "mixed" : others ? "others" : "unregistered",
         kind: "party evidence",
-        reason: `party GSTIN evidence: ${parts.join(", ")}${taxNote}`,
+        reason: `party GSTIN evidence: ${parts.join(", ")}${taxNote}${noTaxNote}`,
       };
       continue;
     }

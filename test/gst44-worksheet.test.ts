@@ -8,6 +8,7 @@ import { canonicalKey } from "../src/key.js";
 
 const groupOf: Record<string, string> = {
   "Site Materials": "Purchase Accounts",
+  "Site Jcb Hire": "Indirect Expenses",
   "Fuel Expenses - 18%": "Indirect Expenses",
   "Contract Labour - URD": "Indirect Expenses",
   "Rates & Taxes A/c": "Indirect Expenses",
@@ -83,23 +84,26 @@ describe("gst44Worksheet party evidence", () => {
       treatment: "others",
       kind: "party evidence",
     });
-    expect(row.seed!.reason).toContain("registered with tax");
+    expect(row.seed!.reason).toContain("registered purchase");
     expect(r.findings).toHaveLength(0);
   });
 
-  it("registered without tax -> exempt pot; mixed pots seed as mixed", () => {
+  it("registered without tax -> still others; mixed registered+unregistered pots seed as mixed", () => {
     const r = gst44Worksheet(
       [
         v("Nova Traders", [["Site Materials", 20000], ["Nova Traders", -20000]]),
         taxedBuy("Site Materials", 40000),
+        v("Prime Haulage", [["Site Materials", 10000], ["Prime Haulage", -10000]]),
       ],
       ctxOf({ "Nova Traders": GSTIN_REG }),
       base,
     );
     const row = r.revenue.find((x) => x.ledger === "Site Materials")!;
-    expect(row.amount).toBe(60000);
-    expect(row.seed).toMatchObject({ d: 20000, e: 0, h: 0, j: 0, treatment: "mixed", kind: "party evidence" });
-    expect(row.seed!.reason).toContain("registered without tax");
+    expect(row.amount).toBe(70000);
+    expect(row.seed).toMatchObject({ d: 0, e: 0, h: 10000, j: 0, treatment: "mixed", kind: "party evidence" });
+    expect(row.seed!.reason).toContain("registered purchase");
+    expect(row.seed!.reason).toContain("unregistered");
+    expect(row.seed!.reason).toContain("no tax lines");
   });
 
   it("known party without GSTIN -> unregistered pot", () => {
@@ -385,7 +389,7 @@ describe("gst44Worksheet addendum 2026-09-26e", () => {
     const r = gst44Worksheet([taxedBuy("Site Materials", 100000, "Prime Haulage")], ctxOf({}), base);
     const row = r.revenue.find((x) => x.ledger === "Site Materials")!;
     expect(row.seed).toMatchObject({ d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence" });
-    expect(row.seed!.reason).toContain("registered with tax");
+    expect(row.seed!.reason).toContain("registered purchase");
     expect(row.seed!.reason).toContain("no GSTIN in the masters");
     expect(r.findings).toHaveLength(0);
   });
@@ -428,5 +432,20 @@ describe("gst44Worksheet addendum 2026-09-26e", () => {
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0].detail).toContain("'urd'");
     expect(conflicts[0].severity).toBe("warning");
+  });
+});
+
+describe("gst44Worksheet addendum 2026-09-26f", () => {
+  it("a no-tax purchase from a GST-registered supplier seeds others, not exempt", () => {
+    const r = gst44Worksheet(
+      [v("Nova Traders", [["Site Jcb Hire", 50000], ["Nova Traders", -50000]])],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Site Jcb Hire", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Site Jcb Hire")!;
+    expect(row.seed).toMatchObject({ d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence" });
+    expect(row.seed!.reason).toContain("registered purchase");
+    expect(row.seed!.reason).toContain("no tax lines");
+    expect(r.findings).toHaveLength(0);
   });
 });
