@@ -171,6 +171,12 @@ export function booksCandidates(
     // time. Compliant (deducted within tolerance and deposited on time) falls
     // through as the only exclusion.
     if (ded !== null && !shortDeducted && depositedOnTime) continue;
+    // Month-level deposit coverage (2026-09-26e): a credit whose pool+month
+    // the duty ledger's lump deposits cover counts as deposited — never a
+    // clause 21(b) row, unless the deduction itself was short. Same for a
+    // subsequent-year challan-covered credit (2026-09-26i): deposited after
+    // the FY end, never a 21(b) row.
+    if (ded !== null && (ded.depositCovered || ded.subsequentDeposit) && !shortDeducted) continue;
     rows.push({
       key: `${canonicalKey(l.booking.party)}|${l.booking.date}|${l.booking.voucherNumber}|${l.section}`,
       party: l.booking.party,
@@ -178,8 +184,15 @@ export function booksCandidates(
       voucherNumber: l.booking.voucherNumber,
       gross: l.booking.gross,
       tdsDone: ded?.tax ?? 0,
-      tdsDeposited: dep?.tax ?? 0,
-      depositDate: dep?.date ?? null,
+      // Deposit facts beyond the 1:1 join: a month-pool-covered credit
+      // (2026-09-26e) has its full tax covered by the duty ledger's lump
+      // deposit debits, and a subsequent-year challan-covered credit
+      // (2026-09-26i) has its tax (matched within tolerance) on the return's
+      // challan — both are deposited facts, never 0. The pool records no
+      // single deposit date, so depositDate stays null there (it is not
+      // written to the workbook); the challan date is recorded.
+      tdsDeposited: dep?.tax ?? (ded?.subsequentDeposit || ded?.depositCovered ? ded.tax : 0),
+      depositDate: dep?.date ?? ded?.subsequentDeposit ?? null,
       section: l.section,
       liability: l.liability,
       pan: panOf(l.booking.party),

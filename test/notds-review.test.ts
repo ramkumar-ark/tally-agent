@@ -9,6 +9,7 @@ import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
 import { buildNotdsTemplate } from "../src/notds-template.js";
 import { parseNotdsTemplate, type NotdsDecision, type NotdsOperatorFile } from "../src/notds-file.js";
+import { booksCandidates } from "../src/notds.js";
 import { canonicalKey } from "../src/key.js";
 import { buildWorkbook, type Sheet } from "../src/xlsx.js";
 
@@ -486,5 +487,49 @@ describe("noTdsReview", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.section).toBe("194I (a)");
     expect(rows[0]!.sheet).toBe("40(a)(ia) to resident");
+  });
+});
+
+describe("booksCandidates — deposit facts beyond the 1:1 join (2026-09-26e/i)", () => {
+  const bk = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", gross: 700000, ledger: "Office Rent", section: "194-I(a)", candidates: [] };
+  const liab = (deduction: unknown) => [
+    { booking: bk, section: "194-I(a)", liableBase: 700000, liability: 50000, rate: 0.1, deduction },
+  ];
+  const events = (deductions: unknown[], deposits: unknown[]) =>
+    ({ bookings: [], payments: [], deductions, deposits }) as never;
+  const run = (deduction: unknown, deposits: unknown[]): NoTdsCandidateRow[] =>
+    booksCandidates(events([deduction], deposits), liab(deduction), () => null, () => false);
+
+  it("a month-pool-covered credit (depositCovered) is not a clause 21(b) row", () => {
+    const ded = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 50000, section: "194-I(a)", joinedTo: "Bank", depositCovered: true };
+    expect(run(ded, [])).toEqual([]);
+  });
+
+  it("a subsequent-year challan-covered credit is not a clause 21(b) row", () => {
+    const ded = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 50000, section: "194-I(a)", joinedTo: "Bank", subsequentDeposit: "20260710" };
+    expect(run(ded, [])).toEqual([]);
+  });
+
+  it("a covered credit that was short-deducted stays a row and carries the deposit facts", () => {
+    const ded = {
+      date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 30000,
+      section: "194-I(a)", joinedTo: "Bank", subsequentDeposit: "20260710", depositCovered: true,
+    };
+    expect(run(ded, [])).toEqual([
+      expect.objectContaining({
+        tdsDone: 30000,
+        // Challan date quoted over the pool (which records no single date).
+        tdsDeposited: 30000,
+        depositDate: "20260710",
+      }),
+    ]);
+  });
+
+  it("the 1:1 joined deposit still wins over the stamps when it exists", () => {
+    const ded = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 40000, section: "194-I(a)", joinedTo: "Bank" };
+    const dep = { date: "20251115", party: "Ledger Held LLP", tax: 40000, section: "194-I(a)", deduction: ded };
+    expect(run(ded, [dep])).toEqual([
+      expect.objectContaining({ tdsDeposited: 40000, depositDate: "20251115" }),
+    ]);
   });
 });
