@@ -665,6 +665,33 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   attributed-sum invariant is checkable on-sheet; findings ordinals are
   TB-space 15–18 (`GST44-015..018-%d` ids).
 
+## Sharp edges found implementing the nature-wise working sheet (2026-09-26)
+
+- Phase B of the captain's addendum (analysis of record:
+  `/home/ram/firstmate/data/ta-3cd-gst-breakup/gst-working-sheet-analysis.md`).
+  Code `src/gst44-treatments.ts` (vocabulary), `src/gst44-prior.ts`
+  (prior-year reader), `src/gst44-worksheet.ts` (engine),
+  `src/gst44-worksheet-template.ts` (writer); tool `tb_write_gst_working_sheet`;
+  findings TB-019/020/021 (ordinals 19–21, TDS-table-only numbering).
+- **Column B is the ledger's FY DEBIT total, never the signed net.** Design
+  §4.1-B; the walk does `if (e.amount <= 0) continue` before accumulating, so
+  credits (depreciation, reversals, year-end closing entries) are excluded from
+  the amount AND from every treatment pot. Netting depreciation credits against
+  asset debits produced a negative capital sheet (−₹27.8 lakh) on the first real
+  run; with the fix the raw day-book debit sum (₹1.4410 cr) ties the engine's
+  capital books total exactly. The design doc's Phase-A "≈₹3.16 cr" capital
+  figure is the abs-sum of both sides, not the debit total.
+- The FY 25-26 day book's group parents arrive **HTML-escaped** in the raw
+  export (`"&#4; Primary"` for the root-of-primaries control char); the gateway
+  reader de-escapes. Any direct raw-JSON probe must account for that.
+- Real-run lesson: `Bad Debts Written Off A/c` seeded Exempt through party
+  evidence (registered customers, no tax) before a `bad-debts` policy rule was
+  added — written-off debts are not expenditure on any supply. Party-evidence
+  seeds for non-purchase ledgers deserve the same scrutiny each run.
+- Prior-year `Rates and Taxes` carried not_supply (J ₹40.46 lakh), agreeing with
+  the policy rule, so it raises no change finding; the only prior_year_changed
+  finding on the real run is Pooja Expenses (split profile, largest column kept).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
