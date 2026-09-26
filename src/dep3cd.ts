@@ -10,6 +10,7 @@ import {
   DEPRECIATION_NAME,
   WRITEOFF_NAME,
   NETTING_WINDOW_DAYS,
+  parseRateFromGroup,
 } from "./depreciation.js";
 import { isShortPeriod } from "./depreciation-law.js";
 import {
@@ -20,8 +21,10 @@ import {
   TAX_NAME,
   HALFADD_DEFAULT,
   DEPN_TEXT,
+  rateOfBlock,
 } from "./dep3cd-law.js";
-import type { D3cdFinding } from "./types.js";
+import type { D3cdCheckId, D3cdFinding } from "./types.js";
+import { D3CD_CHECK_ORDINAL, d3cdFindingId } from "./types.js";
 
 export interface Dep3cdCtx {
   fromDate: string; toDate: string;
@@ -533,4 +536,100 @@ export function buildDisposals(
 
   deletions.sort((a, b) => a.date.localeCompare(b.date) || a.ledger.localeCompare(b.ledger));
   return { deletions, findings };
+}
+export function resolveBlock(
+  ledger: string, side: "additions" | "deletions", ctx: Dep3cdCtx,
+): { block: string | null; candidates: string[]; rate: number | null; source: "ledger" | "group" | "rate" | "none" } {
+  const list = ctx.blockLists[side];
+  const ledgerValue = ctx.operator.ledgerBlocks.get(canonicalKey(ledger));
+  if (ledgerValue !== undefined) {
+    return { block: list.includes(ledgerValue) ? ledgerValue : null, candidates: [], rate: null, source: "ledger" };
+  }
+  const groupValue = ctx.operator.groupBlocks.get(canonicalKey(ctx.assetGroupOf(ledger)));
+  if (groupValue !== undefined) {
+    return { block: list.includes(groupValue) ? groupValue : null, candidates: [], rate: null, source: "group" };
+  }
+  const rate = parseRateFromGroup(ctx.assetGroupOf(ledger));
+  const candidates = rate === null ? [] : list.filter((item) => rateOfBlock(item) === rate);
+  if (candidates.length === 1) return { block: candidates[0], candidates, rate, source: "rate" };
+  return { block: null, candidates, rate, source: "none" };
+}
+
+function templateBlockValue(ledger: string, ctx: Dep3cdCtx): string | undefined {
+  const lv = ctx.operator.ledgerBlocks.get(canonicalKey(ledger));
+  if (lv !== undefined) return lv;
+  return ctx.operator.groupBlocks.get(canonicalKey(ctx.assetGroupOf(ledger)));
+}
+
+export interface Dep3cdResult {
+  additions: Dep3cdAddition[];
+  deletions: Dep3cdDeletion[];
+  findings: D3cdFinding[];
+}
+
+export function analyzeDep3cd(vouchers: VoucherRow[], ctx: Dep3cdCtx): Dep3cdResult {
+  const moves = classifyMovements(vouchers, ctx);
+  const { additions, findings: acqFindings } = buildAcquisitions(moves, ctx);
+  const { deletions, findings: disFindings } = buildDisposals(moves, vouchers, ctx);
+
+  const raw: Omit<D3cdFinding, "id">[] = [...acqFindings, ...disFindings];
+
+  for (const a of additions) a.block = resolveBlock(a.ledger, "additions", ctx).block;
+  for (const d of deletions) d.block = resolveBlock(d.ledger, "deletions", ctx).block;
+
+  const unmapped = new Map<string, { side: "additions" | "deletions"; ledger: string; amount: number; rate: number | null; candidates: string[] }>();
+  const badValues = new Map<string, { side: "additions" | "deletions"; ledger: string; amount: number; value: string }>();
+  const scanSide = (side: "additions" | "deletions", rows: { ledger: string; block: string | null; amount: number }[]) => {
+    const list = ctx.blockLists[side];
+    for (const row of rows) {
+      if (row.block !== null) continue;
+      const value = templateBlockValue(row.ledger, ctx);
+      if (value !== undefined && !list.includes(value)) {
+        const key = `${side}|${canonicalKey(row.ledger)}|${value}`;
+        const hit = badValues.get(key) ?? { side, ledger: row.ledger, amount: 0, value };
+        hit.amount = round2(hit.amount + row.amount);
+        badValues.set(key, hit);
+      } else {
+        const key = `${side}|${canonicalKey(row.ledger)}`;
+        let hit = unmapped.get(key);
+        if (!hit) {
+          const r = resolveBlock(row.ledger, side, ctx);
+          hit = { side, ledger: row.ledger, amount: 0, rate: r.rate, candidates: r.candidates };
+          unmapped.set(key, hit);
+        }
+        hit.amount = round2(hit.amount + row.amount);
+      }
+    }
+  };
+  scanSide("additions", additions);
+  scanSide("deletions", deletions);
+
+  for (const hit of unmapped.values()) {
+    const detail = hit.rate === null
+      ? "the ledger's fixed-asset group carries no depreciation rate"
+      : hit.candidates.length === 0
+        ? `no Winman block carries ${hit.rate}%`
+        : `rate ${hit.rate}% matches ${count(hit.candidates.length)} Winman blocks: ${hit.candidates.join(" / ")}`;
+    raw.push({ check: "d3cd_block_unmapped", severity: "critical", ledger: hit.ledger, amount: hit.amount, detail });
+  }
+  for (const hit of badValues.values()) {
+    raw.push({
+      check: "d3cd_block_not_in_list", severity: "critical", ledger: hit.ledger, amount: hit.amount,
+      detail: `the template block for this ledger is not one of the Winman ${hit.side} blocks`,
+    });
+  }
+
+  raw.sort((a, b) =>
+    D3CD_CHECK_ORDINAL[a.check as D3cdCheckId] - D3CD_CHECK_ORDINAL[b.check as D3cdCheckId]
+    || a.ledger.localeCompare(b.ledger) || a.amount - b.amount);
+
+  const seq = new Map<D3cdCheckId, number>();
+  const findings: D3cdFinding[] = raw.map((f) => {
+    const check = f.check as D3cdCheckId;
+    const n = (seq.get(check) ?? 0) + 1;
+    seq.set(check, n);
+    return { ...f, id: d3cdFindingId(check, n) };
+  });
+
+  return { additions, deletions, findings };
 }
