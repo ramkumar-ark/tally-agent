@@ -76,16 +76,16 @@ export function buildBillRows(
       pool,
       facts.deductions
         .filter((d) => keySet.has(d.ledgerKey) && d.kind === r.match.kind)
-        .map((d) => ({ date: d.date, tax: d.tax, reference: d.reference })),
+        .map((d) => ({ date: d.date, tax: d.tax, reference: d.reference, ledgerKey: d.ledgerKey })),
       section,
     );
-    const linkOf = (tax: number, date: string, reference: string | null) =>
-      linkInvoiceWithCapacity(pool, { date, tax, reference, section }, claimed);
+    const linkOf = (tax: number, date: string, reference: string | null, ledgerKey?: string) =>
+      linkInvoiceWithCapacity(pool, { date, tax, reference, section, ledgerKey }, claimed);
 
     for (const i of r.unmatchedBooks) {
       const d: BooksDeduction | undefined = i.dedIdx !== undefined ? facts.deductions[i.dedIdx] : undefined;
       if (!d) continue;
-      const link = linkOf(d.tax, d.date, d.reference);
+      const link = linkOf(d.tax, d.date, d.reference, d.ledgerKey);
       rows.push({
         kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey,
         date: d.date, tax: d.tax, voucherType: d.voucherType || null, ref: d.voucherNumber,
@@ -125,7 +125,7 @@ export function buildBillRows(
       pool,
       facts.deductions
         .filter((d) => keySet.has(d.ledgerKey) && d.kind === r.match.kind)
-        .map((d) => ({ date: d.date, tax: d.tax, reference: d.reference })),
+        .map((d) => ({ date: d.date, tax: d.tax, reference: d.reference, ledgerKey: d.ledgerKey })),
       (() => {
         const secs = new Set(
           file.summaries

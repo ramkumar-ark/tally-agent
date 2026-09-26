@@ -8,7 +8,7 @@ import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { parseAs26Export } from "../src/as26-file.js";
 import { buildAs26Fixture } from "./as26-fixture.js";
 import { readWorkbook, type GridSheet } from "../src/xlsx-read.js";
-import { writeAs26Report } from "../src/report.js";
+import { writeAs26Report, as26Markdown } from "../src/report.js";
 import { createVault } from "../src/vault.js";
 import type { As26ReviewResult } from "../src/review.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
@@ -134,7 +134,7 @@ describe("tb_write_26as_report", () => {
     const names = wb.map((s) => s.name);
     expect(names).toEqual([
       "Findings", "Deductors", "Books Events", "Mapping",
-      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS", "FD ledger auto-assign",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "Combination matches", "FD interest 20% TDS", "FD ledger auto-assign",
     ]);
     const deductors = wb.find((s) => s.name === "Deductors")!;
     const cells = [...deductors.rows.values()].flatMap((r) => [...r.cells.values()].map((c) => String(c.value)));
@@ -203,7 +203,7 @@ describe("tb_write_26as_report", () => {
     const names = wb.map((s) => s.name);
     expect(names).toEqual([
       "Findings", "Deductors", "Books Events", "Mapping",
-      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "FD interest 20% TDS", "FD ledger auto-assign",
+      "Books not in 26AS", "26AS unmatched", "Bill value mismatch", "Combination matches", "FD interest 20% TDS", "FD ledger auto-assign",
     ]);
 
     // data row n (1-based) is rows[n] — Excel row 1 is the header row
@@ -334,5 +334,74 @@ describe("tb_write_26as_report > FD interest 20% TDS sheet", () => {
       ["F20-2", "Ledger 1", "01-Nov-2025", 4000, 800],
       [null, null, "total", 9000, 1800],
     ]);
+  });
+});
+
+describe("writeAs26Report — combination sheet (addendum 7 follow-up)", () => {
+  it("matched groups leave the unmatched sheets and show their invoice link", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "as26-combo-"));
+    try {
+      const result = {
+        findings: [],
+        gaps: [],
+        totals: { booksTax: 0, as26Tax: 0, partiesMatched: 1, combinationExplained: 1, ambiguous: 0 },
+        mastersUnavailable: false,
+        groupsUnavailable: false,
+        skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+        counts: { credits: 0, receivableLedgers: ["TDS Receivable"] },
+        bookEvents: [],
+        fd20: [],
+        fdAuto: [],
+        bankParties: [],
+        section194QApplicable: true,
+        recon: [
+          {
+            match: { kind: "tds" as const, nameKey: "nk", ledgerKeys: ["lk"], ledgerName: "Pseudonym One", as26Name: "Pseudonym One" },
+            booksTax: 59962, as26Tax: 59962, paired: [], ambiguous: 0,
+            unmatchedBooks: [], unmatchedAs26: [],
+            combinationSearchSkipped: false, lateBookedTax: 0,
+            combinations: [
+              {
+                target: { date: "01-Nov-2025", tax: 59962 },
+                parts: [
+                  { date: "02-Jul-2025", tax: 4840 },
+                  { date: "02-Jul-2025", tax: 22725 },
+                  { date: "02-Jul-2025", tax: 14870 },
+                  { date: "02-Jul-2025", tax: 17527 },
+                ],
+                side: "as26" as const,
+                basis: "taxable-rate" as const,
+                invoiceRef: "Doc 12", invoiceDate: "21-Jul-2025", invoiceTaxable: 2998069,
+              },
+            ],
+            booksTaxableValue: 0, booksGrossValue: 0, as26GrossValue: 0,
+          },
+        ],
+        billRows: [],
+      };
+      const paths = await writeAs26Report({
+        reportDir, company: "Demo Traders Pvt Ltd",
+        fromDate: "20250401", toDate: "20260331",
+        markdown: as26Markdown(result, "Demo Traders Pvt Ltd", "20250401", "20260331"),
+        result, vault: createVault(),
+      });
+      const sheets = readWorkbook(readFileSync(paths.workbookPath));
+      const cell = (r: { cells: Map<number, { value: unknown }> }, i: number) => r.cells.get(i)?.value ?? "";
+      const books = sheets.find((x) => x.name === "Books not in 26AS")!;
+      const as26 = sheets.find((x) => x.name === "26AS unmatched")!;
+      const combo = sheets.find((x) => x.name === "Combination matches")!;
+      expect(books.rows.slice(1).filter((r) => cell(r, 0) !== "")).toHaveLength(0);
+      expect(as26.rows.slice(1).filter((r) => cell(r, 0) !== "")).toHaveLength(0);
+      const comboRows = combo.rows.slice(1).filter((r) => cell(r, 0) !== "");
+      expect(comboRows).toHaveLength(1);
+      expect(cell(comboRows[0], 1)).toBe("Pseudonym One");
+      expect(cell(comboRows[0], 4)).toBe("4");
+      expect(cell(comboRows[0], 6)).toBe("Doc 12");
+      expect(cell(comboRows[0], 9)).toBe("taxable-rate");
+      const md = readFileSync(paths.markdownPath, "utf8");
+      expect(md).toMatch(/Unmatched after reconciliation: 0 books entries and 0 26AS rows/);
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
   });
 });

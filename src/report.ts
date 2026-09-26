@@ -1119,6 +1119,35 @@ export async function writeLoansReport(opts: {
  * workbook — findings as returned, deductor reconciliation, books evidence
  * and the mapping aid (exact 26AS names the operator may paste into
  * config/as26-map.json; only here on disk, never in chat). */
+/** The real review markdown for a 26AS run: findings in id order plus the
+ * unmatched-sheet totals, so the .md beside the workbook is the review. */
+export function as26Markdown(
+  result: As26ReviewResult,
+  company: string,
+  fromDate: string,
+  toDate: string,
+): string {
+  const lines: string[] = [];
+  lines.push(`# 26AS reconciliation — ${company} (${fromDate} to ${toDate})`);
+  lines.push("");
+  const byCheck = new Map<string, number>();
+  for (const f of result.findings) byCheck.set(f.check, (byCheck.get(f.check) ?? 0) + 1);
+  lines.push(`Findings: ${result.findings.length} across ${byCheck.size} checks.`);
+  lines.push("");
+  for (const f of result.findings) {
+    lines.push(`- ${f.id} ${f.check} [${f.severity}] ${f.party}${f.section ? ` (${f.section})` : ""}: ${money(f.amount)} — ${f.detail}`);
+  }
+  lines.push("");
+  const recon = result.recon;
+  const unmatchedBooks = recon.reduce((t, r) => t + r.unmatchedBooks.length, 0);
+  const unmatchedAs26 = recon.reduce((t, r) => t + r.unmatchedAs26.length, 0);
+  lines.push(
+    `Unmatched after reconciliation: ${unmatchedBooks} books entries and ${unmatchedAs26} 26AS rows — see the workbook sheets for the item detail.`,
+  );
+  lines.push("");
+  return lines.join("\n");
+}
+
 export async function writeAs26Report(opts: {
   reportDir: string;
   company: string;
@@ -1284,6 +1313,32 @@ export async function writeAs26Report(opts: {
     ]),
   };
 
+  // The engine's combination matches with their invoice evidence: rows the
+  // unmatched sheets legitimately lost, shown here so the link stays visible.
+  const combinationRows = opts.result.recon.flatMap((r) =>
+    r.combinations.map((c, i) => ({ r, c, i })).filter(({ c }) => c.invoiceRef != null),
+  );
+  const combinationSheet: Sheet = {
+    name: "Combination matches",
+    columns: [
+      { header: "row", width: 8, format: "text" },
+      { header: "party", width: 26, format: "text" },
+      { header: "26AS date", width: 12, format: "text" },
+      { header: "26AS tax", width: 14, format: "money" },
+      { header: "matched entries", width: 12, format: "text" },
+      { header: "entries total", width: 14, format: "money" },
+      { header: "invoice ref", width: 16, format: "text" },
+      { header: "invoice date", width: 12, format: "text" },
+      { header: "invoice taxable", width: 16, format: "money" },
+      { header: "link basis", width: 14, format: "text" },
+    ],
+    rows: combinationRows.map(({ r, c, i }, k) => [
+      `C${k + 1}`, r.match.as26Name, c.target.date, c.target.tax,
+      String(c.parts.length), c.parts.reduce((t, p) => t + p.tax, 0),
+      c.invoiceRef ?? "", c.invoiceDate ?? "", c.invoiceTaxable ?? null,
+      c.basis ?? "",
+    ]),
+  };
   const fd20Sheet: Sheet = {
     name: "FD interest 20% TDS",
     columns: [
@@ -1326,7 +1381,7 @@ export async function writeAs26Report(opts: {
   await writeWorkbook({
     reportDir: opts.reportDir,
     fileName: `as26-review-${stem}.xlsx`,
-    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet, fd20Sheet, fdAutoSheet],
+    sheets: [findingsSheet, deductorsSheet, eventsSheet, mappingSheet, booksNotIn26ASSheet, as26UnmatchedSheet, billValueMismatchSheet, combinationSheet, fd20Sheet, fdAutoSheet],
     vault: opts.vault,
   });
   return { markdownPath, workbookPath };

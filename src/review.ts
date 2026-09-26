@@ -1148,6 +1148,8 @@ export function createSession(
         as26Name: vault.pseudonym(m.as26Name, "debtor"),
       };
     };
+    const REF_MASK = (ref: string | null): string | null =>
+      ref && !DATE_LABEL.test(ref) ? vault.pseudonym(ref, "doc") : ref;
     const recon = result.recon.map((r) => ({
       ...r,
       match: maskReconMatch(r.match),
@@ -1161,6 +1163,10 @@ export function createSession(
         target: { ...c.target, date: displayDate(c.target.date) },
         parts: c.parts.map((p) => ({ ...p, date: displayDate(p.date) })),
         side: c.side,
+        basis: c.basis,
+        invoiceRef: REF_MASK(c.invoiceRef ?? null),
+        invoiceDate: c.invoiceDate ? displayDate(c.invoiceDate) : null,
+        invoiceTaxable: c.invoiceTaxable ?? null,
       })),
       unmatchedBooks: r.unmatchedBooks.map((i) => ({ ...i, date: displayDate(i.date) })),
       unmatchedAs26: r.unmatchedAs26.map((i) => ({ ...i, date: displayDate(i.date) })),
@@ -1170,8 +1176,6 @@ export function createSession(
       masterByKey.has(k)
         ? maskLedgerName(masterByKey.get(k)!, ledgerGroupOf.get(k) ?? "", c, vault)
         : vault.pseudonym(k, "debtor");
-    const REF_MASK = (ref: string | null): string | null =>
-      ref && !DATE_LABEL.test(ref) ? vault.pseudonym(ref, "doc") : ref;
     const bookEvents = [
       ...deductions.map((e) => ({
         party: pseudoKey(e.ledgerKey), source: "deduction" as const, date: displayDate(e.date),

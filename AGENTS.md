@@ -716,3 +716,21 @@ When updating this file, preserve this bar for all agents and keep entries conci
   counterparty is one (`counterpartyOf`). A bank's FY interest total then
   splits honestly into a regular stream plus a set of `fd_20pct_tds` events
   whose tax is exactly 20% (excluded from the totals compare).
+
+## Sharp edges found adding the rate-exact fallback's unexplained-only pool (2026-09-26)
+
+- The addendum-7 rate-exact fallback's pool must be the UNEXPLAINED journals
+  only — no `linkInvoice` link at all (any basis, approximate included) under
+  the same capacity-aware linker the sheets use — never the whole unmatched
+  tail. Approximately-anchored journals already have an invoice explanation,
+  however weak; letting those guesses into the pool manufactures competing
+  exact subsets that bury the true one (live: four pre-invoice journals
+  summing exactly to their invoice's TDS lost among anchored decoys, 8 fits,
+  honest give-up). `anchorOf` (`src/as26.ts`) is computed with the same
+  `linkInvoiceWithCapacity` + ledger scoping the sheets use, so engine and
+  workbook agree by construction; `test/as26.test.ts` pins both directions
+  (unexplained-only unique fit matches; fully-anchored pool stays unmatched).
+- `linkInvoice` prefers same-ledger candidates when `ledgerKey` is present
+  (deductor spanning zone ledgers); every caller that has a ledger key must
+  pass it (`reconcileParty` pools, `buildBillRows`), or cross-zone deposits
+  anchor to the wrong zone's invoice and the pools disagree.

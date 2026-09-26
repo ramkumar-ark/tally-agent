@@ -695,6 +695,91 @@ describe("reconcileParty — invoice-anchored tiers (addendum 6)", () => {
     expect(r.unmatchedAs26).toHaveLength(0);
   });
 
+  it("rate-exact fallback survives a pool larger than the subset bound (addendum 7 follow-up)", () => {
+    // Pool shape mirrors a real books export: the capacity pool holds many
+    // items besides the four journals that sum exactly to the target — but
+    // each filler is a half-target, so no filler combination can land in the
+    // window and the four journals stay the UNIQUE exact subset.
+    const filler: Array<[string, number]> = [
+      ["20250410", 25000], ["20250415", 25000], ["20250420", 25000], ["20250425", 25000],
+      ["20250430", 25000], ["20250505", 25000], ["20250510", 25000], ["20250515", 25000],
+      ["20250520", 25000], ["20250525", 25000], ["20250530", 25000], ["20250604", 25000],
+      ["20250608", 25000], ["20250616", 25000],
+    ];
+    const ded: Array<[string, number]> = [
+      ...filler,
+      ["20250702", 295589],
+      ["20250702", 4840], ["20250702", 22725], ["20250702", 14870], ["20250702", 17527],
+    ];
+    const sales = [
+      { ledgerKey: NK, date: "20250702", ref: "INV 10", taxable: 14779427, gross: 17439324 },
+      { ledgerKey: NK, date: "20250721", ref: "INV 12", taxable: 2998069, gross: 3537721 },
+    ];
+    const r = result(ded, [txn(59962, null, "20251101")], 59962, { sales });
+    const target = r.recon[0];
+    expect(target.unmatchedAs26).toHaveLength(0);
+    const combo = target.combinations.find((c) => c.invoiceRef === "INV 12");
+    expect(combo).toBeDefined();
+    expect(combo!.parts).toHaveLength(4);
+    expect(combo!.parts.reduce((t, x) => t + x.tax, 0)).toBeCloseTo(59962, 2);
+    expect(target.unmatchedBooks.reduce((t, x) => t + x.tax, 0)).toBeCloseTo(295589 + filler.length * 25000, 2);
+    expect(combo!.basis).toBe("taxable-rate");
+  });
+  it("rate-exact fallback matches unexplained journals even when anchored decoys outnumber them (unanchored journals outvote anchored decoys)", () => {
+    // Four journals pre-date their invoice (no earlier invoice explains
+    // them: anchor none), while three decoy journals approximately anchor to
+    // two other invoices. Both groups sum exactly to the deposit, so the
+    // full pool holds two fitting subsets — only the unexplained pool is
+    // unique, and the match lands on the true invoice.
+    const facts: BooksFacts = {
+      deductions: [
+        ...[4840, 22725, 14870, 17527].map((tax) => ({
+          ledgerKey: NK, kind: "tds" as const, date: "20250702", tax, voucherType: "Journal" as const,
+        })),
+        { ledgerKey: NK, kind: "tds" as const, date: "20250801", tax: 41092, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20250802", tax: 11876, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20250802", tax: 6994, voucherType: "Journal" },
+      ],
+      sales: [
+        saleOf("20250701", "INV 09", 150000), // 2% = 3000: too small to explain anything
+        saleOf("20250721", "INV 12", 2998069), // 2% = 59961.38 ~ 59962
+        saleOf("20250801", "INV 20", 2100000), // decoy anchor for 41092
+        saleOf("20250802", "INV 21", 700000), // decoy anchor for 11876 + 6994
+      ],
+    };
+    const file = txFile([txGross(59962, 2998100, "20251101")], 59962);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(1);
+    const combo = r.combinations[0];
+    expect(combo.parts.map((p) => p.tax).sort((a, b) => a - b)).toEqual([4840, 14870, 17527, 22725]);
+    expect(combo.basis).toBe("taxable-rate");
+    expect(combo.invoiceRef).toBe("INV 12");
+    expect(r.unmatchedBooks.map((b) => b.tax).sort((a, b) => a - b)).toEqual([6994, 11876, 41092]);
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
+
+  it("rate-exact fallback never steals approximately-anchored journals for a later invoice", () => {
+    // Every journal already has an invoice explanation (one strong, two
+    // approximate); the later rate-exact invoice's pool is therefore empty
+    // and the deposit stays unmatched instead of consuming them.
+    const facts: BooksFacts = {
+      deductions: [
+        { ledgerKey: NK, kind: "tds" as const, date: "20250705", tax: 6000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20250708", tax: 6000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20250715", tax: 12000, voucherType: "Journal" },
+      ],
+      sales: [
+        saleOf("20250701", "INV A", 500000), // 2% = 10000
+        saleOf("20250710", "INV B", 600000), // 2% = 12000: strong anchor for the 12000 journal
+        saleOf("20250721", "INV C", 900000), // 2% = 18000: the later deposit's invoice
+      ],
+    };
+    const file = txFile([txGross(18000, 777777, "20251101")], 18000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(0);
+    expect(r.unmatchedBooks).toHaveLength(3);
+    expect(r.unmatchedAs26).toHaveLength(1);
+  });
   it("capacity fallback stays ambiguous when two rate-exact invoices each hold a fitting subset", () => {
     const facts: BooksFacts = {
       deductions: [6000, 12000, 17500, 500].map((tax) => ({

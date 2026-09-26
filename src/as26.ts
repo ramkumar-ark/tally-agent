@@ -285,6 +285,10 @@ export function receivableLedgers(
 export const AS26_TAX_TOLERANCE = 1.0;
 export const AS26_VALUE_TOLERANCE = 1000.0;
 export const COMBINATION_MAX_SIZE = 4;
+/** Node budget for the exact-capacity subset walk (honest give-up, never a guess). */
+export const COMBINATION_EXACT_NODES = 500000;
+/** Targets at or under this many paise go through the dense subset-sum DP. */
+export const COMBINATION_DP_MAX_PAISE = 30_000_000;
 export const COMBINATION_MAX_ITEMS = 40;
 /** Addendum 5: a deductor can split one bill's TDS across many small
  * journal entries — a government deductor took 11 journals against ONE 26AS
@@ -434,7 +438,15 @@ export interface PartyRecon {
   match: PartyMatch;
   booksTax: number; as26Tax: number;
   paired: Array<{ books: ReconItem; as26: ReconItem }>;
-  combinations: Array<{ target: ReconItem; parts: ReconItem[]; side: "books" | "as26" }>;
+  combinations: Array<{
+    target: ReconItem; parts: ReconItem[]; side: "books" | "as26";
+    /** The invoice evidence the group was matched on, when a single
+     * predicate exists (tier anchor or rate-exact fallback). */
+    basis?: LinkBasis;
+    invoiceRef?: string | null;
+    invoiceDate?: string | null;
+    invoiceTaxable?: number | null;
+  }>;
   ambiguous: number;
   unmatchedBooks: ReconItem[]; unmatchedAs26: ReconItem[];
   combinationSearchSkipped: boolean;
@@ -588,10 +600,12 @@ const latestUpdate = (best: BooksSale | null, s: BooksSale): BooksSale =>
 
 export function linkInvoice(
   sales: BooksSale[],
-  item: { date: string; tax: number; reference: string | null; section: string | null },
+  item: { date: string; tax: number; reference: string | null; section: string | null; ledgerKey?: string },
   claimed?: Map<string, number>,
 ): { sale: BooksSale; basis: LinkBasis } | null {
-  const cands = sales.filter((s) => s.date <= item.date);
+  const candsByDate = sales.filter((s) => s.date <= item.date);
+  const sameLedger = item.ledgerKey ? candsByDate.filter((s) => s.ledgerKey === item.ledgerKey) : [];
+  const cands = sameLedger.length > 0 ? sameLedger : candsByDate;
   const ref = item.reference ? normRef(item.reference) : "";
   if (ref) {
     const hit = sales.find((s) => s.ref != null && normRef(s.ref) === ref);
@@ -652,7 +666,7 @@ function capacityKey(s: BooksSale): string {
  */
 export function claimedTdsCapacity(
   sales: BooksSale[],
-  items: Array<{ date: string; tax: number; reference: string | null }>,
+  items: Array<{ date: string; tax: number; reference: string | null; ledgerKey?: string }>,
   section: string | null,
 ): Map<string, number> {
   const claimed = new Map<string, number>();
@@ -675,7 +689,7 @@ export function claimedTdsCapacity(
  */
 export function linkInvoiceWithCapacity(
   sales: BooksSale[],
-  item: { date: string; tax: number; reference: string | null; section: string | null },
+  item: { date: string; tax: number; reference: string | null; section: string | null; ledgerKey?: string },
   claimed: Map<string, number>,
 ): { sale: BooksSale; basis: LinkBasis } | null {
   return linkInvoice(sales, item, claimed);
@@ -766,22 +780,104 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     // the claiming journal was itself consumed by an earlier stage.
     const partyInputs = booksItems.flatMap((b) => {
       const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
-      return d ? [{ date: d.date, tax: d.tax, reference: d.reference }] : [];
+      return d ? [{ date: d.date, tax: d.tax, reference: d.reference, ledgerKey: d.ledgerKey }] : [];
     });
     const claimed = claimedTdsCapacity(salesPool, partyInputs, section);
-    // ref -> unmatched book entries anchored to that invoice
-    const anchored = new Map<string, ReconItem[]>();
+    // ref -> unmatched book entries anchored to that invoice, with the
+    // anchor link's basis so consumed groups can show their evidence.
+    const anchored = new Map<string, { pool: ReconItem[]; basis: LinkBasis; sale: BooksSale }>();
     for (const b of unmatchedBooks) {
       const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
       if (!d) continue;
-      const link = linkInvoiceWithCapacity(salesPool, { date: d.date, tax: d.tax, reference: d.reference, section }, claimed);
+      const link = linkInvoiceWithCapacity(salesPool, { date: d.date, tax: d.tax, reference: d.reference, section, ledgerKey: d.ledgerKey }, claimed);
       if (!link || !link.sale.ref) continue;
       const key = normRef(link.sale.ref);
       if (!saleByRef.has(key)) continue;
-      const list = anchored.get(key);
-      if (list) list.push(b);
-      else anchored.set(key, [b]);
+      const entry = anchored.get(key);
+      if (entry) entry.pool.push(b);
+      else anchored.set(key, { pool: [b], basis: link.basis, sale: link.sale });
     }
+    /** Exact-capacity subset search (addendum 7 follow-up): the unique
+     * subset of pool summing to the target within tolerance, or null.
+     * Journals can pre-date their invoice (TDS booked on accounting, bill
+     * raised later), so the pool is the party's whole unmatched tail and
+     * needs a real algorithm, not enumeration: a dense subset-sum DP over
+     * paise for targets up to COMBINATION_DP_MAX_PAISE (count capped at 2 —
+     * uniqueness is all the honesty rule needs), a budgeted DFS beyond. */
+    const fitExactPool = (pool: ReconItem[], target: ReconItem): ReconItem[] | null => {
+      if (pool.length === 0) return null;
+      const paise = (x: number): number => Math.round(x * 100);
+      const lo = paise(target.tax) - paise(AS26_TAX_TOLERANCE);
+      const hi = paise(target.tax) + paise(AS26_TAX_TOLERANCE);
+      const items = [...pool];
+      if (hi <= COMBINATION_DP_MAX_PAISE) {
+        const fromSum = new Int32Array(hi + 1).fill(-1);
+        const fromIdx = new Int32Array(hi + 1).fill(-1);
+        const count = new Int32Array(hi + 1);
+        count[0] = 1;
+        for (let i = 0; i < items.length; i += 1) {
+          const w = paise(items[i].tax);
+          if (w <= 0 || w > hi) continue;
+          for (let sum = hi - w; sum >= 0; sum -= 1) {
+            if (count[sum] === 0) continue;
+            const ns = sum + w;
+            if (count[ns] === 0) {
+              count[ns] = Math.min(2, count[sum]);
+              fromSum[ns] = sum;
+              fromIdx[ns] = i;
+            } else if (count[ns] < 2) {
+              count[ns] = Math.min(2, count[ns] + count[sum]);
+            }
+          }
+        }
+        let winners = 0;
+        let winSum = -1;
+        for (let sum = Math.max(0, lo); sum <= hi; sum += 1) {
+          if (count[sum] > 0) winSum = sum;
+          winners += count[sum];
+        }
+        if (winners !== 1) return null;
+        const picks: number[] = [];
+        let sum = winSum;
+        while (sum !== 0) {
+          picks.push(fromIdx[sum]);
+          sum = fromSum[sum];
+        }
+        return picks.map((i) => items[i]);
+      }
+      // Huge targets: budgeted DFS, honest give-up.
+      const sorted = [...items].sort((x, y) => y.tax - x.tax);
+      const suffix = new Array<number>(sorted.length + 1).fill(0);
+      for (let i = sorted.length - 1; i >= 0; i -= 1) suffix[i] = round2(suffix[i + 1] + sorted[i].tax);
+      const floor = target.tax - AS26_TAX_TOLERANCE;
+      const ceiling = target.tax + AS26_TAX_TOLERANCE;
+      const foundFits: ReconItem[][] = [];
+      let nodes = 0;
+      let stop = false;
+      let overflow = false;
+      const walk = (i: number, sum: number, acc: ReconItem[]): void => {
+        if (stop || overflow) return;
+        if (nodes > COMBINATION_EXACT_NODES) {
+          overflow = true;
+          return;
+        }
+        if (i >= sorted.length) return;
+        nodes += 1;
+        const withSum = round2(sum + sorted[i].tax);
+        if (Math.abs(withSum - target.tax) <= AS26_TAX_TOLERANCE) {
+          foundFits.push([...acc, sorted[i]]);
+          if (foundFits.length > 1) {
+            stop = true;
+            return;
+          }
+        }
+        if (withSum <= ceiling) walk(i + 1, withSum, [...acc, sorted[i]]);
+        if (round2(sum + suffix[i + 1]) >= floor) walk(i + 1, sum, acc);
+      };
+      walk(0, 0, []);
+      if (overflow || foundFits.length !== 1) return null;
+      return foundFits[0];
+    };
     /** Whole pool first (no size limit), then subsets only if enumerable. */
     const fitInPool = (pool: ReconItem[], target: ReconItem): ReconItem[] | null => {
       if (pool.length === 0) return null;
@@ -797,13 +893,13 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
       return hit;
     };
     /** Tier-1/2 candidate pools for one 26AS target, deduplicated by ref set. */
-    const poolsFor = (a: ReconItem): ReconItem[][] => {
+    const poolsFor = (a: ReconItem): string[][] => {
       const gross = a.gross ?? 0;
       const rateFits = (t: number): boolean => rate !== null && Math.abs(round2(t * rate) - a.tax) <= AS26_TAX_TOLERANCE;
       const refSets: string[][] = [];
       const seen = new Set<string>();
       const push = (refs: string[]): void => {
-        if (refs.some((r) => (anchored.get(r)?.length ?? 0) === 0)) return;
+        if (refs.some((r) => (anchored.get(r)?.pool.length ?? 0) === 0)) return;
         const key = [...refs].sort().join("+");
         if (seen.has(key)) return;
         seen.add(key);
@@ -822,23 +918,40 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
           if (Math.abs(sum - gross) <= AS26_VALUE_TOLERANCE || rateFits(sum)) push([refs[i], refs[k]]);
         }
       }
-      return refSets.map((rs) => {
-        const pool: ReconItem[] = [];
-        for (const r of rs) pool.push(...(anchored.get(r) ?? []));
-        return pool;
-      });
+      return refSets;
     };
-    const fitsByTarget = new Map<number, ReconItem[][]>();
+    /** A candidate fit with the invoice evidence it rests on. */
+    type TierFit = {
+      parts: ReconItem[];
+      basis: LinkBasis;
+      invoiceRef: string;
+      invoiceDate: string;
+      invoiceTaxable: number;
+    };
+    const tierFit = (parts: ReconItem[], refKeys: string[]): TierFit => {
+      const meta = anchored.get(refKeys[0])!;
+      const sales = refKeys.map((r) => saleByRef.get(r)!);
+      return {
+        parts,
+        basis: meta.basis,
+        invoiceRef: refKeys.length === 1 ? meta.sale.ref! : sales.map((x) => x.ref).join(" + "),
+        invoiceDate: meta.sale.date,
+        invoiceTaxable: round2(sales.reduce((t, x) => t + x.taxable, 0)),
+      };
+    };
+    const fitsByTarget = new Map<number, TierFit[]>();
     unmatchedAs26.forEach((a, j) => {
-      const found: ReconItem[][] = [];
+      const found: TierFit[] = [];
       const seenFit = new Set<string>();
-      for (const pool of poolsFor(a)) {
+      for (const rs of poolsFor(a)) {
+        const pool: ReconItem[] = [];
+        for (const r of rs) pool.push(...(anchored.get(r)?.pool ?? []));
         const fit = fitInPool(pool, a);
         if (!fit) continue;
         const key = fit.map((x) => x.dedIdx).sort().join("|");
         if (seenFit.has(key)) continue;
         seenFit.add(key);
-        found.push(fit);
+        found.push(tierFit(fit, rs));
       }
       if (found.length > 0) fitsByTarget.set(j, found);
     });
@@ -851,15 +964,15 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     // anchors and demoted below the invoice-predicate tiers.
     unmatchedAs26.forEach((a, j) => {
       if (fitsByTarget.has(j)) return;
-      const whole: ReconItem[][] = [];
+      const whole: TierFit[] = [];
       const seenFit = new Set<string>();
-      for (const pool of anchored.values()) {
-        if (pool.length === 0) continue;
-        if (!fits(sumTax(pool), a.tax)) continue;
-        const key = pool.map((x) => x.dedIdx).sort().join("|");
+      for (const [ref, meta] of anchored) {
+        if (meta.pool.length === 0) continue;
+        if (!fits(sumTax(meta.pool), a.tax)) continue;
+        const key = meta.pool.map((x) => x.dedIdx).sort().join("|");
         if (seenFit.has(key)) continue;
         seenFit.add(key);
-        whole.push(pool);
+        whole.push(tierFit(meta.pool, [ref]));
       }
       if (whole.length > 0) fitsByTarget.set(j, whole);
     });
@@ -869,9 +982,24 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     // before the deposit — journals can legitimately pre-date their invoice
     // (TDS booked on accounting, bill raised later), and the approximate
     // anchor correctly refuses to guess them onto an earlier invoice.
+    //
+    // The pool is the UNEXPLAINED journals only (no link at all under the
+    // same linkInvoice the sheets use): an approximately-anchored journal
+    // already has an invoice explanation, however weak, and letting those
+    // guesses into the pool manufactures competing subsets that bury the
+    // true one (live: four unanchored journals summing exactly to their
+    // invoice's TDS lost among anchored decoys). Unprovable stays unlinked.
+    const anchorOf = new Map<number, boolean>();
+    for (const b of unmatchedBooks) {
+      const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
+      if (d && b.dedIdx !== undefined) {
+        const link = linkInvoiceWithCapacity(salesPool, { date: d.date, tax: d.tax, reference: d.reference, section, ledgerKey: d.ledgerKey }, claimed);
+        anchorOf.set(b.dedIdx, link !== null);
+      }
+    }
     unmatchedAs26.forEach((a, j) => {
       if (fitsByTarget.has(j) || !rate) return;
-      const found: ReconItem[][] = [];
+      const found: TierFit[] = [];
       const seenFit = new Set<string>();
       for (const s of saleByRef.values()) {
         const capacity = round2(s.taxable * rate);
@@ -881,14 +1009,16 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
         for (const b of unmatchedBooks) {
           const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
           if (!d || d.date > a.date || d.tax > cap) continue;
+          if (s.ledgerKey && d.ledgerKey && d.ledgerKey !== s.ledgerKey) continue;
+          if (b.dedIdx === undefined || anchorOf.get(b.dedIdx)) continue;
           pool.push(b);
         }
-        const fit = fitInPool(pool, a);
+        const fit = fitExactPool(pool, a);
         if (!fit) continue;
         const key = fit.map((x) => x.dedIdx).sort().join("|");
         if (seenFit.has(key)) continue;
         seenFit.add(key);
-        found.push(fit);
+        found.push({ parts: fit, basis: "taxable-rate", invoiceRef: s.ref!, invoiceDate: s.date, invoiceTaxable: s.taxable });
       }
       if (found.length === 1) fitsByTarget.set(j, found);
       else if (found.length > 1) ambiguous += 1;
@@ -896,13 +1026,13 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     const contended = new Set<string>();
     for (const cands of fitsByTarget.values()) {
       if (cands.length > 1) {
-        for (const g of cands) contended.add(g.map((x) => x.dedIdx).sort().join("|"));
+        for (const g of cands) contended.add(g.parts.map((x) => x.dedIdx).sort().join("|"));
         continue;
       }
-      const key = cands[0].map((x) => x.dedIdx).sort().join("|");
+      const key = cands[0].parts.map((x) => x.dedIdx).sort().join("|");
       let wants = 0;
       for (const other of fitsByTarget.values()) {
-        if (other.some((x) => x.map((y) => y.dedIdx).sort().join("|") === key)) wants += 1;
+        if (other.some((x) => x.parts.map((y) => y.dedIdx).sort().join("|") === key)) wants += 1;
       }
       if (wants > 1) contended.add(key);
     }
@@ -910,13 +1040,17 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     const gTakenAs26 = new Set<number>();
     for (const [j, cands] of fitsByTarget) {
       if (gTakenAs26.has(j)) continue;
-      const parts = cands[0];
+      const parts = cands[0].parts;
       const key = parts.map((x) => x.dedIdx).sort().join("|");
       if (cands.length > 1 || contended.has(key)) {
         ambiguous += 1;
         continue;
       }
-      combinations.push({ target: unmatchedAs26[j], parts, side: "as26" });
+      combinations.push({
+        target: unmatchedAs26[j], parts, side: "as26",
+        basis: cands[0].basis, invoiceRef: cands[0].invoiceRef,
+        invoiceDate: cands[0].invoiceDate, invoiceTaxable: cands[0].invoiceTaxable,
+      });
       for (const p of parts) {
         const k = unmatchedBooks.findIndex((x) => x === p);
         if (k >= 0) gTakenBooks.add(k);
