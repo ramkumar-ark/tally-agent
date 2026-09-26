@@ -672,7 +672,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   Code `src/gst44-treatments.ts` (vocabulary), `src/gst44-prior.ts`
   (prior-year reader), `src/gst44-worksheet.ts` (engine),
   `src/gst44-worksheet-template.ts` (writer); tool `tb_write_gst_working_sheet`;
-  findings TB-019/020/021 (ordinals 19–21, TDS-table-only numbering).
+  findings TB-028/029/030 (ordinals 28–30 after the merge: 19–27 are the
+  concurrent loans lane; TDS-table-only numbering).
 - **Column B (captain 2026-09-26h): REVENUE is the ledger's net FY movement
   (debits minus credits); CAPITAL is the debit total (additions only).** The
   26e fix had made the walk debit-only throughout (`if (e.amount <= 0) continue`),
@@ -730,6 +731,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   (I=B, G=I-H-J, F=G-E-D) with no cached values until Excel recalculates — so
   a raw read of the .xlsx sees F=blank. Diff runs via Seeded-as + H literals,
   or implied F = B-H-J-E-D.
+- **Approved-sheet → Winman write (2026-09-27, Q-F flow):** `tb_write_3cd_gst44`
+  takes an optional `worksheetPath`; with it, `src/gst44-worksheet-read.ts`'s
+  `readWorksheetTotals` recomputes the two clause-44 rows from the working
+  sheet's LITERAL cells only (B, D, E, H, J) using the sheet's own identities
+  (I=B, G=I−H−J, F=G−E−D) — never reading G/F/I, which are formulas with no
+  cached value until Excel recalculates. Winman mapping: TOWARDSSUPPLIES=D,
+  COMPOSITIONSUPPLIER=E, OTHERS=F, REGISTEREDUNDERGST=H (the unregistered
+  column), TOTALEXPENDITURE=G+H=C+D+E+F (C5); J (not supply / paid to govt)
+  has no clause-44 column and is excluded. Without `worksheetPath` the source
+  is unchanged (cached review rows). The source .xlsm is never overwritten.
 
 ## Maintaining this file
 
