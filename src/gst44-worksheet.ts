@@ -28,8 +28,9 @@ import type { PriorYearSheets } from "./gst44-prior.js";
  *      others, credit-card spend always others)
  *   4. party GSTIN evidence  (per-party registered/unregistered pots; a
  *      registered supplier with no tax lines on its vouchers still seeds
- *      others — no-tax is not by itself evidence of exempt, 26f)
- *   4. party GSTIN evidence  (per-party registered/unregistered pots)
+ *      others — no-tax is not by itself evidence of exempt, 26f — EXCEPT a
+ *      "0%"-suffixed ledger, whose name pattern keeps it exempt when its
+ *      registered suppliers charged no tax, 26g)
  *   5. rate-suffix pattern   (explicit "- 18%" -> others, "0%" -> exempt)
  *   6. nothing               -> the row stays blank + a review finding
  *
@@ -335,6 +336,37 @@ export function gst44Worksheet(
     }
 
     const unknownAmount = acc.pots.unknown + acc.noParty;
+    // A "0%"-suffixed ledger whose registered suppliers charged no tax keeps
+    // that part Exempt (addendum 2026-09-26g): the 0% name pattern beats the
+    // registered-purchase party evidence. Only the no-tax part moves — spend
+    // from tax-charged vouchers stays a registered purchase (26e) and derives
+    // through F, so a part-taxed ledger seeds split (mixed). Any
+    // unregistered/unknown/no-party spend falls through to the routing below.
+    if (
+      pattern &&
+      pattern.rule.id === "rate-zero" &&
+      Math.abs(acc.debit) > ZERO &&
+      Math.abs(acc.pots.unregistered) <= ZERO &&
+      Math.abs(unknownAmount) <= ZERO &&
+      Math.abs(acc.noTaxGstin) > ZERO
+    ) {
+      const exemptPart = round2(Math.min(acc.noTaxGstin, acc.debit));
+      const whole = Math.abs(acc.debit - exemptPart) <= ZERO;
+      acc.seed = {
+        d: exemptPart,
+        e: 0,
+        h: 0,
+        j: 0,
+        treatment: whole ? "exempt" : "mixed",
+        kind: "pattern rule",
+        reason:
+          `rule 'rate-zero': ${pattern.rule.note} — its registered suppliers charged no tax on ${money(exemptPart)}, so the 0% name keeps that part exempt` +
+          (whole
+            ? ""
+            : `; ${money(round2(acc.debit - exemptPart))} came from tax-charged vouchers and stays Registered - others (derives through F)`),
+      };
+      continue;
+    }
     if (Math.abs(unknownAmount) <= ZERO) {
       const { others, unregistered } = acc.pots;
       if (Math.abs(acc.debit) <= ZERO) {

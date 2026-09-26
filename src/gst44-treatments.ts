@@ -57,6 +57,11 @@ export const GST44_TREATMENT_RULES: readonly TreatmentRule[] = [
   // loan-interest rule, so "Interest on GST A/c" reads not_supply while
   // "Interest on Bank Loan A/c" reads exempt. Registered first in the chain.
   { id: "interest-tax", kind: "policy", treatment: "not_supply", keywords: ["interest on tax", "interest on duty", "late fee on tax", "late fee on duty", "interest on gst", "interest on tds", "interest on income tax", "interest on professional tax", "late fee on gst", "late fee on tds"], note: "interest or late fee on taxes/duties is not a supply" },
+  // Interest/discount on bill factoring or financing is an exempt financial
+  // service (captain's addendum 2026-09-26g) — a POLICY rule, so it beats the
+  // registered-purchase party evidence. Deliberately NOT bare "factoring": a
+  // taxable "Factoring Charges -18%" fee must keep its rate-pattern seed.
+  { id: "bill-factoring", kind: "policy", treatment: "exempt", keywords: ["bill factoring", "financing"], note: "interest/discount on bill factoring or financing is an exempt financial service" },
   // Electricity/EB is exempt by captain's policy (addendum 2026-09-26e), NOT
   // because the prior year treated it that way — a POLICY rule, so it beats
   // a prior-year exact match in the seed chain.

@@ -691,6 +691,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Prior-year `Rates and Taxes` carried not_supply (J ₹40.46 lakh), agreeing with
   the policy rule, so it raises no change finding; the only prior_year_changed
   finding on the real run is Pooja Expenses (split profile, largest column kept).
+- Addendum 2026-09-26g fixes (same regen `...-20260926f.xlsx`): new
+  `bill-factoring` POLICY rule (interest/discount on bill factoring or
+  financing → exempt; deliberately not bare `factoring`, which would hijack a
+  taxable `-18%` factoring fee); and a `0%`-name ledger keeps its no-tax
+  registered part exempt (`Acc.noTaxGstin` seeds D, taxed spend stays in F via
+  a mixed seed — voucher-level tax flags can mix on one ledger, e.g. a freight
+  line on a taxed purchase bill). Pre-existing `Financing Charges A/c`
+  no-policy test updated: 26g supersedes it.
 - Addendum 2026-09-26f fixes (two halves, same regen `...-20260926e.xlsx`):
   supplier GSTINs live in Tally's `LEDGSTREGDETAILS.LIST` sub-blocks
   (APPLICABLEFROM-dated, multi-registration capable), NOT in `PartYGSTIN` —

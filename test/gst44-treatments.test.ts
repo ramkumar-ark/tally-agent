@@ -53,7 +53,6 @@ describe("policy keyword rules", () => {
 
   it("does not let a keyword match inside a larger word", () => {
     expect(policyMatch("Taxi Fare A/c", GST44_TREATMENT_RULES)).toBeNull();
-    expect(policyMatch("Financing Charges A/c", GST44_TREATMENT_RULES)).toBeNull();
   });
 
   it("leaves spend ledgers unpoliced", () => {
@@ -233,6 +232,27 @@ describe("operator rules", () => {
     await expect(loadGst44TreatmentRules(file, () => {})).rejects.toThrow(/rule 1/);
     await dir.writeFile(file, "{not json");
     await expect(loadGst44TreatmentRules(file, () => {})).rejects.toThrow(/not valid JSON/);
+  });
+});
+
+describe("addendum 2026-09-26g bill-factoring policy", () => {
+  it("interest/discount on bill factoring or financing seeds exempt by policy", () => {
+    for (const name of [
+      "Interest on Bill Factoring A/c",
+      "Bill Factoring Interest",
+      "Bill Factoring Charges",
+      "Financing Charges A/c",
+      "Interest on Equipment Financing",
+    ]) {
+      expect(policyMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("exempt");
+      expect(policyMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("bill-factoring");
+    }
+  });
+  it("stops before bare factoring: a taxable factoring fee keeps its own seed", () => {
+    expect(policyMatch("Factoring Charges -18%", GST44_TREATMENT_RULES)).toBeNull();
+  });
+  it("interest-on-tax precedence survives the new rule", () => {
+    expect(policyMatch("Interest on GST A/c", GST44_TREATMENT_RULES)?.rule.id).toBe("interest-tax");
   });
 });
 

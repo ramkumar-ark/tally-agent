@@ -21,6 +21,10 @@ const groupOf: Record<string, string> = {
   "Bank Charges A/c": "Bank Charges",
   "Interest on GST A/c": "Interest Expenses",
   "Interest on Bank Loan A/c": "Interest Expenses",
+  "Interest on Bill Factoring": "Indirect Expenses",
+  "Factoring Charges -18%": "Indirect Expenses",
+  "Haulage Services - 0%": "Indirect Expenses",
+  "Site Work - 0%": "Indirect Expenses",
   "Electricity Charges Paid": "Electricity Charges",
   "JCB Purchased": "Fixed Assets",
   "Petrol Vibrator - Greaves": "Fixed Assets",
@@ -446,6 +450,65 @@ describe("gst44Worksheet addendum 2026-09-26f", () => {
     expect(row.seed).toMatchObject({ d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence" });
     expect(row.seed!.reason).toContain("registered purchase");
     expect(row.seed!.reason).toContain("no tax lines");
+    expect(r.findings).toHaveLength(0);
+  });
+});
+
+describe("gst44Worksheet addendum 2026-09-26g", () => {
+  it("interest on bill factoring seeds exempt by policy, beating party evidence", () => {
+    const r = gst44Worksheet(
+      [v("Nova Traders", [["Interest on Bill Factoring", 50000], ["Nova Traders", -50000]])],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Interest on Bill Factoring", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Interest on Bill Factoring")!;
+    expect(row.seed).toMatchObject({ d: 50000, e: 0, h: 0, j: 0, treatment: "exempt", kind: "policy keyword" });
+    expect(row.seed!.reason).toContain("bill-factoring");
+    expect(r.findings).toHaveLength(0);
+  });
+  it("a 0%-suffixed ledger with no-tax registered spend keeps exempt", () => {
+    const r = gst44Worksheet(
+      [v("Nova Traders", [["Haulage Services - 0%", 224595], ["Nova Traders", -224595]])],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Haulage Services - 0%", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Haulage Services - 0%")!;
+    expect(row.seed).toMatchObject({ d: 224595, e: 0, h: 0, j: 0, treatment: "exempt", kind: "pattern rule" });
+    expect(row.seed!.reason).toContain("rate-zero");
+    expect(r.findings).toHaveLength(0);
+  });
+  it("a 0%-suffixed ledger with taxed vouchers stays a registered purchase", () => {
+    const r = gst44Worksheet(
+      [taxedBuy("Haulage Services - 0%", 10000)],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Haulage Services - 0%", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Haulage Services - 0%")!;
+    expect(row.seed).toMatchObject({ treatment: "others", kind: "party evidence" });
+    expect(r.findings).toHaveLength(0);
+  });
+  it("a part-taxed 0%-suffixed ledger seeds split: no-tax part exempt, taxed part derives through F", () => {
+    const r = gst44Worksheet(
+      [
+        v("Nova Traders", [["Haulage Services - 0%", 20000], ["Nova Traders", -20000]]),
+        taxedBuy("Haulage Services - 0%", 300),
+      ],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Haulage Services - 0%", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Haulage Services - 0%")!;
+    expect(row.seed).toMatchObject({ d: 20000, e: 0, h: 0, j: 0, treatment: "mixed", kind: "pattern rule" });
+    expect(row.seed!.reason).toContain("rate-zero");
+    expect(r.findings).toHaveLength(0);
+  });
+  it("a 0%-suffixed ledger with unregistered spend stays unregistered", () => {
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Site Work - 0%", 20000], ["Prime Haulage", -20000]])],
+      ctxOf({}),
+      { ...base, masterNames: masters(["Site Work - 0%", "Prime Haulage", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Site Work - 0%")!;
+    expect(row.seed).toMatchObject({ h: 20000, treatment: "unregistered", kind: "party evidence" });
     expect(r.findings).toHaveLength(0);
   });
 });
