@@ -182,7 +182,13 @@ export interface Clause21bBookRow {
   /** YYYYMMDD; a 194Q party-month row uses the month's first day. */
   date: string;
   voucherNumber: string;
-  /** The payment base; a party-month row is the month's whole gross. */
+  /**
+   * The expense the 21(b) sheet reports for this row. For a not-deposited row
+   * it is the payment base; for a not_deducted or short_deducted row it is the
+   * UNDEDUCTED portion of the expense — the liable tax / the applicable rate
+   * (captain, 2026-09-26), so a 194Q party-month row carries the taxable part
+   * beyond the ₹50 lakh crossing, never the whole month's purchases.
+   */
   gross: number;
   tdsDone: number;
   tdsDeposited: number;
@@ -1062,11 +1068,9 @@ export function analyzeTds(
 
   // The tax of a deduction the review treats as paid by the s.139(1) due date:
   // a 1:1 joined deposit wins, else the month pool's cover or the return's
-  // subsequent-year challan. 21(b) rows carry this figure as `deposited`
-  // (2026-09-26 009) so a covered credit's deducted tax is never shown as owed.
-  const depositedByDue = (ded: TdsDeduction): number =>
-    events.deposits.find((e) => e.deduction === ded)?.tax ??
-    (ded.depositCovered || ded.subsequentDeposit ? ded.tax : 0);
+  // subsequent-year challan. (The 21(b) sheet no longer reports a covered
+  // credit's deducted tax — a short row carries only the undeducted portion,
+  // captain 2026-09-26 — so this helper is no longer needed here.)
 
   for (const agg of aggs.values()) {
     const section = agg.section;
@@ -1171,6 +1175,11 @@ export function analyzeTds(
       // deposit facts it can see.
       const dep = events.deposits.find((e) => e.deduction === ded);
       if (ded.tax < liability - TDS_TOLERANCE && section !== "194Q" && !timingOnlySection(section)) {
+        // The 21(b) sheet reports only the UNDEDUCTED portion of the expense
+        // (captain, 2026-09-26): shortfall tax / the applicable rate, with TDS
+        // done and deposited at 0 — no tax was deducted on that portion. The
+        // finding above still carries the full payment facts.
+        const shortRate = b.rateApplied ?? rate.rate;
         stageShort(
           b.party,
           section,
@@ -1179,9 +1188,9 @@ export function analyzeTds(
           {
             date: b.date,
             voucherNumber: b.voucherNumber,
-            gross: b.gross,
-            tdsDone: ded.tax,
-            tdsDeposited: depositedByDue(ded),
+            gross: shortRate > 0 ? round2((liability - ded.tax) / shortRate) : b.gross,
+            tdsDone: 0,
+            tdsDeposited: 0,
             depositDate: dep?.date ?? ded.subsequentDeposit ?? null,
             liability,
           },
@@ -1318,13 +1327,14 @@ export function analyzeTds(
     // and the C8 excess-only base are unchanged (stamped above); other
     // sections keep the per-booking matching.
     if (section === "194Q") {
-      const monthGross = new Map<string, { party: string; gross: number; date: string }>();
+      const monthGross = new Map<string, { party: string; gross: number; date: string; liable: number }>();
       for (const b of bookings) {
         if ((b.liable ?? 0) <= 0) continue;
         const mk = `${deducteeKeyOf(ctx, b.party)}|${section}|${b.date.slice(0, 6)}`;
         if (!monthLiability.has(mk)) continue;
-        const cur = monthGross.get(mk) ?? { party: b.party, gross: 0, date: b.date };
+        const cur = monthGross.get(mk) ?? { party: b.party, gross: 0, date: b.date, liable: 0 };
         cur.gross += b.gross;
+        cur.liable += b.liable ?? 0;
         monthGross.set(mk, cur);
       }
       for (const [mk, m] of monthGross) {
@@ -1352,20 +1362,18 @@ export function analyzeTds(
           );
           clause21b.push({
             party: m.party, date: `${mk.slice(-6)}01`, voucherNumber: "",
-            gross: m.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
+            // 194Q no-deduction: the expense is the TAXABLE part of the month
+            // (the excess beyond the ₹50 lakh crossing), not the whole month's
+            // purchases (captain, 2026-09-26) — the liable tax / the applicable
+            // rate. `m.liable` is that same base, used as a zero-rate fallback.
+            gross: r0.rate > 0 ? round2(liab / r0.rate) : round2(m.liable),
+            tdsDone: 0, tdsDeposited: 0, depositDate: null,
             section, reason: "not_deducted", liability: liab, findingId: qId,
           });
         } else {
-          // The month's deducted credits are one pool; the deposited column
-          // counts whatever the review's own coverage sees paid by the s.139(1)
-          // due date (a joined deposit, a month-pool cover or a subsequent-year
-          // challan). 194Q raises no tds_not_deposited, so a covered month
-          // reports deposited = done.
-          const monthDeposited = round2(
-            events.deductions
-              .filter((d) => d.section === section && `${deducteeKeyOf(ctx, d.party)}|${section}|${d.date.slice(0, 6)}` === mk)
-              .reduce((sum, d) => sum + depositedByDue(d), 0),
-          );
+          // The month's shortfall is undeducted tax, so the 21(b) row reports
+          // only that portion of the expense — shortfall tax / the applicable
+          // rate — with TDS done and deposited at 0 (captain, 2026-09-26).
           stageShort(
             m.party,
             section,
@@ -1374,9 +1382,9 @@ export function analyzeTds(
             {
               date: `${mk.slice(-6)}01`,
               voucherNumber: "",
-              gross: m.gross,
-              tdsDone: round2(cred),
-              tdsDeposited: monthDeposited,
+              gross: r0.rate > 0 ? round2((liab - cred) / r0.rate) : round2(m.liable),
+              tdsDone: 0,
+              tdsDeposited: 0,
               depositDate: null,
               liability: liab,
             },

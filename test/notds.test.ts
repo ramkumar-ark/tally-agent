@@ -232,6 +232,9 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
       expense,
     );
     expect(rows).toHaveLength(1);
+    // The 2 shortfall tax is below the ₹100 reporting floor, so no short arm
+    // fires; the 4998 credit is never deposited, so the row is the
+    // not_deposited arm (unchanged by the 2026-09-26 undeducted-portion rule).
     expect(rows[0]).toMatchObject({ voucherNumber: "P/12", tdsDone: 4998, liability: 5000, tdsDeposited: 0, depositDate: null });
     // 4999 is within the 1.0 tolerance of the 5000 liability: not short, and
     // deposited on time ⇒ compliant ⇒ no candidate.
@@ -240,6 +243,19 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
       expense,
     );
     expect(within.rows).toEqual([]);
+  });
+
+  it("reports only the undeducted portion of the expense on a short-deducted row (captain, 2026-09-26)", () => {
+    // 5,00,000 @ 2% ⇒ 10,000 liability; a 5,000 credit deposited on time is
+    // short by 5,000 (≥ the ₹100 floor). The 21(b) sheet states only the
+    // undeducted expense: 5,000 shortfall / 2% = 2,50,000, with TDS done and
+    // deposited at 0 (no tax was deducted on that portion).
+    const { rows } = project(
+      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250705", "P/12", 5000, "Bank Alpha")] }],
+      [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 500000, partyA)] }],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ gross: 250000, tdsDone: 0, tdsDeposited: 0, liability: 10000, section: "194C" });
   });
 
   it("includes a deducted-but-never-deposited booking with tdsDeposited 0", () => {

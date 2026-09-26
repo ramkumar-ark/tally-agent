@@ -1570,6 +1570,17 @@ describe("2026-09-26m 194-I aggregate threshold + 194Q month matching", () => {
     expect(nd[0].amount).toBe(1100);
     expect(nd[0].detail).toContain("purchases of 61,00,000.00 for Jan-2026");
     expect(out.totals.notDeducted).toBe(1100);
+    // The 21(b) sheet reports the TAXABLE part of the month (the excess beyond
+    // the ₹50 lakh crossing), not the whole month's purchases (captain,
+    // 2026-09-26): the 1,100 payable / the 0.1% rate = 11,00,000.
+    expect(out.clause21b).toHaveLength(1);
+    expect(out.clause21b[0]).toMatchObject({
+      section: "194Q",
+      reason: "not_deducted",
+      gross: 1100000,
+      tdsDone: 0,
+      tdsDeposited: 0,
+    });
   });
 
   it("194Q: partial month credits raise one short finding for the shortfall", () => {
@@ -1580,15 +1591,16 @@ describe("2026-09-26m 194-I aggregate threshold + 194Q month matching", () => {
     expect(sh).toHaveLength(1);
     expect(sh[0].amount).toBe(500);
     expect(sh[0].detail).toContain("fall short");
-    // The month's deducted 600 is covered by the 600 deposit debit, so the
-    // 21(b) short row reports it as deposited: the review raises no 194Q
-    // not_deposited, and the deducted tax was paid (2026-09-26 009).
+    // The 21(b) sheet reports only the UNDEDUCTED portion of the expense
+    // (captain, 2026-09-26): the 500 shortfall tax / the 0.1% rate =
+    // 5,00,000, with TDS done and deposited at 0 — no tax was deducted on it.
     expect(out.clause21b).toHaveLength(1);
     expect(out.clause21b[0]).toMatchObject({
       section: "194Q",
       reason: "short_deducted",
-      tdsDone: 600,
-      tdsDeposited: 600,
+      gross: 500000,
+      tdsDone: 0,
+      tdsDeposited: 0,
     });
   });
 });

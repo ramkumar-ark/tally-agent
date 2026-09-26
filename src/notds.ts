@@ -113,7 +113,7 @@ export interface NoTdsCandidateRow {
   party: string;            // real name, unmasked; session + disk only
   date: string;             // YYYYMMDD (booking date)
   voucherNumber: string;    // auditor trace, never written to the workbook
-  gross: number;            // full payment (C13 default)
+  gross: number;            // expense the 21(b) sheet reports (engine row's gross)
   tdsDone: number;          // deduction tax, 0 when none
   tdsDeposited: number;     // deposit tax, 0 when none
   depositDate: string | null;
@@ -199,10 +199,11 @@ export function booksCandidates(
  * workbook carries — the merged, de-duplicated result of the books candidates
  * and the operator decisions/manual additions. A no-TDS-review cache row:
  * real names and real PAN in-session and on the operator's disk, never in any
- * outbound payload. `amount` is the payment the workbook states (C13: the
- * full payment, or the operator's amount override), `tdsDone`/`tdsDeposited`
- * the deduction/deposit facts, `section` the Winman TDSSECTION spelling
- * (null only on the levy and salary sheets, which take no section).
+ * outbound payload. `amount` is the expense the workbook states (the engine's
+ * undeducted portion for a short/not_deducted row, the payment base for a
+ * not_deposited row, or the operator's amount override), `tdsDone`/
+ * `tdsDeposited` the deduction/deposit facts, `section` the Winman TDSSECTION
+ * spelling (null only on the levy and salary sheets, which take no section).
  */
 export interface NoTdsRow {
   sheet: NotdsSheetKey;
