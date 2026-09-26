@@ -1042,3 +1042,20 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `Interest on TDS` row's `paid`/`paidOn` are taken from those challan stamps, **deduped by
   `subsequentChallanId`** (one challan covering several deductions of a section — the two 194T partners —
   has its single interest counted once; `section|depositDate` is only the fallback key).
+
+## Winman 3CD depreciation (clause 18 additions/deletions, 2026-09-27)
+
+- Design of record: `docs/design/2026-09-27-winman-3cd-depreciation-design.md`; engine `src/dep3cd.ts`
+  is voucher-level (day book only) and NEVER reuses `groupAcquisitions` — its 90-day same-party merge
+  folds two same-day purchases into one row.
+- Deletions are consideration received (money/party debit minus output tax, or the transfer out of a
+  Sales-Accounts disposal ledger), never the asset credit: P/L-on-sale journals DEBIT asset ledgers on
+  real books and must classify `sale_pl`, not as an addition. D3CD-006 is scoped to the Sales-Accounts
+  chain (`SALES_ACCOUNTS` in `src/dep3cd.ts`) — an income-root test alone wrongly flagged a
+  non-sale "Profit on Sale…" ledger under Indirect Incomes.
+- The first-column block text must be one of the workbook's own dropdown strings (`readListValues`);
+  Winman's validation is only a warning, so the writer refuses anything else. Rows carry no names —
+  the writer needs no vault de-masking.
+- D3CD findings have their own ordinal space; `CHECK_ORDINAL` is untouched. `INCLUDE_SAME_VOUCHER_CHARGES`
+  is `false` (captain Q3: an expensed charge is not added), so D3CD-010 never fires; a cash-in-hand part
+  over ₹10,000 is EXCLUDED and flagged D3CD-011 (Q9).
