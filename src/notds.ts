@@ -7,14 +7,7 @@
  */
 
 import { canonicalKey } from "./key.js";
-import {
-  TDS_TOLERANCE,
-  type TdsDeposit,
-  type TdsDeduction,
-  type TdsEvents,
-  type TdsLiability,
-} from "./tds.js";
-import { depositDue } from "./tds-law.js";
+import type { Clause21bBookRow } from "./tds.js";
 
 export const NOTDS_FORM_ID = "3cdNoTDS";
 
@@ -131,75 +124,47 @@ export interface NoTdsCandidateRow {
 }
 
 /**
- * The clause 21(b) books projection: the engine's per-booking liability facts
- * (`TdsLiability`, never re-derived here) projected to the candidate rows the
- * four sheets are filled from. A booking is a candidate when it carries a
- * liability beyond `TDS_TOLERANCE` and either nothing was deducted, the
- * deduction fell short of the liability beyond tolerance, or no deposit
- * joined it by the Rule 30 deposit due date (`depositDue` — the same
- * lateness the engine's `tds_late_deposit` finding measures). A deposit that
- * joined but arrived after that date still supplies the row's deposit facts;
- * whether it nevertheless cures the disallowance under the s.139(1) provisos
- * is the operator's call, not the engine's. Compliant deducted-and-deposited
- * rows are not candidates. Pure: no I/O, no vault, no masking.
+ * The clause 21(b) books projection: the engine's own clause 21(b) row facts
+ * (`Clause21bBookRow` — collected at exactly the raise points where the
+ * review's not_deducted / short / not_deposited findings fire) projected to
+ * the candidate rows the four sheets are filled from. There is no second scan
+ * and no re-derived predicate: a booking is a candidate only because the
+ * engine itself wrote one. A booking the engine raised both a
+ * short-deducted and a not-deposited row for collapses to its not-deposited
+ * row (same key; the stricter deposit facts, 0, win). Pure: no I/O, no vault,
+ * no masking.
  */
 export function booksCandidates(
-  events: TdsEvents,
-  liabilities: readonly TdsLiability[],
+  rows: readonly Clause21bBookRow[],
   panOf: (party: string) => string | null,
   panDerivedFromGstinOf: (party: string) => boolean,
 ): NoTdsCandidateRow[] {
-  // Deposit facts are indexed once by the deduction object reference (the
-  // Global Constraints perf rule — no per-candidate find): joinEvents joins
-  // at most one deposit per deduction, so the first deposit carrying a
-  // `.deduction` back-reference wins.
-  const depositByDeduction = new Map<TdsDeduction, TdsDeposit>();
-  for (const dep of events.deposits) {
-    if (dep.deduction && !depositByDeduction.has(dep.deduction)) {
-      depositByDeduction.set(dep.deduction, dep);
+  const byKey = new Map<string, NoTdsCandidateRow>();
+  for (const r of rows) {
+    const key = `${canonicalKey(r.party)}|${r.date}|${r.voucherNumber}|${r.section}`;
+    const cand: NoTdsCandidateRow = {
+      key,
+      party: r.party,
+      date: r.date,
+      voucherNumber: r.voucherNumber,
+      gross: r.gross,
+      tdsDone: r.tdsDone,
+      tdsDeposited: r.tdsDeposited,
+      depositDate: r.depositDate,
+      section: r.section,
+      liability: r.liability,
+      pan: panOf(r.party),
+      panFromGstin: panDerivedFromGstinOf(r.party),
+    };
+    if (r.reason === "not_deposited") {
+      // The not-deposited arm always wins over an earlier short arm of the
+      // same key (its deposit facts are the stricter, engine-verified ones).
+      byKey.set(key, cand);
+    } else if (!byKey.has(key)) {
+      byKey.set(key, cand);
     }
   }
-
-  const rows: NoTdsCandidateRow[] = [];
-  for (const l of liabilities) {
-    if (l.liability <= TDS_TOLERANCE) continue; // the engine filters these too; kept as the predicate's first arm
-    const ded = l.deduction;
-    const dep = ded === null ? undefined : depositByDeduction.get(ded);
-    const depositedOnTime = ded !== null && dep !== undefined && dep.date <= depositDue(ded.date);
-    const shortDeducted = ded !== null && ded.tax < l.liability - TDS_TOLERANCE;
-    // Candidate arms: no deduction OR short deduction OR no deposit joined in
-    // time. Compliant (deducted within tolerance and deposited on time) falls
-    // through as the only exclusion.
-    if (ded !== null && !shortDeducted && depositedOnTime) continue;
-    // Month-level deposit coverage (2026-09-26e): a credit whose pool+month
-    // the duty ledger's lump deposits cover counts as deposited — never a
-    // clause 21(b) row, unless the deduction itself was short. Same for a
-    // subsequent-year challan-covered credit (2026-09-26i): deposited after
-    // the FY end, never a 21(b) row.
-    if (ded !== null && (ded.depositCovered || ded.subsequentDeposit) && !shortDeducted) continue;
-    rows.push({
-      key: `${canonicalKey(l.booking.party)}|${l.booking.date}|${l.booking.voucherNumber}|${l.section}`,
-      party: l.booking.party,
-      date: l.booking.date,
-      voucherNumber: l.booking.voucherNumber,
-      gross: l.booking.gross,
-      tdsDone: ded?.tax ?? 0,
-      // Deposit facts beyond the 1:1 join: a month-pool-covered credit
-      // (2026-09-26e) has its full tax covered by the duty ledger's lump
-      // deposit debits, and a subsequent-year challan-covered credit
-      // (2026-09-26i) has its tax (matched within tolerance) on the return's
-      // challan — both are deposited facts, never 0. The pool records no
-      // single deposit date, so depositDate stays null there (it is not
-      // written to the workbook); the challan date is recorded.
-      tdsDeposited: dep?.tax ?? (ded?.subsequentDeposit || ded?.depositCovered ? ded.tax : 0),
-      depositDate: dep?.date ?? ded?.subsequentDeposit ?? null,
-      section: l.section,
-      liability: l.liability,
-      pan: panOf(l.booking.party),
-      panFromGstin: panDerivedFromGstinOf(l.booking.party),
-    });
-  }
-  return rows;
+  return [...byKey.values()];
 }
 
 /**

@@ -159,6 +159,38 @@ export interface TdsDeduction {
   /** Stamps: the per-deduction s.201(1A) interest components. */
   interestI?: number;
   interestII?: number;
+  /**
+   * The draw's expense share (2026-09-26o item 038/039): a lump duty credit
+   * split across same-sign debits (per partner) carries each draw's own debit
+   * amount, so the clause 21(b) not-deposited rows can name the partner's
+   * expenditure share, not just the tax share. Only the per-draw split sets
+   * it; the single-counterparty path leaves it unset (the joined booking's
+   * gross supplies the base instead).
+   */
+  drawGross?: number;
+}
+
+/**
+ * One clause 21(b) book row, collected by the engine at exactly the raise
+ * points where the review's own `tds_not_deducted` / `tds_short_deducted` /
+ * `tds_not_deposited` findings fire (2026-09-26 005: the sheets must reconcile
+ * to the review, never to a second scan). `reason` names which finding kind
+ * produced the row.
+ */
+export interface Clause21bBookRow {
+  party: string;
+  /** YYYYMMDD; a 194Q party-month row uses the month's first day. */
+  date: string;
+  voucherNumber: string;
+  /** The payment base; a party-month row is the month's whole gross. */
+  gross: number;
+  tdsDone: number;
+  tdsDeposited: number;
+  depositDate: string | null;
+  section: string;
+  reason: "not_deducted" | "short_deducted" | "not_deposited";
+  /** The figure the producing finding carried (template/review prose only). */
+  liability: number;
 }
 
 export interface TdsDeposit {
@@ -489,7 +521,7 @@ export function extractEvents(
               idx === draws.length - 1 ? round2(tax - allocated) : round2((tax * Math.abs(d.amount)) / total);
             allocated = round2(allocated + share);
             if (share < ZERO) return;
-            deductions.push({ ...common, party: d.ledger, tax: share });
+            deductions.push({ ...common, party: d.ledger, tax: share, drawGross: round2(d.amount) });
           });
         } else {
           deductions.push({ ...common, party: r.counterparty, tax });
@@ -771,7 +803,7 @@ export function analyzeTds(
   expenseLedgers: TdsLedgerRows[],
   partyLedgers: TdsLedgerRows[],
   ctx: TdsCtx & { operator: OperatorFile },
-): { events: TdsEvents; findings: TdsFinding[]; totals: TdsTotals; liabilities: TdsLiability[] } {
+): { events: TdsEvents; findings: TdsFinding[]; totals: TdsTotals; liabilities: TdsLiability[]; clause21b: Clause21bBookRow[] } {
   const events = extractEvents(dutyLedgers, expenseLedgers, partyLedgers, ctx);
   // Debit notes and charge reversals reduce the charge bases before any
   // threshold or liability is measured (2026-09-26o items 4/5).
@@ -932,6 +964,7 @@ export function analyzeTds(
   // Aggregate the gross base per deductee key (PAN-else-ledger) per section.
   const findings: TdsFinding[] = [];
   const liabilities: TdsLiability[] = [];
+  const clause21b: Clause21bBookRow[] = [];
   const ordinals = new Map<TdsCheckId, number>();
   const nextOrd = (check: TdsCheckId): number => {
     const n = (ordinals.get(check) ?? 0) + 1;
@@ -968,9 +1001,18 @@ export function analyzeTds(
   // Short deductions are staged per deductee key and flushed at the end
   // (2026-09-26o item 3): a party's sub-₹100 FY total is not reported, and
   // the floor is measured across all its short rows before any is emitted.
-  const shortStage: { key: string; party: string; section: string; amount: number; detail: string }[] = [];
-  const stageShort = (party: string, section: string, amount: number, detail: string): void => {
-    shortStage.push({ key: deducteeKeyOf(ctx, party), party, section, amount, detail });
+  const shortStage: {
+    key: string; party: string; section: string; amount: number; detail: string;
+    row?: { date: string; voucherNumber: string; gross: number; tdsDone: number; tdsDeposited: number; depositDate: string | null; liability: number };
+  }[] = [];
+  const stageShort = (
+    party: string,
+    section: string,
+    amount: number,
+    detail: string,
+    row?: { date: string; voucherNumber: string; gross: number; tdsDone: number; tdsDeposited: number; depositDate: string | null; liability: number },
+  ): void => {
+    shortStage.push({ key: deducteeKeyOf(ctx, party), party, section, amount, detail, ...(row ? { row } : {}) });
   };
   // s.40(a)(ia) measures 30% of the EXPENDITURE, not of the tax (2026-09-26
   // addendum item 6): the gross of each affected booking is accumulated
@@ -1092,6 +1134,11 @@ export function analyzeTds(
         if (section === "194Q") continue;
         notDeducted += liability;
         notDeductedBase += b.gross;
+        clause21b.push({
+          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
+          gross: b.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
+          section, reason: "not_deducted", liability,
+        });
         push(
           "tds_not_deducted",
           "critical",
@@ -1102,12 +1149,27 @@ export function analyzeTds(
         );
         continue;
       }
+      // Deposit checks: the joined deposit was matched in joinEvents. Read
+      // before the short stage — the clause 21(b) short row carries the
+      // deposit facts it can see.
+      const dep = events.deposits.find((e) => e.deduction === ded);
       if (ded.tax < liability - TDS_TOLERANCE && section !== "194Q" && !timingOnlySection(section)) {
         stageShort(
           b.party,
           section,
           round2(liability - ded.tax),
           `duty credit of ${money(ded.tax)} on ${displayDate(ded.date)} is short of the ${money(liability)} payable on the booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}.`,
+          {
+            date: b.date,
+            voucherNumber: b.voucherNumber,
+            gross: b.gross,
+            tdsDone: ded.tax,
+            tdsDeposited:
+              dep?.tax ??
+              (ded.depositCovered || ded.subsequentDeposit ? ded.tax : 0),
+            depositDate: dep?.date ?? ded.subsequentDeposit ?? null,
+            liability,
+          },
         );
       }
       const advance = events.payments
@@ -1217,6 +1279,11 @@ export function analyzeTds(
         if (!timingOnlySection(section)) {
           notDepositedBase += liability > ZERO ? round2(b.gross * (ded.tax / liability)) : b.gross;
         }
+        clause21b.push({
+          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
+          gross: b.gross, tdsDone: ded.tax, tdsDeposited: 0, depositDate: null,
+          section, reason: "not_deposited", liability,
+        });
         push(
           "tds_not_deposited",
           "critical",
@@ -1260,6 +1327,11 @@ export function analyzeTds(
         if (cred <= TDS_TOLERANCE) {
           notDeducted += liab;
           notDeductedBase += m.gross;
+          clause21b.push({
+            party: m.party, date: `${mk.slice(-6)}01`, voucherNumber: "",
+            gross: m.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
+            section, reason: "not_deducted", liability: liab,
+          });
           push(
             "tds_not_deducted",
             "critical",
@@ -1274,6 +1346,15 @@ export function analyzeTds(
             section,
             round2(liab - cred),
             `duty credits of ${money(cred)} for ${label} fall short of the ${money(liab)} payable on purchases of ${money(m.gross)} under section ${section}${panNote}.`,
+            {
+              date: `${mk.slice(-6)}01`,
+              voucherNumber: "",
+              gross: m.gross,
+              tdsDone: round2(cred),
+              tdsDeposited: 0,
+              depositDate: null,
+              liability: liab,
+            },
           );
         }
       }
@@ -1353,6 +1434,12 @@ export function analyzeTds(
     timingUndepositedTax.set(section, round2((timingUndepositedTax.get(section) ?? 0) + d.tax));
     if (d.booking) continue; // its finding was raised by the per-booking pass
     notDepositedTax += d.tax;
+    clause21b.push({
+      party: d.party, date: d.date, voucherNumber: d.voucherNumber,
+      gross: d.drawGross ?? 0,
+      tdsDone: d.tax, tdsDeposited: 0, depositDate: null,
+      section, reason: "not_deposited", liability: d.tax,
+    });
     push(
       "tds_not_deposited",
       "critical",
@@ -1371,7 +1458,7 @@ export function analyzeTds(
   // Flush the staged short deductions (2026-09-26o item 3): a deductee's
   // whole-FY short total (across sections) below ₹100 is not reported; only
   // the parties that reach the floor emit their per-row findings and feed the
-  // totals and the s.271C exposure.
+  // totals, the s.271C exposure and the clause 21(b) rows.
   const shortTotalByDeductee = new Map<string, number>();
   for (const s of shortStage) {
     shortTotalByDeductee.set(s.key, round2((shortTotalByDeductee.get(s.key) ?? 0) + s.amount));
@@ -1379,6 +1466,15 @@ export function analyzeTds(
   for (const s of shortStage) {
     if ((shortTotalByDeductee.get(s.key) ?? 0) < SHORT_DEDUCTION_MIN) continue;
     shortDeducted += s.amount;
+    if (s.row) {
+      clause21b.push({
+        party: s.party, date: s.row.date, voucherNumber: s.row.voucherNumber,
+        gross: s.row.gross, tdsDone: s.row.tdsDone, tdsDeposited: s.row.tdsDeposited,
+        depositDate: s.row.depositDate,
+        section: s.section, reason: "short_deducted",
+        liability: s.row.liability,
+      });
+    }
     push("tds_short_deducted", "critical", s.party, s.section, s.amount, s.detail);
   }
 
@@ -1534,6 +1630,7 @@ export function analyzeTds(
     events,
     findings,
     liabilities,
+    clause21b,
     totals: {
       bySection: [...bySection.values()],
       notDeducted: round2(notDeducted),

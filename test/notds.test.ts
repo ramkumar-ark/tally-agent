@@ -180,7 +180,7 @@ const project = (
   const out = analyzeTds(duty, expense, [], tdsCtx(opts.operator, opts.over));
   return {
     out,
-    rows: booksCandidates(out.events, out.liabilities, opts.panOf ?? panOfA, opts.panDerived ?? (() => false)),
+    rows: booksCandidates(out.clause21b, opts.panOf ?? panOfA, opts.panDerived ?? (() => false)),
   };
 };
 
@@ -250,16 +250,18 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
     expect(rows[0]).toMatchObject({ tdsDone: 5000, tdsDeposited: 0, depositDate: null });
   });
 
-  it("includes a deducted-and-deposited-late booking WITH the deposit facts (Focus: s.139(1) cure is the operator's call)", () => {
+  it("excludes a late-but-deposited booking: a late deposit is a s.201(1A) interest finding, not a clause 21(b) row (2026-09-26 005)", () => {
     const expense = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
-    // depositDue(20250628) = 20250707 (Rule 30): the 15-Aug deposit is late.
+    // depositDue(20250628) = 20250707 (Rule 30): the 15-Aug deposit is late,
+    // but the tax was deposited — the review raises tds_late_deposit (interest)
+    // and no not_deducted/short/not_deposited finding, so the engine collects
+    // no clause 21(b) row (the sheets reconcile to the review).
     const { rows } = project(
       [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] }],
       expense,
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ tdsDone: 5000, tdsDeposited: 5000, depositDate: "20250815" });
-    // The same books with the deposit one day inside the window are compliant.
+    expect(rows).toEqual([]);
+    // The same books with the deposit one day inside the window are compliant too.
     const onTime = project(
       [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250707", "P/12", 5000, "Bank Alpha")] }],
       expense,
@@ -317,8 +319,8 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
       `${canonicalKey(partyA)}|20250610|P/13|194C`,
       `${canonicalKey(partyB)}|20250710|P/14|194C`,
     ]);
-    // Stable: the pure projection over the same inputs returns the same keys.
-    const again = booksCandidates(out.events, out.liabilities, panOfA, () => false);
+    // Stable: the pure projection over the same rows returns the same keys.
+    const again = booksCandidates(out.clause21b, panOfA, () => false);
     expect(again.map((r) => r.key)).toEqual(keys);
   });
 });

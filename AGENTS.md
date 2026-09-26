@@ -753,6 +753,21 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **The agent computes no disallowance percentages** — the sheets carry payment
   facts only; Winman applies 30%/100% itself. Percentages appear only in
   masked review prose quoting the law.
+- **21(b) rows ARE the review findings, not a rescan** (2026-09-26 005): rows
+  project `analyzeTds`'s own `clause21b: Clause21bBookRow[]`, accumulated at
+  the exact `tds_not_deducted` / staged `tds_short_deducted` / `tds_not_deposited`
+  raise sites (per-booking, 194Q party-month, and timing-only per-partner-draw).
+  `booksCandidates` is now a pure projector over those rows — it must never
+  re-derive a liability predicate from `events`/`liabilities` again, or the
+  four sheets stop reconciling to the review (the 20260926j bug: 194Q flooded
+  every per-booking liability → 1924 phantom rows; 194T was one lump row
+  instead of one per partner draw). Advisories (`tds_threshold_crossed`,
+  `tds_late_deposit`, master-gap) carry no 40(a)(ia) amount and are rightly absent.
+- A per-partner 194T expense share rides `TdsDeduction.drawGross` (set only in
+  the `draws` split in `extractEvents`); the timing-only monitor's row uses it
+  for `gross`. `winmanSectionKey` (`src/tds-file.ts`) already normalizes Winman
+  labels to law keys, so `a.section === d.section` challan matching is correct
+  — a "deposited 0" row means genuinely uncovered, not a spelling mismatch.
 
 ## Maintaining this file
 

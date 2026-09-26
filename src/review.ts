@@ -108,7 +108,7 @@ const TCS_NAME_KEYWORDS: ReadonlyArray<readonly [RegExp, string]> = [
   [/remittance/i, "lrs"],
   [/notified/i, "notified-goods"],
 ];
-import { analyzeTds, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows, type TdsLiability } from "./tds.js";
+import { analyzeTds, type Clause21bBookRow, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows, type TdsLiability } from "./tds.js";
 import { analyzeTcs } from "./tcs.js";
 import { tds3cdRows, type Tds3cdResult } from "./tds3cd.js";
 import { tcsNatureByWinman } from "./tcs-law.js";
@@ -333,6 +333,7 @@ export interface NoTdsReviewResult {
 interface TdsBooksCache {
   events: TdsEvents;
   liabilities: TdsLiability[];
+  clause21b: Clause21bBookRow[];
   panOf: (party: string) => string | null;
   panDerivedFromGstinOf: (party: string) => boolean;
   panAliasOf: (party: string) => string | null;
@@ -2423,6 +2424,7 @@ export function createSession(
     lastTdsBooks = {
       events: analysis.events,
       liabilities: analysis.liabilities,
+      clause21b: analysis.clause21b,
       panOf: (party: string) => panOf.get(canonicalKey(party)) ?? null,
       panDerivedFromGstinOf: (party: string) => panDerived.has(canonicalKey(party)),
       panAliasOf: (party: string) => panAliasOf.get(canonicalKey(party)) ?? null,
@@ -4282,7 +4284,7 @@ export function createSession(
       ? parseNotdsTemplate(await readFile(input.templatePath))
       : input.operator ?? EMPTY_NOTDS_OPERATOR;
 
-    const cands = booksCandidates(books.events, books.liabilities, books.panOf, books.panDerivedFromGstinOf);
+    const cands = booksCandidates(books.clause21b, books.panOf, books.panDerivedFromGstinOf);
     const rows: NoTdsRow[] = [];
     const findings: NoTdsMaskedFinding[] = [];
     const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
@@ -4643,7 +4645,7 @@ async function realPathId(p: string): Promise<string> {
     notdsRows: () => lastNoTds,
     notdsCandidates: () =>
       lastTdsBooks
-        ? booksCandidates(lastTdsBooks.events, lastTdsBooks.liabilities, lastTdsBooks.panOf, lastTdsBooks.panDerivedFromGstinOf)
+        ? booksCandidates(lastTdsBooks.clause21b, lastTdsBooks.panOf, lastTdsBooks.panDerivedFromGstinOf)
         : undefined,
     write3cdNoTds,
   };

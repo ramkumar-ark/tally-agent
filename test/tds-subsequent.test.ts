@@ -253,3 +253,92 @@ describe("review wiring: the Winman name joins the template declaration (2026-09
     expect(undeclared.findings.filter((f) => f.check === "tds_late_deposit")).toHaveLength(0);
   });
 });
+
+describe("clause 21(b) engine rows (2026-09-26 005)", () => {
+  // The four sheets must reconcile to the review's findings, so the engine
+  // collects every Clause21bBookRow at exactly the raise point of the
+  // not_deducted / short / not_deposited finding it produces. These tests pin
+  // the collection, not the projection (test/notds-review.test.ts) or the
+  // workbook (test/notds-write.test.ts).
+
+  it("an uncovered deduction yields one not_deposited row with its booking's base", () => {
+    const L = ledgersOf([FEB_A]);
+    const { clause21b } = analyzeTds(L.duty, L.expense, L.party, ctxWith([]));
+    expect(clause21b).toEqual([
+      {
+        party: PARTY_A,
+        date: "20260220",
+        voucherNumber: "PU/1",
+        gross: 200000,
+        tdsDone: 4000,
+        tdsDeposited: 0,
+        depositDate: null,
+        section: "194C",
+        reason: "not_deposited",
+        liability: 4000,
+      },
+    ]);
+  });
+
+  it("a subsequent-year challan-covered deduction yields no row", () => {
+    const L = ledgersOf([FEB_A]);
+    const { clause21b } = analyzeTds(L.duty, L.expense, L.party, ctxWith([alloc(PARTY_A, "20260220", "20260430")]));
+    expect(clause21b).toEqual([]);
+  });
+
+  it("a month-pool-covered deduction yields no row", () => {
+    const L = ledgersOf([FEB_A]);
+    // A duty-ledger deposit debit dated inside the Rule 30 window but not the
+    // deduction's own date, so the 1:1 join cannot claim it: the month pool
+    // covers the February need and the row disappears.
+    const covered = {
+      ...L,
+      duty: [{ ledger: DUTY, rows: [...L.duty[0]!.rows, row("20260310", "CH/9", 4000, "Bank")] }],
+    };
+    const { clause21b } = analyzeTds(covered.duty, covered.expense, covered.party, ctxWith([]));
+    expect(clause21b).toEqual([]);
+  });
+
+  it("an undeducted booking yields one not_deducted row with tdsDone 0", () => {
+    const L = ledgersOf([FEB_A]);
+    const { clause21b } = analyzeTds([], L.expense, L.party, ctxWith([]));
+    expect(clause21b).toEqual([
+      expect.objectContaining({
+        party: PARTY_A,
+        date: "20260220",
+        voucherNumber: "PU/1",
+        gross: 200000,
+        tdsDone: 0,
+        tdsDeposited: 0,
+        section: "194C",
+        reason: "not_deducted",
+      }),
+    ]);
+  });
+
+  it("splits a lump 194T credit per partner and names each partner's expense share", () => {
+    // Dr Partner Alpha 10,00,000 / Dr Partner Beta 20,00,000 / Cr Duty 3,00,000
+    const duty194T: TdsLedgerRows = {
+      ledger: DUTY,
+      rows: [
+        {
+          ...row("20250910", "J/1", -300000, "Partners Current"),
+          draws: [
+            { ledger: "Partner Alpha", amount: 1000000 },
+            { ledger: "Partner Beta", amount: 2000000 },
+          ],
+        },
+      ],
+    };
+    const ctx194T: TdsCtx & { operator: OperatorFile } = {
+      ...ctxWith([]),
+      resolveSection: () => ({ section: "194T", candidates: [] }),
+      dutySectionOf: () => "194T",
+    };
+    const { clause21b } = analyzeTds([duty194T], [], [], ctx194T);
+    expect(clause21b.map((r) => ({ party: r.party, gross: r.gross, done: r.tdsDone, reason: r.reason }))).toEqual([
+      { party: "Partner Alpha", gross: 1000000, done: 100000, reason: "not_deposited" },
+      { party: "Partner Beta", gross: 2000000, done: 200000, reason: "not_deposited" },
+    ]);
+  });
+});

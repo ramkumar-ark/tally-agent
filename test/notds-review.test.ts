@@ -9,7 +9,8 @@ import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
 import { buildNotdsTemplate } from "../src/notds-template.js";
 import { parseNotdsTemplate, type NotdsDecision, type NotdsOperatorFile } from "../src/notds-file.js";
-import { booksCandidates } from "../src/notds.js";
+import { booksCandidates, type NoTdsCandidateRow } from "../src/notds.js";
+import type { Clause21bBookRow } from "../src/tds.js";
 import { canonicalKey } from "../src/key.js";
 import { buildWorkbook, type Sheet } from "../src/xlsx.js";
 
@@ -490,46 +491,64 @@ describe("noTdsReview", () => {
   });
 });
 
-describe("booksCandidates — deposit facts beyond the 1:1 join (2026-09-26e/i)", () => {
-  const bk = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", gross: 700000, ledger: "Office Rent", section: "194-I(a)", candidates: [] };
-  const liab = (deduction: unknown) => [
-    { booking: bk, section: "194-I(a)", liableBase: 700000, liability: 50000, rate: 0.1, deduction },
-  ];
-  const events = (deductions: unknown[], deposits: unknown[]) =>
-    ({ bookings: [], payments: [], deductions, deposits }) as never;
-  const run = (deduction: unknown, deposits: unknown[]): NoTdsCandidateRow[] =>
-    booksCandidates(events([deduction], deposits), liab(deduction), () => null, () => false);
-
-  it("a month-pool-covered credit (depositCovered) is not a clause 21(b) row", () => {
-    const ded = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 50000, section: "194-I(a)", joinedTo: "Bank", depositCovered: true };
-    expect(run(ded, [])).toEqual([]);
+describe("booksCandidates — projection of the engine's clause 21(b) rows (2026-09-26 005)", () => {
+  // The predicate that used to live here (liabilities scanned with a
+  // re-derived deposit-window test) is gone: the engine collects
+  // Clause21bBookRow at exactly its finding raise points, and the projection
+  // is a pure, 1:1, key-deduplicating pass over those rows. The deposit
+  // semantics are exercised at the engine level in
+  // test/tds-subsequent.test.ts.
+  const engRow = (over: Partial<Clause21bBookRow> = {}): Clause21bBookRow => ({
+    party: "Ledger Held LLP",
+    date: "20250910",
+    voucherNumber: "R/1",
+    gross: 700000,
+    tdsDone: 50000,
+    tdsDeposited: 0,
+    depositDate: null,
+    section: "194-I(a)",
+    reason: "not_deposited",
+    liability: 50000,
+    ...over,
   });
+  const run = (rows: Clause21bBookRow[]): NoTdsCandidateRow[] => booksCandidates(rows, () => null, () => false);
 
-  it("a subsequent-year challan-covered credit is not a clause 21(b) row", () => {
-    const ded = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 50000, section: "194-I(a)", joinedTo: "Bank", subsequentDeposit: "20260710" };
-    expect(run(ded, [])).toEqual([]);
-  });
-
-  it("a covered credit that was short-deducted stays a row and carries the deposit facts", () => {
-    const ded = {
-      date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 30000,
-      section: "194-I(a)", joinedTo: "Bank", subsequentDeposit: "20260710", depositCovered: true,
-    };
-    expect(run(ded, [])).toEqual([
-      expect.objectContaining({
-        tdsDone: 30000,
-        // Challan date quoted over the pool (which records no single date).
-        tdsDeposited: 30000,
-        depositDate: "20260710",
-      }),
+  it("projects each engine row 1:1 with the stable template key", () => {
+    const rows = run([engRow()]);
+    expect(rows).toEqual([
+      {
+        key: `${canonicalKey("Ledger Held LLP")}|20250910|R/1|194-I(a)`,
+        party: "Ledger Held LLP",
+        date: "20250910",
+        voucherNumber: "R/1",
+        gross: 700000,
+        tdsDone: 50000,
+        tdsDeposited: 0,
+        depositDate: null,
+        section: "194-I(a)",
+        liability: 50000,
+        pan: null,
+        panFromGstin: false,
+      },
     ]);
   });
 
-  it("the 1:1 joined deposit still wins over the stamps when it exists", () => {
-    const ded = { date: "20250910", voucherNumber: "R/1", party: "Ledger Held LLP", tax: 40000, section: "194-I(a)", joinedTo: "Bank" };
-    const dep = { date: "20251115", party: "Ledger Held LLP", tax: 40000, section: "194-I(a)", deduction: ded };
-    expect(run(ded, [dep])).toEqual([
-      expect.objectContaining({ tdsDeposited: 40000, depositDate: "20251115" }),
-    ]);
+  it("lets the not-deposited arm win over a short arm for the same key", () => {
+    const short = engRow({ reason: "short_deducted", tdsDone: 30000, tdsDeposited: 30000, depositDate: "20260710", liability: 50000 });
+    const notDep = engRow({ reason: "not_deposited", tdsDone: 30000, tdsDeposited: 0, depositDate: null, liability: 50000 });
+    const rows = run([short, notDep]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tdsDone: 30000, tdsDeposited: 0, depositDate: null });
+    // Order-independent: the not-deposited arm wins whichever side arrives first.
+    expect(run([notDep, short])[0]).toMatchObject({ tdsDeposited: 0, depositDate: null });
+  });
+
+  it("carries the vault PAN and the GSTIN-derived flag (Focus #5)", () => {
+    const rows = booksCandidates([engRow()], () => "TaxId 101", () => true);
+    expect(rows[0]).toMatchObject({ pan: "TaxId 101", panFromGstin: true });
+  });
+
+  it("yields nothing from an empty engine run (Focus #1: a suppressed section raises no rows)", () => {
+    expect(run([])).toEqual([]);
   });
 });
