@@ -19,6 +19,12 @@
 // Usage:
 //   npm run build                                     # this script reads dist/
 //   node scripts/verify-winman-roundtrip.mjs <source.xlsm> <out.xlsm> [--rows N]
+//     [--sheet NAME] [--form FORMID] [--sheets N]
+//
+// --sheet names the worksheet to exercise (default P.F.) and --form asserts the
+// Form 3CD form id that sheet belongs to (default EmployeePFESIfunds), so the
+// same harness drives the depreciation sheets (--sheet "Depreciation additions"
+// --form DepreciationNew). --sheets is the workbook's total sheet count.
 //
 // Exit codes: 0 pass, 1 assertion/Excel failure, 2 usage.
 
@@ -28,22 +34,40 @@ import { resolve } from "node:path";
 
 // powershell.exe is NOT on PATH in this WSL distro; the absolute path is required.
 const PS = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
-const SHEET = "P.F.";
-const EXPECTED_SHEETS = 18;
+const SHEET_DEFAULT = "P.F.";
+const FORM_DEFAULT = "EmployeePFESIfunds";
+const SHEETS_DEFAULT = 18;
 
 function usage(msg) {
   if (msg) console.error(`error: ${msg}`);
-  console.error("usage: node scripts/verify-winman-roundtrip.mjs <source.xlsm> <out.xlsm> [--rows N]");
+  console.error(
+    "usage: node scripts/verify-winman-roundtrip.mjs <source.xlsm> <out.xlsm> " +
+      "[--rows N] [--sheet NAME] [--form FORMID] [--sheets N]",
+  );
   process.exit(2);
 }
 
 const argv = process.argv.slice(2);
 let rowsWanted = 2;
+let sheetWanted = SHEET_DEFAULT;
+let formWanted = FORM_DEFAULT;
+let sheetsWanted = SHEETS_DEFAULT;
 const positional = [];
 for (let i = 0; i < argv.length; i += 1) {
   if (argv[i] === "--rows") {
     rowsWanted = Number(argv[++i]);
     if (!Number.isInteger(rowsWanted) || rowsWanted < 1) usage("--rows must be a positive integer");
+  } else if (argv[i] === "--sheet") {
+    sheetWanted = argv[++i];
+    if (!sheetWanted) usage("--sheet needs a worksheet name");
+  } else if (argv[i] === "--form") {
+    formWanted = argv[++i];
+    if (!formWanted) usage("--form needs a form id");
+  } else if (argv[i] === "--sheets") {
+    sheetsWanted = Number(argv[++i]);
+    if (!Number.isInteger(sheetsWanted) || sheetsWanted < 1) usage("--sheets must be a positive integer");
+  } else if (argv[i] === "--help") {
+    usage();
   } else if (argv[i].startsWith("--")) {
     usage(`unknown option ${argv[i]}`);
   } else {
@@ -68,24 +92,34 @@ try {
 
 // Sample rows only — invented round numbers, no operator data. Two rows is the
 // documented default; --rows widens it without changing the shape under test.
-const sample = (due, paid, amount) => ({
-  DUEDATE: { kind: "date", ymd: due },
-  PAIDON: { kind: "date", ymd: paid },
-  AMOUNTPAID: { kind: "number", value: amount },
-  AMOUNTCOLLECTED: { kind: "number", value: amount },
-});
-const rows = Array.from({ length: rowsWanted }, (_, k) =>
-  sample(`2025${String(k + 5).padStart(2, "0")}15`, `2025${String(k + 5).padStart(2, "0")}14`, 100000 + k),
-);
+// Values are derived from the named sheet's own schema: date keys get a date,
+// amount keys a number, and text keys a value the column's dropdown accepts
+// (read from the workbook so a block dropdown gets a real block label).
+function sampleValue(key, k) {
+  if (/DATE|PAIDON|TOUSE/.test(key)) return { kind: "date", ymd: `2025${String(k + 5).padStart(2, "0")}15` };
+  if (/AMOUNT/.test(key)) return { kind: "number", value: 100000 + k };
+  if (key === "FISTCOL" || key === "DELETIONDTLS") return { kind: "text", value: "5. Plant/ Machinery 15%:" };
+  const allowed = winman.readListValues(pkg, sheetWanted, key);
+  const pick = allowed.includes("No") ? "No" : allowed.includes("N/A") ? "N/A" : (allowed[0] ?? "No");
+  return { kind: "text", value: pick };
+}
 
 const pkg = xlsm.readXlsm(readFileSync(srcPath));
-const schema = winman.readSchema(pkg, SHEET);
+const schema = winman.readSchema(pkg, sheetWanted);
+if (schema.formId !== formWanted) {
+  console.error(`error: sheet "${sheetWanted}" belongs to form "${schema.formId}", not "${formWanted}"`);
+  process.exit(1);
+}
 const handshake = winman.readHandshake(pkg);
+const keys = [...schema.keys.keys()];
+const rows = Array.from({ length: rowsWanted }, (_, k) =>
+  Object.fromEntries(keys.map((key) => [key, sampleValue(key, k)])),
+);
 const expectedLastRow = schema.prototypeRow + rows.length;
 
-writeFileSync(outPath, xlsm.writeXlsm(winman.writeSheetRows(pkg, SHEET, rows)));
+writeFileSync(outPath, xlsm.writeXlsm(winman.writeSheetRows(pkg, sheetWanted, rows)));
 console.error(
-  `wrote ${rows.length} sample row(s) into "${SHEET}" of ${outPath} ` +
+  `wrote ${rows.length} sample row(s) into "${sheetWanted}" of ${outPath} ` +
     `(first data row ${schema.firstDataRow}, prototype ${schema.prototypeRow}, AY ${handshake.assessmentYear})`,
 );
 
@@ -126,9 +160,9 @@ try {
   $wb = $xl.Workbooks.Open('${winPath}')
   $res = @{ sheets = $wb.Sheets.Count }
   $wb.Application.Run('WorkBook_UnhideSheets')
-  $res.pfVisible = ($wb.Sheets('${SHEET}').Visible -eq -1)
-  $res.validates = $wb.Application.Run('ValidateMandatoryFields', $wb.Sheets('${SHEET}'))
-  $res.lastRow = $wb.Sheets('${SHEET}').UsedRange.Rows.Count + $wb.Sheets('${SHEET}').UsedRange.Row - 1
+  $res.pfVisible = ($wb.Sheets('${sheetWanted}').Visible -eq -1)
+  $res.validates = $wb.Application.Run('ValidateMandatoryFields', $wb.Sheets('${sheetWanted}'))
+  $res.lastRow = $wb.Sheets('${sheetWanted}').UsedRange.Rows.Count + $wb.Sheets('${sheetWanted}').UsedRange.Row - 1
   $res | ConvertTo-Json -Compress
 } catch {
   @{ error = $_.Exception.Message } | ConvertTo-Json -Compress
@@ -176,8 +210,8 @@ if (res.error) {
 }
 
 const checks = [
-  ["V2 sheets == " + EXPECTED_SHEETS, res.sheets === EXPECTED_SHEETS, `got ${res.sheets}`],
-  ["V3 P.F. visible after WorkBook_UnhideSheets", res.pfVisible === true, `got ${res.pfVisible}`],
+  ["V2 sheets == " + sheetsWanted, res.sheets === sheetsWanted, `got ${res.sheets}`],
+  [`V3 "${sheetWanted}" visible after WorkBook_UnhideSheets`, res.pfVisible === true, `got ${res.pfVisible}`],
   ["V3 ValidateMandatoryFields", res.validates === true, `got ${res.validates}`],
   ["V2/V3 lastRow == prototype + rows (" + expectedLastRow + ")", res.lastRow === expectedLastRow, `got ${res.lastRow}`],
 ];
