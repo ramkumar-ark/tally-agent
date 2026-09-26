@@ -1023,6 +1023,40 @@ export function registerTools(
   );
 
   register(
+    "tb_write_3cd_tds_tcs",
+    "Write the clause 34 TDS/TCS rows of the last tb_tds_review into the TDS, TCS, Return details and " +
+      "interest sheets of a COPY of the operator's Winman 3CD workbook and return the copy's path with " +
+      "per-sheet row counts. The copy is written to the report directory (or outPath) as '<source stem> " +
+      "- filled - <date>.xlsm'; the source workbook is never modified. The sheets actually carry the " +
+      "operator TAN and company name, like the returns they transcribe; the response is counts only.",
+    {
+      sourcePath: z.string().describe("Path to the operator's Winman 3CD .xlsm; read only, never written"),
+      outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+    },
+    async (args) => {
+      const path = await session.write3cdTdsTcs({
+        sourcePath: args.sourcePath,
+        outPath: args.outPath ?? cfg.reportDir,
+      });
+      const cached = session.tds3cdResult();
+      const sheets = {
+        tds: cached?.tds.length ?? 0,
+        tcs: cached?.tcs.length ?? 0,
+        returns: cached?.returns.length ?? 0,
+        interestTds: cached?.interestTds.length ?? 0,
+        interestTcs: cached?.interestTcs.length ?? 0,
+      };
+      await audit(
+        "tb_write_3cd_tds_tcs",
+        { sourcePath: args.sourcePath, outPath: args.outPath ?? null },
+        0,
+        0,
+      );
+      return JSON.stringify({ path, sheets }, null, 2);
+    },
+  );
+
+  register(
     "tb_write_pf_esi_report",
     "Write the PF/ESI clause 20(b) review workbook to disk: a Findings sheet and the Clause 20(b) " +
       "working paper (fund, wage month, amount collected, due date, amount paid, paid on, delay, " +
@@ -1443,8 +1477,7 @@ async function main(): Promise<void> {
   );
   const wrongGroup = loadWrongGroup(overridesFile);
   const downstream = await connectDownstream(cfg);
-  const session = createSession(downstream, overrides, wrongGroup,
-    { tdsRound100: cfg.tdsRound100 });
+  const session = createSession(downstream, overrides, wrongGroup);
 
   const server = new McpServer(
     { name: "tally-agent", version: "0.1.0" },

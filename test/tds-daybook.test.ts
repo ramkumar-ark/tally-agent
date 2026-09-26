@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { VoucherRow } from "../src/downstream.js";
-import { counterpartyOf, projectLedgerRows } from "../src/tds-daybook.js";
+import { deducteeCounterpartyOf, projectLedgerRows } from "../src/tds-daybook.js";
 
 const purchase: VoucherRow = {
   date: "20250510",
@@ -30,18 +30,22 @@ const split: VoucherRow = {
   ],
 };
 
-describe("counterpartyOf", () => {
+describe("deducteeCounterpartyOf", () => {
   it("faces a two-line voucher's other side", () => {
-    expect(counterpartyOf(purchase, 0)).toBe("Acme Contracting");
-    expect(counterpartyOf(purchase, 1)).toBe("Site Expenses");
+    expect(deducteeCounterpartyOf(purchase, 0)).toBe("Acme Contracting");
+    expect(deducteeCounterpartyOf(purchase, 1)).toBe("Site Expenses");
   });
 
   it("picks the largest opposite-signed line on a split voucher", () => {
-    expect(counterpartyOf(split, 0)).toBe("Acme Contracting");
+    expect(deducteeCounterpartyOf(split, 0)).toBe("Acme Contracting");
   });
 
-  it("makes a duty line face the expense line", () => {
-    expect(counterpartyOf(split, 2)).toBe("Site Expenses");
+  it("attributes a duty line to the voucher's party, not the expense line", () => {
+    const hint = {
+      isDutyLedger: (n: string) => n === "TDS on Contracts",
+      isPartyLedger: (n: string) => n === "Acme Contracting",
+    };
+    expect(deducteeCounterpartyOf(split, 2, hint)).toBe("Acme Contracting");
   });
 
   it("falls back to the voucher's party ledger when no opposite side exists", () => {
@@ -49,7 +53,42 @@ describe("counterpartyOf", () => {
       ...purchase,
       entries: [{ ledger: "Site Expenses", amount: 25000 }],
     };
-    expect(counterpartyOf(single, 0)).toBe("Acme Contracting");
+    expect(deducteeCounterpartyOf(single, 0)).toBe("Acme Contracting");
+  });
+
+  it("attributes a duty line to the party when the journal has no party ledger name (item 6)", () => {
+    const interest: VoucherRow = {
+      date: "20250825",
+      voucherType: "Journal",
+      voucherNumber: "JV/2357",
+      partyLedgerName: "",
+      cancelled: false,
+      entries: [
+        { ledger: "Interest on Unsecured Loans", amount: 200548 },
+        { ledger: "Acme Contracting", amount: -180493 },
+        { ledger: "TDS on Interest", amount: -20055 },
+      ],
+    };
+    const hint = {
+      isDutyLedger: (n: string) => n === "TDS on Interest",
+      isPartyLedger: (n: string) => n === "Acme Contracting",
+    };
+    // The duty credit must join the party, not the largest opposite-sign expense.
+    expect(deducteeCounterpartyOf(interest, 2, hint)).toBe("Acme Contracting");
+    // The expense line is unchanged, with or without the hint.
+    expect(deducteeCounterpartyOf(interest, 0, hint)).toBe("Acme Contracting");
+    // Without the hint the old (broken) attribution stands — this is the bug.
+    expect(deducteeCounterpartyOf(interest, 2)).toBe("Interest on Unsecured Loans");
+    // A two-line contra entry (`Dr Party / Cr Duty`) has no same-sign party,
+    // so the opposite-sign party is chosen.
+    const contra: VoucherRow = {
+      ...interest,
+      entries: [
+        { ledger: "Acme Contracting", amount: 5000 },
+        { ledger: "TDS on Interest", amount: -5000 },
+      ],
+    };
+    expect(deducteeCounterpartyOf(contra, 1, hint)).toBe("Acme Contracting");
   });
 });
 
@@ -109,6 +148,48 @@ describe("projectLedgerRows", () => {
     expect(out[0].rows[0].date).toBe("20250510");
     expect(out[0].rows[0].voucherNumber).toBe("12");
   });
+
+  it("stamps a duty credit with the voucher's same-sign draws (item 038/039)", () => {
+    const lump: VoucherRow = {
+      date: "20260331",
+      voucherType: "Journal",
+      voucherNumber: "JV/6245",
+      partyLedgerName: "",
+      cancelled: false,
+      entries: [
+        { ledger: "Partner Alpha Current A/c", amount: 1500000 },
+        { ledger: "Partner Beta Current A/c", amount: 1500000 },
+        { ledger: "TDS on Partners Remuneration", amount: -3000000 },
+      ],
+    };
+    const hint = { isDutyLedger: (n: string) => n === "TDS on Partners Remuneration" };
+    const out = projectLedgerRows([lump], ["TDS on Partners Remuneration"], hint);
+    expect(out[0].rows[0].draws).toEqual([
+      { ledger: "Partner Alpha Current A/c", amount: 1500000 },
+      { ledger: "Partner Beta Current A/c", amount: 1500000 },
+    ]);
+    // The draw ledgers themselves carry no draws.
+    const alpha = projectLedgerRows([lump], ["Partner Alpha Current A/c"], hint);
+    expect(alpha[0].rows[0].draws).toBeUndefined();
+  });
+
+  it("omits draws for a single-draw duty credit", () => {
+    const single: VoucherRow = {
+      date: "20250510",
+      voucherType: "Journal",
+      voucherNumber: "JV/1",
+      partyLedgerName: "Acme Contracting",
+      cancelled: false,
+      entries: [
+        { ledger: "Site Expenses", amount: 25000 },
+        { ledger: "Acme Contracting", amount: -24000 },
+        { ledger: "TDS on Contracts", amount: -1000 },
+      ],
+    };
+    const hint = { isDutyLedger: (n: string) => n === "TDS on Contracts" };
+    const out = projectLedgerRows([single], ["TDS on Contracts"], hint);
+    expect(out[0].rows[0].draws).toBeUndefined();
+  });
 });
 
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
@@ -159,6 +240,24 @@ describe("readDayBook", () => {
     // Additive identity fields null out for an old-shape ledger row (2026-09-26).
     expect(out.ledgers).toEqual([
       { name: "Site Expenses", parent: "Indirect Expenses", pan: null, gstin: null, address: null, openingBalance: null },
+    ]);
+  });
+
+  it("carries a bundle ledger's PAN and GSTIN through, normalized", () => {
+    const bundle = {
+      tallyAgentExport: 1,
+      company: "Example Infra",
+      fromDate: "20250401",
+      toDate: "20260331",
+      groups: [],
+      ledgers: [
+        { name: "Site Expenses", parent: "Indirect Expenses", pan: "aaapa1111a", gstin: " 27AAAPA1111A1Z5 " },
+      ],
+      vouchers: year,
+    };
+    const out = readDayBook(JSON.stringify(bundle), { ...opts, company: "example infra" });
+    expect(out.ledgers).toEqual([
+      { name: "Site Expenses", parent: "Indirect Expenses", pan: "AAAPA1111A", gstin: "27AAAPA1111A1Z5", address: null, openingBalance: null },
     ]);
   });
 
@@ -308,6 +407,25 @@ describe("tdsReview with a day book", () => {  it("makes no ledger-voucher call 
     expect(result.findings.every((f) => f.check !== "tds_daybook_rows_rejected")).toBe(true);
     // the June and January vouchers must not reach the engine
     expect(result.totals.bySection.reduce((a, t) => a + t.gross, 0)).toBe(25000);
+  });
+
+  it("joins an in-voucher duty credit whose interest journal has no party ledger name (item 6)", async () => {
+    // `Dr Interest / Cr Party (net) / Cr Duty` with an EMPTY partyLedgerName:
+    // pre-item-6 the duty line was attributed to the expense ledger, so the
+    // deduction never joined and the booking raised tds_not_deducted.
+    const journal = {
+      date: "20250525",
+      voucherType: "Journal",
+      voucherNumber: "JV/2357",
+      partyLedgerName: "",
+      entries: [
+        { LEDGERNAME: "Site Repairs Contract", AMOUNT: -25000 },
+        { LEDGERNAME: "Sample Builders LLP", AMOUNT: 24000 },
+        { LEDGERNAME: "TDS Contractors", AMOUNT: 1000 },
+      ],
+    };
+    const { result } = await runTdsReviewWithDayBook([journal], { fromDate: "20250401", toDate: "20250531" });
+    expect(result.findings.filter((f) => f.check === "tds_not_deducted")).toEqual([]);
   });
 
   it("raises a critical finding for each empty month, naming the month", async () => {
@@ -623,5 +741,51 @@ describe("Tally-free run", () => {
     expect(unmastered.every((f) => f.severity === "review")).toBe(true);
     // the real names must not survive anywhere in the output
     expect(JSON.stringify(result)).not.toMatch(/Acme Contracting|Sample Builders LLP|Site Repairs Contract|TDS Contractors/);
+  });
+
+  it("raises no no-PAN gap for a day-book party whose bookings never made TDS due (item 4)", async () => {
+    // Three 25,000 bookings = 75,000: below the 30,000 single bill and the
+    // 1,00,000 aggregate, and nothing deducted — the pre-item-4 engine still
+    // reported the party for the whole gross.
+    const { result } = await runTdsReviewOffline(offlineBundle, { fromDate: "20250401", toDate: "20260331" });
+    expect(result.findings.filter((f) => f.check === "tds_master_gap")).toEqual([]);
+  });
+
+  it("derives a deductee PAN from a bundle ledger's GSTIN (item 3), suppressing the no-PAN gap", async () => {
+    const bundle = {
+      tallyAgentExport: 1,
+      company: "Example Infra",
+      fromDate: "20250401",
+      toDate: "20260331",
+      groups: [
+        { name: "Sundry Creditors", parent: "Current Liabilities" },
+        { name: "Purchase Accounts", parent: "" },
+        { name: "Duties & Taxes", parent: "" },
+      ],
+      ledgers: [
+        { name: "Sample Builders LLP", parent: "Sundry Creditors", pan: "AAAPA1111A", gstin: "27AAAPA1111A1Z5" },
+        { name: "Site Repairs Contract", parent: "Purchase Accounts" },
+        { name: "TDS Contractors", parent: "Duties & Taxes" },
+      ],
+      vouchers: [revRaw(20250510, 40000), revRaw(20250612, 40000)],
+    };
+    const { result } = await runTdsReviewOffline(bundle, { fromDate: "20250401", toDate: "20260331" });
+    // Two 40,000 bookings cross the single-bill threshold, but the PAN the
+    // bundle carries (explicit and GSTIN-derived agree) means no no-PAN gap.
+    expect(result.findings.filter((f) => f.check === "tds_master_gap")).toEqual([]);
+    // the PAN never leaves the vault, even derived
+    expect(JSON.stringify(result)).not.toContain("AAAPA1111A");
+  });
+
+  it("raises the no-PAN gap per party+section for a day-book party without PAN facts", async () => {
+    const bundle = {
+      ...offlineBundle,
+      vouchers: [revRaw(20250510, 40000), revRaw(20250612, 40000)],
+    };
+    const { result } = await runTdsReviewOffline(bundle, { fromDate: "20250401", toDate: "20260331" });
+    const gaps = result.findings.filter((f) => f.check === "tds_master_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].section).toBe("194C");
+    expect(gaps[0].amount).toBe(80000);
   });
 });

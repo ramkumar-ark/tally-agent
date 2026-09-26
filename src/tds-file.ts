@@ -1,5 +1,6 @@
 import { parseVoucherRows, type VoucherRow } from "./downstream.js";
 import { TDS_SECTIONS } from "./tds-law.js";
+import { tcsNatureByWinman } from "./tcs-law.js";
 import { readWorkbook, type GridCell, type GridRow, type GridSheet } from "./xlsx-read.js";
 
 /**
@@ -75,7 +76,31 @@ export interface OperatorStatement {
   /** YYYYMMDD */
   filedDate: string;
   tdsAmount: number;
+  /**
+   * The s.206AA(3)/129(1D) fact the books cannot carry: whether the return
+   * was accurate. Absent means the consuming engine's default ("Yes").
+   */
+  returnAccurate?: "Yes" | "No";
 }
+
+export interface OperatorTcsSection {
+  ledger: string;
+  /** An exact TCS_NATURES winman string — never guessed, never normalised. */
+  nature: string;
+}
+
+export interface OperatorInterestPaid {
+  form: string;
+  quarter: "Q1" | "Q2" | "Q3" | "Q4";
+  amount: number;
+  /** YYYYMMDD */
+  paidOn: string;
+}
+
+/** The union of the two interest sheets' form dropdowns (clause-34 interest channel). */
+export const INTEREST_FORMS: readonly string[] = ["24Q", "26A", "26Q", "26QB", "27Q", "27EQ"];
+
+const TAN_SHAPE = /^[A-Z]{4}\d{5}[A-Z]$/;
 
 export interface OperatorFile {
   sections: OperatorSectionMap[];
@@ -92,6 +117,26 @@ export interface OperatorFile {
    * booking, never one party's.
    */
   section194QApplicable: boolean;
+  /**
+   * The operator's TAN, shape-validated. Lives only in this file and is never
+   * echoed into any outbound string (Q7 choice B); the template carries it as
+   * a Settings row.
+   */
+  tan?: string;
+  /**
+   * Whether s.201(1A) 1%-per-month interest on a LATE DEDUCTION is computed
+   * (2026-09-26r inbox 067). The captain's call: some companies treat the
+   * charge as not applicable, so the operator may turn it off. Absent in the
+   * JSON channel and blank in the template both mean **enabled** (true), so
+   * other companies are unaffected. When off, no late-deduction interest is
+   * computed, no such finding fires, and it is excluded from the 3CD Interest
+   * on TDS payable; late-DEPOSIT interest (1.5%) stays unchanged.
+   */
+  lateDeductionInterest: boolean;
+  /** TCS nature-of-receipt mapping: ledger → exact Winman nature string. */
+  tcsSections?: OperatorTcsSection[];
+  /** Interest the buyer paid on its own default (clause-34/interest channel). */
+  interestPaid?: OperatorInterestPaid[];
 }
 
 const SECTIONS = new Set(TDS_SECTIONS.map((s) => s.section));
@@ -221,10 +266,56 @@ export function parseOperatorFile(text: string): OperatorFile {
       quarter: quarter as OperatorStatement["quarter"],
       filedDate: normDate(r.filedDate),
       tdsAmount: num(r.tdsAmount),
+      ...(r.returnAccurate === undefined ? {} : { returnAccurate: returnAccurateOf(r.returnAccurate, at) }),
     };
   });
 
-  return {
+  const seenTcsLedgers = new Map<string, number>();
+  const tcsSections: OperatorTcsSection[] = list(d, "tcsSections").map((raw, i) => {
+    const at = `tcsSections row ${i + 1}`;
+    const r = obj(raw, at);
+    const ledger = str(r.ledger, at);
+    const nature = str(r.nature, at);
+    if (tcsNatureByWinman(nature) === null) {
+      // Never echoes the value: an error message is an outbound string, and a
+      // stray value can be anything — even a tax id planted in the wrong cell.
+      throw new Error(`operator file ${at}: nature is not a TCS nature from the Winman dropdown`);
+    }
+    const key = normHeader(ledger);
+    if (seenTcsLedgers.has(key)) {
+      throw new Error(`operator file ${at}: this ledger already appears in row ${seenTcsLedgers.get(key)}`);
+    }
+    seenTcsLedgers.set(key, i + 1);
+    return { ledger, nature };
+  });
+
+  const seenInterestKeys = new Map<string, number>();
+  const interestPaid: OperatorInterestPaid[] = list(d, "interestPaid").map((raw, i) => {
+    const at = `interestPaid row ${i + 1}`;
+    const r = obj(raw, at);
+    const form = str(r.form, at);
+    const formKey = form.toUpperCase().replace(/\s+/g, "");
+    if (!(INTEREST_FORMS as readonly string[]).includes(formKey)) {
+      throw new Error(`operator file ${at}: form is not one of the interest statement forms`);
+    }
+    const quarter = str(r.quarter, at).toUpperCase();
+    if (!QUARTERS.includes(quarter)) {
+      throw new Error(`operator file ${at}: quarter is not a calendar quarter`);
+    }
+    const key = `${formKey}|${quarter}`;
+    if (seenInterestKeys.has(key)) {
+      throw new Error(`operator file ${at}: this form-and-quarter pair already appears in row ${seenInterestKeys.get(key)}`);
+    }
+    seenInterestKeys.set(key, i + 1);
+    return {
+      form: formKey,
+      quarter: quarter as OperatorStatement["quarter"],
+      amount: num(r.amount),
+      paidOn: normDate(r.paidOn),
+    };
+  });
+
+  const result: OperatorFile = {
     sections,
     parties,
     certificates,
@@ -233,7 +324,32 @@ export function parseOperatorFile(text: string): OperatorFile {
     // Absent means applicable: the JSON channel's default is the captain's
     // "check 194Q unless told otherwise" (design §6).
     section194QApplicable: d.section194QApplicable === undefined ? true : truthy(d.section194QApplicable),
+    // Absent means enabled: the operator may turn the s.201(1A) 1% late-
+    // deduction interest off (inbox 067); the default leaves every other
+    // company's behaviour unchanged.
+    lateDeductionInterest: d.lateDeductionInterest === undefined ? true : truthy(d.lateDeductionInterest),
   };
+
+  if (d.tan !== undefined) result.tan = tanOf(d.tan, 'operator file "tan"');
+  if (d.tcsSections !== undefined) result.tcsSections = tcsSections;
+  if (d.interestPaid !== undefined) result.interestPaid = interestPaid;
+  return result;
+}
+
+/** Never echoes the value: a mangled operator string can still be its TAN. */
+function tanOf(raw: unknown, at: string): string {
+  const s = String(raw ?? "").replace(/\s+/g, "").toUpperCase();
+  if (!TAN_SHAPE.test(s)) {
+    throw new Error(`${at}: not a TAN (four letters, five digits, one letter)`);
+  }
+  return s;
+}
+
+function returnAccurateOf(raw: unknown, at: string): "Yes" | "No" {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (s === "yes" || s === "true" || s === "1" || s === "y") return "Yes";
+  if (s === "no" || s === "false" || s === "0" || s === "n") return "No";
+  throw new Error(`operator file ${at}: returnAccurate is not Yes or No`);
 }
 
 /**
@@ -260,6 +376,7 @@ export const EMPTY_TDS_OPERATOR: OperatorFile = {
   challans: [],
   statements: [],
   section194QApplicable: true,
+  lateDeductionInterest: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -364,30 +481,49 @@ function flag(ref: CellRef, cell: GridCell | undefined): boolean {
 
 /**
  * The optional Settings sheet: `Setting` / `Value` rows, one per whole-review
- * flag. Currently it carries only "194Q Applicable" (the captain's default
- * 194Q check, suppressible when the buyer did not meet the previous-year ₹10
- * crore turnover condition). A blank value means the default (applicable), so
- * a template with the row but an empty cell behaves like one without the
- * sheet. An unknown Setting label is rejected wholesale (never guessed), and
- * the error cites sheet/row/column, never a cell value.
+ * fact. Currently "194Q Applicable" (the captain's default 194Q check,
+ * suppressible when the buyer did not meet the previous-year ₹10 crore
+ * turnover condition), "TAN" (blank means absent) and "Late Deduction
+ * Interest" (the s.201(1A) 1% charge, default enabled). A blank value means
+ * the setting's default, so a template with the row but an empty cell behaves
+ * like one without it. An unknown Setting label is rejected wholesale (never
+ * guessed), and the error cites sheet/row/column, never a cell value.
  */
-function settings194QApplicable(sheet: GridSheet): boolean {
+function settingsSheetFacts(sheet: GridSheet): { section194QApplicable: boolean; lateDeductionInterest: boolean; tan?: string } {
   const cols = accessors(bindColumns(sheet, [{ header: "Setting" }, { header: "Value" }]));
-  const label = "194q applicable";
   let value = true;
+  let lateDeductionInterest = true;
+  let tan: string | undefined;
   for (const r of dataRows(sheet)) {
     const at = (col: number, header: string): CellRef => ({ sheet, row: r, col, header });
     const key = textCell(at(cols.get("Setting")!, "Setting"), r.cells.get(cols.get("Setting")!));
     if (key === undefined) {
       throw new Error(`template Settings row ${r.row}, column A (Setting): required cell is blank`);
     }
-    if (normHeader(key) !== label) {
-      throw new Error(`template Settings row ${r.row}, column A (Setting): not a known setting — the only setting is "194Q Applicable"`);
+    const label = normHeader(key);
+    if (label === "194q applicable") {
+      const v = textCell(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+      if (v !== undefined) value = flag(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+      continue;
     }
-    const v = textCell(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
-    if (v !== undefined) value = flag(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+    if (label === "late deduction interest") {
+      const v = textCell(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+      if (v !== undefined) lateDeductionInterest = flag(at(cols.get("Value")!, "Value"), r.cells.get(cols.get("Value")!));
+      continue;
+    }
+    if (label === "tan") {
+      const rawVal = raw(r.cells.get(cols.get("Value")!)).value;
+      if (rawVal === null || String(rawVal).trim() === "") continue;
+      const ref = at(cols.get("Value")!, "Value");
+      if (typeof rawVal === "number") {
+        throw new Error(`template ${ref.sheet.name} row ${r.row}, column ${colLetter(ref.col)} (${ref.header}): cell is numeric — retype the TAN as text`);
+      }
+      tan = tanOf(String(rawVal), `template ${ref.sheet.name} row ${r.row}, column ${colLetter(ref.col)} (${ref.header})`);
+      continue;
+    }
+    throw new Error(`template Settings row ${r.row}, column A (Setting): not a known setting — the settings are "194Q Applicable", "Late Deduction Interest" and "TAN"`);
   }
-  return value;
+  return { section194QApplicable: value, lateDeductionInterest, tan };
 }
 
 const PAN_SHAPE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
@@ -491,6 +627,28 @@ export function textCell(ref: CellRef, cell: GridCell | undefined): string | und
 }
 
 /**
+ * Find an optional column by header text (or alias); absent header means
+ * undefined, never an error — old templates keep parsing unchanged.
+ */
+function optionalColumn(sheet: GridSheet, header: string, aliases: string[] = []): number | undefined {
+  const headerRow: GridRow | undefined = sheet.rows[0];
+  const wanted = [header, ...aliases].map(normHeader);
+  for (const [idx, c] of headerRow?.cells ?? new Map()) {
+    if (typeof c.value === "string" && wanted.includes(normHeader(c.value))) return idx;
+  }
+  return undefined;
+}
+
+/** The Yes/No family normalised to "Yes"/"No"; blank means absent. */
+function yesNoCell(ref: CellRef, cell: GridCell | undefined): "Yes" | "No" | undefined {
+  const s = String(raw(cell).value ?? "").trim().toLowerCase();
+  if (s === "") return undefined;
+  if (s === "yes" || s === "y" || s === "true" || s === "1") return "Yes";
+  if (s === "no" || s === "n" || s === "false" || s === "0") return "No";
+  throw new Error(`template ${ref.sheet.name} row ${ref.row.row}, column ${colLetter(ref.col)} (${ref.header}): enter Yes or No`);
+}
+
+/**
  * Parse the fillable template produced by `tb_write_tds_template` back into
  * the same OperatorFile the JSON channel yields, so the session merges both
  * sources identically (design §8.1: same schema after parse, template wins
@@ -514,13 +672,20 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
     ]),
   );
   const seenSectionKeys = new Map<string, number>();
-  const sections: OperatorSectionMap[] = dataRows(sectionsSheet).map((r) => {
+  const sections: OperatorSectionMap[] = [];
+  for (const r of dataRows(sectionsSheet)) {
     const ledger = textCell({ sheet: sectionsSheet, row: r, col: sectionCols.get("Tally Ledger Name")!, header: "Tally Ledger Name" }, r.cells.get(sectionCols.get("Tally Ledger Name")!));
     if (ledger === undefined) {
       throw new Error(`template Sections row ${r.row}, column ${colLetter(sectionCols.get("Tally Ledger Name")!)} (Tally Ledger Name): required cell is blank`);
     }
+    const sectionCell = r.cells.get(sectionCols.get("Section")!);
+    const sectionVal = String(raw(sectionCell).value ?? "").trim();
+    if (sectionVal === "") {
+      // Blank section means not applicable for TDS per template instructions ("Leave a cell blank to mean 'not applicable'")
+      continue;
+    }
     const ref: CellRef = { sheet: sectionsSheet, row: r, col: sectionCols.get("Section")!, header: "Section" };
-    const section = enumCell(ref, r.cells.get(sectionCols.get("Section")!), sectionEnums, "not a TDS section — use the dropdown");
+    const section = enumCell(ref, sectionCell, sectionEnums, "not a TDS section — use the dropdown");
     const kindRef: CellRef = { sheet: sectionsSheet, row: r, col: sectionCols.get("Ledger Kind")!, header: "Ledger Kind" };
     const kindRaw = textCell(kindRef, r.cells.get(sectionCols.get("Ledger Kind")!));
     if (kindRaw !== undefined) {
@@ -534,10 +699,12 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
       throw new Error(`template Sections row ${r.row}, column A (Tally Ledger Name): this ledger-and-section pair already appears in row ${seenSectionKeys.get(key)}`);
     }
     seenSectionKeys.set(key, r.row);
-    return kindRaw !== undefined && normHeader(kindRaw).replace(/^tds /, "") === "duty"
-      ? { ledger, section, kind: "duty" as const }
-      : { ledger, section };
-  });
+    sections.push(
+      kindRaw !== undefined && normHeader(kindRaw).replace(/^tds /, "") === "duty"
+        ? { ledger, section, kind: "duty" as const }
+        : { ledger, section },
+    );
+  }
 
   const partiesSheet = locatedSheet(sheets, "Parties");
   const partyCols = accessors(
@@ -658,6 +825,9 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
       { header: "TDS Amount" },
     ]),
   );
+  // The Return Accurate column is OPTIONAL: a template filled before it
+  // existed parses unchanged, the facts then absent everywhere.
+  const returnAccurateCol = optionalColumn(stmtsSheet, "Return Accurate? (Yes/No)", ["Return Accurate"]);
   const seenStatements = new Map<string, number>();
   const statements: OperatorStatement[] = dataRows(stmtsSheet).map((r) => {
     const at = (col: number, header: string): CellRef => ({ sheet: stmtsSheet, row: r, col, header });
@@ -678,23 +848,109 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
       throw new Error(`template Statements row ${r.row}, column B (Quarter): this Form-and-quarter pair already appears in row ${seenStatements.get(key)}`);
     }
     seenStatements.set(key, r.row);
-    return {
+    const row: OperatorStatement = {
       form,
       quarter: quarter as OperatorStatement["quarter"],
       filedDate: dateCell(at(stmtCols.get("Filed Date")!, "Filed Date"), r.cells.get(stmtCols.get("Filed Date")!)),
       tdsAmount: amountCell(at(stmtCols.get("TDS Amount")!, "TDS Amount"), r.cells.get(stmtCols.get("TDS Amount")!)),
     };
+    if (returnAccurateCol !== undefined) {
+      const v = yesNoCell(at(returnAccurateCol, "Return Accurate? (Yes/No)"), r.cells.get(returnAccurateCol));
+      if (v !== undefined) row.returnAccurate = v;
+    }
+    return row;
   });
 
-  // The Settings sheet carries the whole-review flags. It is OPTIONAL: a
+  // The Settings sheet carries the whole-review facts. It is OPTIONAL: a
   // template filled before it existed (or one an operator deleted) defaults
   // every setting to its captain-approved value, here "194Q applicable".
   const settingsSheet = sheets.find((x) => normHeader(x.name) === normHeader("Settings"));
-  const section194QApplicable = settingsSheet === undefined
-    ? true
-    : settings194QApplicable(settingsSheet);
+  const settings = settingsSheet === undefined
+    ? { section194QApplicable: true as const, lateDeductionInterest: true as const, tan: undefined }
+    : settingsSheetFacts(settingsSheet);
 
-  return { sections, parties, certificates, challans, statements, section194QApplicable };
+  const out: OperatorFile = {
+    sections,
+    parties,
+    certificates,
+    challans,
+    statements,
+    section194QApplicable: settings.section194QApplicable,
+    lateDeductionInterest: settings.lateDeductionInterest,
+  };
+  if (settings.tan !== undefined) out.tan = settings.tan;
+
+  // The clause-34 sheets are OPTIONAL too: a template filled before they
+  // existed parses unchanged, its new facts simply absent.
+  const tcsSheet = sheets.find((x) => normHeader(x.name) === normHeader("TCS Sections"));
+  const tcsRows = tcsSheet === undefined ? [] : dataRows(tcsSheet);
+  if (tcsRows.length > 0 && tcsSheet) {
+    const tcsCols = accessors(bindColumns(tcsSheet, [
+      { header: "Ledger" },
+      { header: "Nature of receipt (exact Winman text)", aliases: ["Nature of receipt", "Nature"] },
+    ]));
+    const seenTcs = new Map<string, number>();
+    out.tcsSections = tcsRows.map((r) => {
+      const ledgerRef: CellRef = { sheet: tcsSheet, row: r, col: tcsCols.get("Ledger")!, header: "Ledger" };
+      const ledger = textCell(ledgerRef, r.cells.get(tcsCols.get("Ledger")!));
+      if (ledger === undefined) {
+        throw new Error(`template TCS Sections row ${r.row}, column A (Ledger): required cell is blank`);
+      }
+      const key = normHeader(ledger);
+      if (seenTcs.has(key)) {
+        throw new Error(`template TCS Sections row ${r.row}, column A (Ledger): this ledger already appears in row ${seenTcs.get(key)}`);
+      }
+      seenTcs.set(key, r.row);
+      const natureRef: CellRef = { sheet: tcsSheet, row: r, col: tcsCols.get("Nature of receipt (exact Winman text)")!, header: "Nature of receipt (exact Winman text)" };
+      const nature = textCell(natureRef, r.cells.get(tcsCols.get("Nature of receipt (exact Winman text)")!));
+      if (nature === undefined || tcsNatureByWinman(nature) === null) {
+        // Never echoes the value: a stray operator cell can be anything.
+        throw new Error(`template TCS Sections row ${r.row}, column B (Nature of receipt (exact Winman text)): not a TCS nature — use the dropdown`);
+      }
+      return { ledger, nature };
+    });
+  }
+
+  const interestSheet = sheets.find((x) => normHeader(x.name) === normHeader("Interest Paid"));
+  const interestRows = interestSheet === undefined ? [] : dataRows(interestSheet);
+  if (interestRows.length > 0 && interestSheet) {
+    const interestCols = accessors(bindColumns(interestSheet, [
+      { header: "Form" },
+      { header: "Quarter (Q1-Q4)", aliases: ["Quarter"] },
+      { header: "Amount" },
+      { header: "Paid on", aliases: ["Paid On"] },
+    ]));
+    const seenInterest = new Map<string, number>();
+    out.interestPaid = interestRows.map((r) => {
+      const at = (col: number, header: string): CellRef => ({ sheet: interestSheet, row: r, col, header });
+      const form = enumCell(
+        at(interestCols.get("Form")!, "Form"),
+        r.cells.get(interestCols.get("Form")!),
+        [...INTEREST_FORMS],
+        "not one of the interest statement forms — use the dropdown (24Q, 26A, 26Q, 26QB, 27Q, 27EQ)",
+      );
+      const quarterHeader = "Quarter (Q1-Q4)";
+      const quarter = enumCell(
+        at(interestCols.get(quarterHeader)!, quarterHeader),
+        r.cells.get(interestCols.get(quarterHeader)!),
+        QUARTERS,
+        "not a quarter — enter Q1, Q2, Q3 or Q4",
+      ) as OperatorStatement["quarter"];
+      const key = `${form}|${quarter}`;
+      if (seenInterest.has(key)) {
+        throw new Error(`template Interest Paid row ${r.row}, column B (Quarter (Q1-Q4)): this form-and-quarter pair already appears in row ${seenInterest.get(key)}`);
+      }
+      seenInterest.set(key, r.row);
+      return {
+        form,
+        quarter,
+        amount: amountCell(at(interestCols.get("Amount")!, "Amount"), r.cells.get(interestCols.get("Amount")!)),
+        paidOn: dateCell(at(interestCols.get("Paid on")!, "Paid on"), r.cells.get(interestCols.get("Paid on")!)),
+      };
+    });
+  }
+
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -708,15 +964,70 @@ export function parseOperatorTemplate(buf: Buffer): OperatorFile {
 export interface WinmanFacts {
   /** §8.3: derived from the Deduction sheet's own allocation, not its bare list. */
   challans: OperatorChallan[];
+  /**
+   * The Deduction sheet's challan-to-deductee allocation, one row per joined
+   * Deduction row (2026-09-26i): the Winman deductee name, the §8.2-split
+   * section, the row's own deducted tax, the deduction date and the joined
+   * challan's deposit date. Deposit evidence alongside the books' deposit
+   * debits — a deduction it covers, deposited after the FY end, is
+   * "deposited in the subsequent year". Names are Winman spellings; the
+   * template's Winman Deductee Name column joins them to Tally ledgers.
+   */
+  allocations: WinmanAllocation[];
   /** Deductee sheet rows, spaces compacted; the join the template declares. */
   deductees: Array<{ name: string; pan: string | null }>;
   /** The meta row's `Form : 26Q` — read only. */
   formType: string | null;
+  /**
+   * The Deductor block's TAN, shape-validated (the 2026-09-26 addendum's item
+   * 1: it was parsed and dropped before). Null when the block is absent or
+   * the TAN cell is blank. Lives only in this file, like every other TAN.
+   */
+  tan: string | null;
+  /**
+   * The Deductor block's name (2026-09-26r, inbox 065): the 3CD sheets must
+   * show the deductor as the return does, not the Tally company name. The
+   * `Name` label wins; `Name as per department records` is the fallback. Null
+   * when absent — the caller then fails rather than showing the Tally name.
+   */
+  deductorName: string | null;
   skipped: { noSection: number; noJoin: number };
 }
 
 const normWin = (v: unknown): string =>
   typeof v === "string" ? v.replace(/\s+/g, " ").trim().toLowerCase() : "";
+
+/** One joined Deduction-sheet row: who the challan's tax was deducted for. */
+export interface WinmanAllocation {
+  /** The Deduction sheet's Name cell, trimmed (Winman spelling). */
+  name: string;
+  /** The §8.2-split section key (never a bare label). */
+  section: string;
+  /** The row's own "Deducted and deposited - Tax". */
+  tax: number;
+  /** The row's Deduction Date (YYYYMMDD). */
+  dedDate: string;
+  /**
+   * The row's own "Paid / Credited Date" (YYYYMMDD), the date the sum was
+   * paid or credited. The s.201(1A)(i) late-deduction 1% interest runs from
+   * this date to the deduction date (2026-09-26u); empty when Winman omits it.
+   */
+  paidDate: string;
+  /** The joined challan's deposit date (YYYYMMDD). */
+  depositDate: string;
+  /**
+   * The joined challan's own Interest column (2026-09-26p), 0 when absent —
+   * the interest actually paid on a late deposit, read from the Winman
+   * challan rather than hard-coded.
+   */
+  interestPaid: number;
+  /**
+   * The joined challan's `ID No.` (2026-09-26p): the challan identity, so a
+   * single challan covering several deductions of the same section has its
+   * interest counted once.
+   */
+  challanId: string;
+}
 
 /**
  * §8.2 section normalisation with **no guessing**: the token before " - "
@@ -793,16 +1104,45 @@ export function parseWinmanExport(buf: Buffer): WinmanFacts {
     return s;
   };
 
-  // Deductor block: labels in one column, values the next; the TAN is read
-  // and dropped before anything else happens. Nothing is kept.
+  // Deductor block: labels in one column, values the next. The TAN is read,
+  // shape-validated and carried (the 2026-09-26 addendum's item 1: it used
+  // to be parsed and dropped here). A blank or absent cell means absent; a
+  // non-blank value that fails the TAN shape throws citing the sheet, row
+  // and column — never the value (a stray operator cell can be a TAN).
+  let tan: string | null = null;
+  let deductorName: string | null = null;
   const deductor = visible.find((s) => normWin(s.name) === "deductor");
   if (deductor) {
+    // Name: the `Name` label wins, `Name as per department records` is the
+    // fallback (inbox 065). Free text — never shape-validated.
+    const nameVal = (label: string): string | null => {
+      for (const r of deductor.rows) {
+        for (const [col, c] of [...r.cells.entries()].sort(([a], [b]) => a - b)) {
+          if (typeof c.value === "string" && normWin(c.value) === label && r.cells.get(col + 1)) {
+            const v = String(r.cells.get(col + 1)!.value ?? "").trim();
+            if (v !== "") return v;
+          }
+        }
+      }
+      return null;
+    };
+    deductorName = nameVal("name") ?? nameVal("name as per department records");
     for (const r of deductor.rows) {
       for (const [col, c] of [...r.cells.entries()].sort(([a], [b]) => a - b)) {
         if (typeof c.value === "string" && normWin(c.value) === "tan" && r.cells.get(col + 1)) {
-          break; // matched, used, dropped — no section code sees it
+          const rawVal = r.cells.get(col + 1)!.value;
+          if (typeof rawVal === "number") {
+            throw new Error(
+              `Winman ${deductor.name} sheet row ${r.row}, column ${colLetter(col + 1)}: cell is numeric — retype the TAN as text`,
+            );
+          }
+          const rawStr = String(rawVal ?? "").trim();
+          if (rawStr === "") continue; // blank means absent
+          tan = tanOf(rawStr, `Winman ${deductor.name} sheet row ${r.row}, column ${colLetter(col + 1)}`);
+          break;
         }
       }
+      if (tan !== null) break;
     }
   }
 
@@ -828,7 +1168,8 @@ export function parseWinmanExport(buf: Buffer): WinmanFacts {
   // numeric here; `Date of Challan` a serial. The hostile verification-blob
   // column (an HTML table echoing bank/challan/amount data) is never read.
   const challanCols = locateWinman(challanSheet, "Challan", ["ID No.", "Date of Challan"]);
-  const depositByJoin = new Map<string, string>();
+  const interestCol = challanCols.byHeader.get("interest");
+  const depositByJoin = new Map<string, { date: string; interest: number }>();
   for (const r of rowAt(challanSheet, challanCols)) {
     const idCell = r.cells.get(challanCols.byHeader.get("id no.")!);
     const dateCellRaw = r.cells.get(challanCols.byHeader.get("date of challan")!);
@@ -838,17 +1179,24 @@ export function parseWinmanExport(buf: Buffer): WinmanFacts {
     const quarter = typeof quarterCell?.value === "number" ? String(Math.trunc(quarterCell.value)) : String(quarterCell?.value ?? "").trim();
     const date = dateCellRaw.isDate && typeof dateCellRaw.value === "number" ? serialToYmd(dateCellRaw.value) : String(dateCellRaw.value ?? "");
     if (!id || !/^\d{8}$/.test(date)) continue;
-    depositByJoin.set(`${id}|${quarter}`, date);
+    const rawInterest = interestCol === undefined ? undefined : r.cells.get(interestCol)?.value;
+    const interest = typeof rawInterest === "number" && Number.isFinite(rawInterest) ? rawInterest : 0;
+    depositByJoin.set(`${id}|${quarter}`, { date, interest });
   }
 
   // Deduction sheet → group by (§8.3-split section, deduction-date month),
-  // each group's earliest deposit date.
+  // each group's earliest deposit date. The same joined rows also yield the
+  // per-deductee allocation (2026-09-26i).
   const deductionCols = locateWinman(deductionSheet, "Deduction", ["Deduction Date", "Section"]);
   const idCol = deductionCols.byHeader.get("challan id no. / details");
+  const allocNameCol = deductionCols.byHeader.get("name");
+  const allocTaxCol = deductionCols.byHeader.get("deducted and deposited - tax");
   const sectionCol = deductionCols.byHeader.get("section");
   const dateIdx = deductionCols.byHeader.get("deduction date");
+  const paidDateCol = deductionCols.byHeader.get("paid / credited date");
   const quarterCol = deductionCols.byHeader.get("quarter");
-  const earliest = new Map<string, string>(); // `${section|YYYY-MM}` → deposit
+  const earliest = new Map<string, { date: string; interest: number }>(); // `${section|YYYY-MM}` → challan
+  const allocations: WinmanAllocation[] = [];
   let noSection = 0;
   let noJoin = 0;
   for (const r of rowAt(deductionSheet, deductionCols)) {
@@ -869,6 +1217,11 @@ export function parseWinmanExport(buf: Buffer): WinmanFacts {
       dateCellRaw?.isDate && typeof dateCellRaw.value === "number"
         ? serialToYmd(dateCellRaw.value)
         : String(dateCellRaw?.value ?? "");
+    const paidCellRaw = paidDateCol === undefined ? undefined : r.cells.get(paidDateCol);
+    const paidDate =
+      paidCellRaw?.isDate && typeof paidCellRaw.value === "number"
+        ? serialToYmd(paidCellRaw.value)
+        : String(paidCellRaw?.value ?? "");
     const quarter = `${Math.trunc(Number(r.cells.get(quarterCol!)?.value ?? 0))}`;
     const deposit = depositByJoin.get(`${id}|${quarter}`);
     const forMonth = /^\d{8}$/.test(dedDate) ? dedDate.slice(0, 6) : "";
@@ -878,12 +1231,25 @@ export function parseWinmanExport(buf: Buffer): WinmanFacts {
     }
     const key = `${section}|${forMonth}`;
     const prev = earliest.get(key);
-    if (prev === undefined || deposit < prev) earliest.set(key, deposit);
+    // Earliest deposit wins the aggregate challan; its interest is carried with
+    // it so a late deposit's s.201(1A) interest can be reported (2026-09-26p).
+    if (prev === undefined || deposit.date < prev.date) earliest.set(key, deposit);
+    // The challan-to-deductee link: a row with a readable name and tax joins
+    // the engine's deductions; a row without either still counts for the
+    // challan above but carries no allocation.
+    const allocName = r.cells.get(allocNameCol!)?.value;
+    const allocTax = r.cells.get(allocTaxCol!)?.value;
+    if (
+      typeof allocName === "string" && allocName.trim() !== "" &&
+      typeof allocTax === "number" && Number.isFinite(allocTax) && allocTax >= 0
+    ) {
+      allocations.push({ name: allocName.trim(), section, tax: allocTax, dedDate, paidDate, depositDate: deposit.date, interestPaid: deposit.interest, challanId: id });
+    }
   }
   const challans: OperatorChallan[] = [...earliest.entries()]
-    .map(([key, depositDate]) => {
+    .map(([key, entry]) => {
       const [section, forMonth] = key.split("|");
-      return { section, forMonth: `${forMonth.slice(0, 4)}-${forMonth.slice(4, 6)}`, depositDate };
+      return { section, forMonth: `${forMonth.slice(0, 4)}-${forMonth.slice(4, 6)}`, depositDate: entry.date };
     })
     .sort((a, b) => (a.section === b.section ? a.forMonth.localeCompare(b.forMonth) : a.section.localeCompare(b.section)));
 
@@ -902,5 +1268,5 @@ export function parseWinmanExport(buf: Buffer): WinmanFacts {
     deductees.push({ name: name.trim(), pan });
   }
 
-  return { challans, deductees, formType, skipped: { noSection, noJoin } };
+  return { challans, allocations, deductees, formType, tan, deductorName, skipped: { noSection, noJoin } };
 }

@@ -87,6 +87,131 @@ export const PF_PART = "xl/worksheets/sheet1.xml";
 export const ESI_PART = "xl/worksheets/sheet2.xml";
 export const GST44_PART = "xl/worksheets/sheet4.xml";
 
+export interface TdsTcsFixture {
+  buf: Buffer;
+  parts: Record<"TDS" | "TCS" | "RET" | "INT_TDS" | "INT_TCS", string>;
+}
+
+interface TdsTcsSheetSpec {
+  name: string;
+  fieldPath: string;
+  /** row-2 machine keys, null = the real workbook's unkeyed column C. */
+  keys: Array<string | null>;
+  /** columns whose prototype carries the number/date twin (s89); the rest s88. */
+  numeric: Set<number>;
+}
+
+const TDS_TCS_SPECS: TdsTcsSheetSpec[] = [
+  {
+    name: "TDS",
+    fieldPath: "6.00.15.*.00.00",
+    keys: ["DEDUCTOR", "TAN", "TDS", "NATUREOFPAYMENT", "TOTALPAYMENTS", "TDSSUMLIABLE", "TDSATRATESUMLIABLE", "TDSATRATETDS", "TDSATMINRATESUMLIABLE", "TDSATMINRATETDS", "TDSDEDUCTED"],
+    numeric: new Set([4, 5, 6, 7, 8, 9, 10]),
+  },
+  {
+    name: "TCS",
+    fieldPath: "6.00.35.*.00.00",
+    keys: ["COLLECTOR", "TAN", null, "NATUREOFRECEIPT", "TOTALRECIEPT", "TCSSUMLIABLE", "TCSATRATESUMLIABLE", "TCSATRATETDS", "TCSATMINRATESUMLIABLE", "TCSATMINRATETDS", "TCSCOLLECTED"],
+    numeric: new Set([4, 5, 6, 7, 8, 9, 10]),
+  },
+  {
+    name: "Return details",
+    fieldPath: "6.00.62.07.*.00",
+    keys: ["DEDUCTOR", "TAN", "FORMNO", "QUARTER", "DUEDATE", "DATEOFFILING", "RETURNISINACCURATE", "RETURNACCURATE"],
+    numeric: new Set([4, 5]),
+  },
+  {
+    name: "Interest on TDS",
+    fieldPath: "6.00.75.*.00.00",
+    keys: ["DEDUCTOR", "TAN", "FORMNO", "QUARTER", "INTERESTPAYABLE", "INTERESTPAID", "DATEOFPAYMENT"],
+    numeric: new Set([4, 5, 6]),
+  },
+  {
+    name: "Interest on TCS",
+    fieldPath: "6.00.95.*.00.00",
+    keys: ["COLLECTOR", "TAN", "FORMNO", "QUARTER", "INTERESTPAYABLE", "INTERESTPAID", "DATEOFPAYMENT"],
+    numeric: new Set([4, 5, 6]),
+  },
+];
+
+function colName(n: number): string {
+  let s = "";
+  let i = n + 1;
+  while (i > 0) {
+    const r = (i - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    i = (i - r - 1) / 26;
+  }
+  return s;
+}
+
+export function makeTdsTcsFixture(opts: { tcsSheet?: boolean } = {}): TdsTcsFixture {
+  const specs = opts.tcsSheet === false ? TDS_TCS_SPECS.filter((s) => s.name !== "TCS") : TDS_TCS_SPECS;
+
+  const ss: string[] = ["$WiNsArAlXlImPoRt2$", "9.6.1", "1623", "2026-2027", "F"];
+  const idx = (s: string): number => {
+    let i = ss.indexOf(s);
+    if (i < 0) { i = ss.length; ss.push(s); }
+    return i;
+  };
+  const dash = idx("-");
+
+  const sheets = specs.map((spec) => {
+    const lastCol = spec.keys.length - 1;
+    const cell = (rower: number, i: number, shared: number | null): string => {
+      const ref = `${String.fromCharCode(65 + i)}${rower}`;
+      if (shared === null) return `<c r="${ref}"/>`;
+      return `<c r="${ref}" t="s"><v>${shared}</v></c>`;
+    };
+    const row1 = spec.keys.map((_, i) => cell(1, i, [idx("3cdTDS"), idx(spec.name), idx("7"), idx(spec.fieldPath)][i])).join("");
+    const row2 = spec.keys.map((key, i) => cell(2, i, key === null ? null : idx(key))).join("");
+    const row6 = spec.keys.map((_, i) =>
+      `<c r="${String.fromCharCode(65 + i)}6" s="${spec.numeric.has(i) ? 89 : 88}" t="s"><v>${dash}</v></c>`).join("");
+    return part(`xl/worksheets/sheet${specs.indexOf(spec) + 1}.xml`,
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${String.fromCharCode(65 + lastCol)}6"/><sheetData>
+<row r="1" hidden="1">${row1}</row>
+<row r="2" hidden="1">${row2}</row>
+<row r="6" hidden="1">${row6}</row>
+</sheetData></worksheet>`);
+  });
+
+  const workbookSheets = specs.map((spec, i) =>
+    `<sheet name="${spec.name}" sheetId="${i + 2}" state="hidden" r:id="rId${i + 1}"/>`).join("");
+  const rels = specs.map((_, i) =>
+    `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("");
+  const interRid = `rId${specs.length + 1}`;
+  const interPart = `xl/worksheets/sheet${specs.length + 1}.xml`;
+
+  const parts = [
+    part("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>`),
+    part("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
+    part("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets}<sheet name="INTER" sheetId="9" state="hidden" r:id="${interRid}"/></sheets></workbook>`),
+    part("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}<Relationship Id="${interRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${specs.length + 1}.xml"/></Relationships>`),
+    ...sheets,
+    part(interPart, INTER_TDS_SHEET),
+    part("xl/styles.xml", STYLES),
+    part("xl/sharedStrings.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${ss.length}" uniqueCount="${ss.length}">${ss.map((s) => `<si><t>${s}</t></si>`).join("")}</sst>`),
+  ];
+
+  const bins: Array<readonly [string, Buffer, 0 | 8]> = [
+    ["xl/media/image1.jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]), 0],
+    ["xl/vbaProject.bin", Buffer.from("MACRO\u0000\u0001BYTES", "binary"), 8],
+    ["xl/vbaProjectSignature.bin", Buffer.from("SIG\u0000\u00ff", "binary"), 8],
+  ];
+
+  const partNames = {} as TdsTcsFixture["parts"];
+  const byName: Record<string, string> = { TDS: "TDS", TCS: "TCS", "Return details": "RET", "Interest on TDS": "INT_TDS", "Interest on TCS": "INT_TCS" };
+  for (const spec of specs) partNames[byName[spec.name]] = `xl/worksheets/sheet${specs.indexOf(spec) + 1}.xml`;
+
+  return { buf: zipOf([...parts.map(([n, b]) => [n, b, 8] as const), ...bins]), parts: partNames };
+}
+
+const INTER_TDS_SHEET = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G1"/><sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c><c r="G1"><v>1</v></c></row>
+</sheetData></worksheet>`;
+
 interface WinmanZipOpts {
   esiSheet?: boolean;
   gst44Sheet?: boolean;

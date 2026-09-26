@@ -4,7 +4,8 @@
  * - 194C: s.194C text (Indian Kanoon 2022 consolidation — thresholds stale,
  *   morphology only); FB 2025 memo Cl.51–62. Thresholds C1 (secondary).
  * - 194J: FB 2025 memo Cl.51–62.
- * - 194-I: s.194-I text (rates, FA 2009); FB 2025 memo (threshold).
+ * - 194-I: s.194-I text (rates, FA 2009); Captain instruction 2026-09-26 (Addendum 26m):
+ *   FY aggregate ₹6,00,000 per party per year, no per-month test.
  * - 194A: s.194A text; FB 2025 memo. Rate confirm C2 ("rates in force").
  * - 194H: F(No.2)B 2024 memo Cl.57.
  * - 194Q: s.194Q text; only the amount after crossing (captain's C8).
@@ -20,6 +21,15 @@ export interface TdsLawEntry {
   rates: { standard: number; noPan?: number; pan4thChar?: Record<string, number> };
   threshold: { single?: number; aggregate?: number; perMonth?: number };
   wholeYearOnCross: boolean;
+  /**
+   * Timing-only (194T, design of record table L163): the section is
+   * deposit/interest-monitored, never rate-recomputed. Its deductee is a
+   * partner's Capital Account, not a declared vendor party, so the engine
+   * observes the duty credits and their deposits and never raises
+   * not-deducted / short-deduction / threshold findings for it
+   * (2026-09-26o item 035).
+   */
+  timingOnly?: boolean;
   confirm?: string;
 }
 
@@ -43,15 +53,17 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     section: "194-I(a)",
     label: "rent — plant and machinery",
     rates: { standard: 0.02, noPan: 0.2 },
-    threshold: { perMonth: 50000 },
+    threshold: { aggregate: 600000 },
     wholeYearOnCross: true,
+    confirm: "Captain instruction 2026-09-26 (Addendum 26m): FY aggregate ₹6,00,000 per party per year, no per-month test",
   },
   {
     section: "194-I(b)",
     label: "rent — land and building",
     rates: { standard: 0.1, noPan: 0.2 },
-    threshold: { perMonth: 50000 },
+    threshold: { aggregate: 600000 },
     wholeYearOnCross: true,
+    confirm: "Captain instruction 2026-09-26 (Addendum 26m): FY aggregate ₹6,00,000 per party per year, no per-month test",
   },
   {
     section: "194A",
@@ -81,6 +93,7 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.1, noPan: 0.2 },
     threshold: { aggregate: 20000 },
     wholeYearOnCross: true,
+    timingOnly: true,
   },
   {
     section: "206AA",
@@ -97,6 +110,15 @@ export function lawOf(section: string): TdsLawEntry | null {
 
 export function wholeYearOnCross(section: string): boolean {
   return lawOf(section)?.wholeYearOnCross ?? true;
+}
+
+/**
+ * A timing-only section (194T, 2026-09-26o item 035) is analysed for deposit
+ * timing and interest only — never for its own rate, not-deducted or threshold
+ * findings.
+ */
+export function timingOnlySection(section: string | null): boolean {
+  return section !== null && lawOf(section)?.timingOnly === true;
 }
 
 /** YYYYMMDD helpers. All law helpers take YYYYMMDD strings and return like-shaped ones. */
@@ -140,15 +162,49 @@ export function statementDue(quarter: "Q1" | "Q2" | "Q3" | "Q4", fy: "FY 25-26")
   }
 }
 
-/** s.201(1A) interest = rate x months x amount; pending C5, round100 applies the
- * Rule 119A(c) ₹100 treatment to sub-₹100 figures (the review page's ₹225 worked
- * example is the authority for exact figures). */
-export function interestOn(rate: number, months: number, amount: number, round100: boolean): number {
-  const raw = rate * months * amount;
-  return round100 && raw > 0 && raw < 100 ? 100 : raw;
+/**
+ * s.139(1) return due date for FY 25-26 (audit case: 31 October 2026). A
+ * deduction deposited on or before this date is "deposited in the subsequent
+ * year" rather than a s.40(a)(ia) disallowance row (2026-09-26i); past it, the
+ * deposit does not save the disallowance. Same per-FY pattern as
+ * statementDue — extend the table, never guess, when a new FY arrives.
+ */
+export function s139DueDate(fy: "FY 25-26"): string {
+  if (fy !== "FY 25-26") throw new Error(`Unsupported financial year: ${fy}`);
+  return "20261031";
+}
+
+/** s.201(1A) interest = rate x months x amount. There is NO ₹100 minimum on
+ * s.201(1A) interest (Rule 119A has no such floor for it; the earlier "pending
+ * C5" round100 treatment was wrong — 2026-09-26r). Exact figures are the norm:
+ * ₹1,059 x 1.5% x 4 = ₹63.54. The caller rounds for display only. */
+export function interestOn(rate: number, months: number, amount: number): number {
+  return rate * months * amount;
 }
 
 /** s.234E fee: 200 per day of default; the caller applies the quarter's-TDS cap. */
 export function lateFeePerDay(amount: number): number {
   return amount > 0 ? 200 : 0;
 }
+
+/** Nature-of-payment text for the 3CD TDS sheet column D (free text — wording is ours). */
+const NATURES: Record<string, string> = {
+  "194C": "Payment to contractors / sub-contractors",
+  "194J": "Professional or technical fees",
+  "194-I(a)": "Rent of plant & machinery / equipment",
+  "194-I(b)": "Rent of land & building / furniture",
+  "194A": "Interest other than interest on securities",
+  "194H": "Commission or brokerage",
+  "194Q": "Purchase of goods",
+  "194T": "Payment to partner (remuneration / interest / commission)",
+};
+export function natureOf(section: string): string { return NATURES[section] ?? ""; }
+
+/** Law key → exact Winman dropdown string (INTER!$C$8:$C$51). Table, not string surgery. */
+export const WINMAN_TDS_SECTIONS: ReadonlyMap<string, string> = new Map([
+  ["194C", "194C"], ["194J", "194J"], ["194-I(a)", "194I (a)"], ["194-I(b)", "194I (b)"],
+  ["194A", "194A"], ["194H", "194H"], ["194Q", "194Q"], ["194T", "194T"],
+]);
+export function winmanSectionOf(lawKey: string): string | null { return WINMAN_TDS_SECTIONS.get(lawKey) ?? null; }
+
+export const WINMAN_TDS_DROPDOWN: readonly string[] = ["192","192A","193","194","194-IA","194-IB","194-IC","194-O","194A","194B","194BA","194BB","194C","194D","194DA","194E","194EE","194G","194H","194I (a)","194I (b)","194J","194K","194LA","194LB","194LBA(1)","194LBA(2)","194LBA(3)","194LBB","194LBC(1)","194LBC(2)","194LC","194M","194N","194P","194Q","194R","194S","194T","195","196A","196B","196C","196D"];

@@ -78,6 +78,14 @@ export interface LedgerVoucherRow {
   amount: number;
   matchStatus: MatchStatus;
   tax: LedgerVoucherTax | null;
+  /**
+   * Voucher composition for a duty credit row, day-book path only: the other
+   * same-sign debit lines of the voucher (`Dr A X / Dr B Y / Cr Duty X+Y`).
+   * Lets the engine split one lump duty credit into a deduction per party
+   * (2026-09-26o item 038). Absent on the live Ledger-Vouchers path, which
+   * carries no voucher composition.
+   */
+  draws?: Array<{ ledger: string; amount: number }>;
 }
 
 export interface LedgerVoucherFetch {

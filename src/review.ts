@@ -20,7 +20,7 @@ import { readPriorWorksheet } from "./gst44-prior.js";
 import { loadGst44TreatmentRules } from "./gst44-treatments.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
-import { count, dayBefore, displayDate, displayMonth } from "./format.js";
+import { count, dayBefore, displayDate, displayMonth, money } from "./format.js";
 import { canonicalKey } from "./key.js";
 import {
   analyzeAs26,
@@ -55,6 +55,7 @@ import { readXlsm, writeXlsm } from "./xlsm.js";
 import { readSchema, readHandshake, writeSheetRows, findSheetPart, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
 import { projectLedgerRows, counterpartyOf, readDayBook, type DayBookInput } from "./tds-daybook.js";
+import { timingOnlySection } from "./tds-law.js";
 import {
   EMPTY_LOANS_OPERATOR,
   LOANS_SHEET_LABELS,
@@ -73,7 +74,30 @@ import { parseLoansTemplate } from "./loans-file.js";
 
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
 const DAY_BOOK_FINDING = "(day-book file)";
-import { analyzeTds, type TdsCtx, type TdsEvents, type TdsLedgerRows } from "./tds.js";
+/**
+ * TCS nature-of-receipt heuristic: a /tcs/i duties-root ledger whose own name
+ * carries the law's goods keyword resolves to that nature (TcsNature.key);
+ * anything else is a `tcs_unclassified_ledger` finding, never a guess.
+ */
+const TCS_NAME_KEYWORDS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/liquor/i, "liquor"],
+  [/scrap/i, "scrap"],
+  [/tendu/i, "tendu"],
+  [/timber/i, "timber-others"],
+  [/toll/i, "toll-plaza"],
+  [/parking/i, "parking-lease"],
+  [/mineral/i, "minerals"],
+  [/mining/i, "mining-lease"],
+  [/motor/i, "motor-vehicle"],
+  [/tour/i, "overseas-tour"],
+  [/\blrs\b/i, "lrs"],
+  [/remittance/i, "lrs"],
+  [/notified/i, "notified-goods"],
+];
+import { analyzeTds, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows } from "./tds.js";
+import { analyzeTcs } from "./tcs.js";
+import { tds3cdRows, type Tds3cdResult } from "./tds3cd.js";
+import { tcsNatureByWinman } from "./tcs-law.js";
 import { createVault, type Vault } from "./vault.js";
 import {
   EMPTY_WRONG_GROUP,
@@ -231,6 +255,16 @@ export interface TdsReviewResult {
    * condition. The run never computes 194Q figures in the false case.
    */
   section194QApplicable: boolean;
+  /**
+   * Clause-34 preview: row counts and money()-formatted amounts only — no
+   * TAN, no ledger, party or deductor name. The full Tds3cdResult stays in
+   * the session cache (tds3cdResult) for the Winman writer.
+   */
+  tds3cd?: {
+    sheets: { tds: number; tcs: number; returns: number; interestTds: number; interestTcs: number };
+    totals: { tdsNotDeposited: string; tcsNotDeposited: string; interestPayable: string };
+    skippedInterestQuarters: string[];
+  };
   /**
    * Present only for "daybook-file". Counts and dates only: the file's SHA-256
    * digest and byte size go to the audit log and the written report, never
@@ -644,6 +678,19 @@ export interface Session {
    */
   write3cdLoans(opts: { sourcePath: string; outPath?: string }): Promise<{ written: string }>;
   /**
+   * Rewrite the five TDS/TCS clause-34 sheets (TDS, TCS, Return details,
+   * Interest on TDS, Interest on TCS) of a Winman 3CD workbook COPY from the
+   * cached review's rows and return the written path. The source is never
+   * written to.
+   */
+  write3cdTdsTcs(opts: { sourcePath: string; outPath?: string }): Promise<string>;
+  /**
+   * The cached clause-34 slice from the last tdsReview — raw names, dates
+   * and TAN, for this session's Winman writer only; the review result gains
+   * only a counts-and-amounts preview.
+   */
+  tds3cdResult(): Tds3cdResult | undefined;
+  /**
    * The cached clause 20(b) rows from the last pfEsiReview, with raw dates —
    * the report writer (tb_write_pf_esi_report) consumes them unchanged; the
    * review result's own rows are display-formatted for the model.
@@ -735,8 +782,6 @@ export function createSession(
   d: Downstream,
   overrides: Overrides,
   wrongGroup: WrongGroupConfig = EMPTY_WRONG_GROUP,
-  /** Per-install options: the Rule 119A(c) switch is the config layer's (Task 4). */
-  options: { tdsRound100?: boolean } = {},
 ): Session {
   const vault = createVault();
   /** finding id -> real ledger name, for drill-down without the model holding it. */
@@ -754,6 +799,15 @@ export function createSession(
   let lastLoansVault: Array<{ real: string; alias: string }> | undefined;
   /** Unmasked clause 44 rows from the last gst44Review, for the Winman writer. */
   let lastGst44: Gst44Row[] | undefined;
+  /** Clause-34 paperback: the raw Tds3cdResult the Winman writer consumes. */
+  let lastTds3cd: Tds3cdResult | undefined;
+  /**
+   * True when a Winman TDS summary was supplied but carried no Deductor name
+   * (2026-09-26r inbox 065). The review itself stays usable (the in-memory
+   * result falls back to the Tally company name), but writing the 3CD sheets
+   * refuses rather than silently stamping the Tally name on the return.
+   */
+  let lastWinmanNameMissing = false;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -1570,6 +1624,16 @@ export function createSession(
     // risk); equal dates dedupe. The Challan sheet's Bare-label rows never
     // reached here: parseWinmanExport already normalised them.
     const operator: OperatorFile = { ...operatorIn };
+    // TAN carry-through (2026-09-26 addendum item 1): the Winman Deductor
+    // block's TAN fills the operator file's gap; the operator's own Settings
+    // TAN stays the override. A disagreement is never silent — the operator's
+    // value is used and a finding says so. No TAN value ever reaches any
+    // outbound string (Q7 choice B).
+    let tanConflict = false;
+    if (winman?.tan) {
+      if (operator.tan === undefined) operator.tan = winman.tan;
+      else if (operator.tan !== winman.tan) tanConflict = true;
+    }
     if (winman) {
       const opIndex = new Map(operator.challans.map((c) => [`${c.section}|${c.forMonth}`, c]));
       const next: typeof operator.challans = [...operator.challans];
@@ -1616,11 +1680,14 @@ export function createSession(
       }),
     ]);
     const groups = groupsUnavailable.value && dayBook?.groups ? dayBook.groups : groupsLive;
+    // The statement findings' deductee is a fleet label ("statement Q1"), not
+    // a ledger: force it clear so maskLedgerName returns it unchanged (item 2).
+    const statementLabels = ["Q1", "Q2", "Q3", "Q4"].map((q) => `statement ${q}`);
     const c = buildClassifier(groups, {
       ...overrides,
       // A day-book finding's deductee is the provenance literal, never a
       // ledger: force it clear so maskLedgerName returns it unchanged.
-      forceClearLedgers: [...overrides.forceClearLedgers, DAY_BOOK_FINDING],
+      forceClearLedgers: [...overrides.forceClearLedgers, DAY_BOOK_FINDING, ...statementLabels],
     });
     classifier = c;
     for (const l of masters) groupOfLedger.set(canonicalKey(l.name), l.parent);
@@ -1650,6 +1717,23 @@ export function createSession(
         continue;
       }
       const derived = panFromGstin(l.gstin);
+      if (derived) {
+        panOf.set(k, derived);
+        panDerived.add(k);
+      }
+    }
+    // The bundle's PAN/GSTIN facts fill in only what live masters did not
+    // supply (item 3): a PAN-less live master upgrades from the day-book
+    // export, never the reverse. Older bundles carry no pan/gstin and fill
+    // nothing; derivation from the GSTIN mirrors the live path exactly.
+    for (const l of dayBook?.ledgers ?? []) {
+      const k = canonicalKey(l.name);
+      if (!k || panOf.has(k)) continue;
+      if (l.pan) {
+        panOf.set(k, l.pan);
+        continue;
+      }
+      const derived = panFromGstin(typeof l.gstin === "string" ? l.gstin : null);
       if (derived) {
         panOf.set(k, derived);
         panDerived.add(k);
@@ -1736,7 +1820,33 @@ export function createSession(
     // master-flagged behaviour is unchanged. Canonical-key deduplicated so one
     // ledger named by both sides is read once.
     const dutyLedgerNamesAll = unique([...dutyLedgerNames, ...operatorDutyLedgers]);
-    const fetchSet = unique([...dutyLedgerNamesAll, ...expenseLedgerNames, ...partyLedgerNames]);
+    // TCS slice (clause 34): the operator's TCS-section rows name receipt and
+    // duty ledgers; the heuristic adds any master ledger named /tcs/i under a
+    // duties root. One fetch set, one projection pass — the downstream call
+    // cost is per call, never per row.
+    const tcsLedgerNames = unique([
+      ...(operator.tcsSections ?? []).map((s) => s.ledger),
+      ...masters.filter((l) => /tcs/i.test(l.name) && isDuty(l)).map((l) => l.name),
+    ]);
+    /** canonical ledger key -> TcsNature.key (operator rows are exact Winman strings). */
+    const tcsNatureKeys = new Map<string, string>();
+    for (const s of operator.tcsSections ?? []) {
+      const nature = tcsNatureByWinman(s.nature)?.key;
+      if (nature) tcsNatureKeys.set(canonicalKey(s.ledger), nature);
+    }
+    const tcsDutyKeys = new Set(
+      tcsLedgerNames
+        .filter((n) => c.role(groupOfLedger.get(canonicalKey(n)) ?? "") === "duties")
+        .map(canonicalKey),
+    );
+    const fetchSet = unique([
+      ...dutyLedgerNamesAll,
+      ...expenseLedgerNames,
+      ...partyLedgerNames,
+      ...tcsLedgerNames,
+    ]);
+    const dutyKeys = new Set(dutyLedgerNamesAll.map(canonicalKey));
+    const partyKeys = new Set(partyLedgerNames.map(canonicalKey));
     // Books come either from ~640 sequential Ledger-Vouchers calls or from one
     // operator day-book export. The projector reproduces the live path's signs
     // and carries only the five fields the engine reads, so nothing else in
@@ -1750,6 +1860,12 @@ export function createSession(
                 return d >= fromDate && d <= toDate;
               }),
               fetchSet,
+              {
+                // Item 6: a duty line's counterparty is the voucher's party
+                // ledger, not its largest opposite-sign expense line.
+                isDutyLedger: (n) => dutyKeys.has(canonicalKey(n)),
+                isPartyLedger: (n) => partyKeys.has(canonicalKey(n)),
+              },
             ).map((p) => [canonicalKey(p.ledger), p.rows] as const),
           ),
           calls: 0,
@@ -1775,6 +1891,11 @@ export function createSession(
       const set = [...(sectionSets.get(canonicalKey(dutyLedger)) ?? [])];
       return set.length === 1 ? set[0] : null;
     };
+    // The full candidate list behind dutySectionOf's null: the engine uses it
+    // to disambiguate an ambiguous duty ledger per row, from the expense-side
+    // evidence of the same voucher or the linked same-date bill (2026-09-26c).
+    const dutyCandidatesOf = (dutyLedger: string): string[] =>
+      [...(sectionSets.get(canonicalKey(dutyLedger)) ?? [])].sort();
 
     const certificateRateOf = (party: string, section: string, date: string): number | null => {
       const real = realOf(party);
@@ -1789,15 +1910,44 @@ export function createSession(
     const ops = (party: string) => operator.parties.find((p) => canonicalKey(p.ledger) === canonicalKey(party));
     const transporterDeclared = (party: string): boolean => ops(party)?.transporterDeclaration ?? false;
     const deducteeFiledReturn = (party: string): boolean => ops(party)?.deducteeFiledReturn ?? false;
-    const entityOf = (party: string): "P" | "H" | "C" | "F" | null => {
+    // The deductee type is the PAN's 4th character (item 8) — including a
+    // PAN derived from the GSTIN, since panOf already holds both. The full
+    // statutory alphabet P/H/C/F/A/B/T/L/J/G feeds the rate table; a letter
+    // a section's table does not name falls back to that section's standard
+    // rate inside rateFor. The Tally master's tdsDeducteeType field is no
+    // longer read — the PAN is the authority; no PAN is s.206AA.
+    const entityOf = (party: string): "P" | "H" | "C" | "F" | "A" | "B" | "T" | "L" | "J" | "G" | null => {
       const pan = panOf.get(canonicalKey(party)) ?? null;
       if (!pan || pan.length < 4) return null;
       const ch = pan[3].toUpperCase();
-      return ch === "P" || ch === "H" || ch === "C" || ch === "F" ? (ch as "P" | "H" | "C" | "F") : null;
+      return /^[PHCFTBLJG]$/.test(ch) ? (ch as "P" | "H" | "C" | "F" | "A" | "B" | "T" | "L" | "J" | "G") : null;
     };
     const panKeyOf = (party: string): string | null => panAliasOf.get(canonicalKey(party)) ?? null;
-    const deducteeTypeOf = (party: string): string =>
-      masterOf.get(canonicalKey(party))?.tdsDeducteeType ?? "";
+
+    // Subsequent-year challan allocations (2026-09-26i): the Winman
+    // deductee name joins the template's Winman Deductee Name declaration
+    // (exact trimmed match, §8.4 precedent — never fuzzy, never guessed). An
+    // allocation no template party declares is dropped here; the engine never
+    // sees an unjoined name. Exception — a timing-only section (2026-09-26o
+    // item 038/039): its deposit coverage is section-level (the duty credit
+    // debits the partners' Capital Accounts, which no operator row declares),
+    // so an allocation of such a section is carried with its Winman name as
+    // the party; the engine matches it by section + month + tax alone.
+    const winmanLedgerOf = new Map<string, string>();
+    for (const p of operator.parties) {
+      if (p.winmanName) winmanLedgerOf.set(p.winmanName.trim(), p.ledger);
+    }
+    const subsequentDeposits: SubsequentDeposit[] = [];
+    for (const a of winman?.allocations ?? []) {
+      const ledger = winmanLedgerOf.get(a.name);
+      if (!ledger) {
+        if (timingOnlySection(a.section)) {
+          subsequentDeposits.push({ party: a.name, section: a.section, tax: a.tax, dedDate: a.dedDate, depositDate: a.depositDate, interestPaid: a.interestPaid, challanId: a.challanId });
+        }
+        continue;
+      }
+      subsequentDeposits.push({ party: ledger, section: a.section, tax: a.tax, dedDate: a.dedDate, depositDate: a.depositDate, interestPaid: a.interestPaid, challanId: a.challanId });
+    }
 
     const ctx: TdsCtx = {
       tdsParties: unique([
@@ -1806,16 +1956,17 @@ export function createSession(
       ]).filter((n) => !operatorNoKeys.has(canonicalKey(n))),
       resolveSection,
       dutySectionOf,
+      dutyCandidatesOf,
       panKeyOf,
       panDerivedFromGstinOf: (party: string): boolean => panDerived.has(canonicalKey(party)),
       entityOf,
-      deducteeTypeOf,
       certificateRateOf,
       transporterDeclared,
       deducteeFiledReturn,
       asOnDate,
-      round100: options.tdsRound100 ?? true,
       period: { fromDate, toDate },
+      subsequentDeposits,
+      lateDeductionInterest: operator.lateDeductionInterest,
     };
 
     // The engine runs month-chunked book events; the day-book reconciliation
@@ -1847,6 +1998,27 @@ export function createSession(
         amount: 0,
         detail:
           "the Tally master flags this ledger TDS-applicable, but the operator file marks it not applicable; the operator's declaration suppresses it — no bookings, payments or findings are produced for it.",
+      });
+    }
+
+    // The TAN disagreement is a finding, never silence (addendum item 1).
+    // Both values stay behind the vault: the detail names the channels, never
+    // the TANs, and the operator's Settings value is the one the review used.
+    if (tanConflict) {
+      console.error(
+        "tally-agent: the operator file and the Winman export carry different TANs; the operator file's value is used",
+      );
+      const n = analysis.findings.filter((f) => f.check === "tds_master_gap").length + 1;
+      analysis.findings.push({
+        id: tdsFindingId("tds_master_gap", n),
+        check: "tds_master_gap",
+        severity: "review",
+        deductee: "",
+        group: "",
+        section: null,
+        amount: 0,
+        detail:
+          "the operator file and the Winman export carry different TANs; the operator file's value is used — align them before the statement is filed.",
       });
     }
 
@@ -1908,6 +2080,70 @@ export function createSession(
       }
     }
 
+    // Clause 34 TCS slice: collections are duty credits, deposits duty
+    // debits, and the gross receipts come from the nature-mapped receipt
+    // ledgers. natureOfReceipt is the operator TCS-section map first, the
+    // /tcs/i duty-name keyword heuristic second; a participating slice
+    // neither resolves is a finding on the (masked) ledger, never a guess.
+    const tcsKeys = new Set(tcsLedgerNames.map(canonicalKey));
+    const tcsSlices = bookRows.filter((sl) => tcsKeys.has(sl.ledger));
+    const tcsNameOf = (ledger: string): string =>
+      tcsLedgerNames.find((n) => canonicalKey(n) === ledger) ?? ledger;
+    const tcsNatureOf = (ledger: string): string | null => {
+      const mapped = tcsNatureKeys.get(canonicalKey(ledger));
+      if (mapped) return mapped;
+      if (!tcsDutyKeys.has(canonicalKey(ledger))) return null;
+      const hit = TCS_NAME_KEYWORDS.find(([re]) => re.test(ledger));
+      return hit ? hit[1] : null;
+    };
+    const tcsAnalysis = analyzeTcs(
+      tcsSlices.filter((sl) => tcsDutyKeys.has(sl.ledger)),
+      tcsSlices.filter((sl) => !tcsDutyKeys.has(sl.ledger)),
+      tcsNatureOf,
+    );
+    for (const sl of tcsSlices) {
+      if (sl.rows.length === 0 || tcsNatureOf(sl.ledger) !== null) continue;
+      const n = analysis.findings.filter((f) => f.check === "tcs_unclassified_ledger").length + 1;
+      analysis.findings.push({
+        id: tdsFindingId("tcs_unclassified_ledger", n),
+        check: "tcs_unclassified_ledger",
+        severity: "review",
+        deductee: tcsNameOf(sl.ledger),
+        group: groupOfLedger.get(sl.ledger) ?? "",
+        section: null,
+        amount: 0,
+        detail:
+          "this TCS ledger was touched in the period, but its nature of receipt could not be resolved — map it in the operator file's TCS sections (an exact Winman nature string) or rename it to name the nature of goods.",
+      });
+    }
+    // Clause-34 rows for the Winman 3CD round trip; the full slice stays in
+    // the session cache, the result gains only counts and money() amounts.
+    // The deductor shown on the 3CD sheets is the return's own (the Winman
+    // export's Deductor name, 2026-09-26r inbox 065), never the Tally company
+    // — a supplied Winman file without it then fails at 3CD write time rather
+    // than silently showing the Tally name.
+    lastWinmanNameMissing = winman !== undefined && !winman.deductorName;
+    const tds3cd = tds3cdRows({
+      company: company ?? "",
+      tan: operator.tan ?? null,
+      deductorName: winman?.deductorName ?? company ?? "",
+      tds: analysis,
+      tcs: tcsAnalysis,
+      operator,
+      asOnDate,
+      challans: subsequentDeposits,
+      challanAllocations: (winman?.allocations ?? []).map((a) => ({
+        section: a.section,
+        tax: a.tax,
+        dedDate: a.dedDate,
+        paidDate: a.paidDate,
+        depositDate: a.depositDate,
+        interestPaid: a.interestPaid,
+        challanId: a.challanId,
+      })),
+    });
+    lastTds3cd = tds3cd;
+
     const maskTdsFinding = (f: TdsFinding): TdsMaskedFinding => {
       // Registry first (drill-down by finding id, R-MCP-4), then masking.
       realLedgerByFinding.set(f.id, f.deductee);
@@ -1966,6 +2202,24 @@ export function createSession(
       ledgerCalls: fetched.calls,
       booksSource: dayBook ? "daybook-file" : "live",
       section194QApplicable: operator.section194QApplicable,
+      tds3cd: {
+        sheets: {
+          tds: tds3cd.tds.length,
+          tcs: tds3cd.tcs.length,
+          returns: tds3cd.returns.length,
+          interestTds: tds3cd.interestTds.length,
+          interestTcs: tds3cd.interestTcs.length,
+        },
+        totals: {
+          tdsNotDeposited: money(tds3cd.tds.reduce((a, r) => a + r.notDeposited, 0)),
+          tcsNotDeposited: money(tds3cd.tcs.reduce((a, r) => a + r.notDeposited, 0)),
+          interestPayable: money(
+            tds3cd.interestTds.reduce((a, r) => a + r.payable, 0) +
+              tds3cd.interestTcs.reduce((a, r) => a + r.payable, 0),
+          ),
+        },
+        skippedInterestQuarters: [...tds3cd.skippedInterestQuarters],
+      },
       ...(dayBook
         ? {
             books: {
@@ -2803,6 +3057,125 @@ export function createSession(
   }
 
   /**
+   * Rewrite the five TDS/TCS clause-34 sheets of a Winman 3CD COPY from the
+   * cached review's row slice (tds3cdResult, §clause-34 mapping). The source
+   * is read once and never written; the copy lands beside `outPath` exactly
+   * as write3cdPfEsi does. The sheet carries the operator TAN and company
+   * name — data channels of the workbook itself, like the written report.
+   */
+  async function write3cdTdsTcs(opts: { sourcePath: string; outPath?: string }): Promise<string> {
+    if (!lastTds3cd) {
+      throw new Error("run tb_tds_review first: there is no TDS/TCS clause-34 slice to write");
+    }
+    if (lastWinmanNameMissing) {
+      throw new Error(
+        "the Winman TDS summary has no Deductor name (label \"Name\" or \"Name as per department records\") — the 3CD sheets need it",
+      );
+    }
+    const { tan, deductor, tds, tcs, returns, interestTds, interestTcs } = lastTds3cd;
+    const pkg = readXlsm(await readFile(opts.sourcePath));
+    readHandshake(pkg);
+    const quarterNo: Record<Tds3cdResult["returns"][number]["quarter"], number> = { Q1: 1, Q2: 2, Q3: 3, Q4: 4 };
+    const t = (value: string) => ({ kind: "text" as const, value });
+    const n = (value: number) => ({ kind: "number" as const, value });
+    const d = (ymd: string) => ({ kind: "date" as const, ymd });
+    const tanCell = tan ? t(tan) : null;
+    const tdsRows: WinmanRow[] = tds.map((r) => ({
+      DEDUCTOR: t(r.deductor),
+      TAN: tanCell,
+      TDS: t(r.section),
+      NATUREOFPAYMENT: t(r.nature),
+      TOTALPAYMENTS: n(r.totalPayments),
+      TDSSUMLIABLE: n(r.sumLiable),
+      TDSATRATESUMLIABLE: n(r.atRateLiable),
+      TDSATRATETDS: n(r.atRateTds),
+      TDSATMINRATESUMLIABLE: n(r.lowerRateLiable),
+      TDSATMINRATETDS: n(r.lowerRateTds),
+      TDSDEDUCTED: n(r.notDeposited),
+    }));
+    const tcsRows: WinmanRow[] = tcs.map((r) => ({
+      COLLECTOR: t(r.collector),
+      TAN: tanCell,
+      NATUREOFRECEIPT: t(r.nature),
+      TOTALRECIEPT: n(r.totalReceipt),
+      TCSSUMLIABLE: n(r.sumLiable),
+      TCSATRATESUMLIABLE: n(r.atRateLiable),
+      TCSATRATETDS: n(r.atRateTcs),
+      TCSATMINRATESUMLIABLE: n(r.lowerRateLiable),
+      TCSATMINRATETDS: n(r.lowerRateTcs),
+      TCSCOLLECTED: n(r.notDeposited),
+    }));
+    const returnRows: WinmanRow[] = returns.map((r) => ({
+      DEDUCTOR: t(r.deductor),
+      TAN: tanCell,
+      FORMNO: t(r.form),
+      QUARTER: n(quarterNo[r.quarter]),
+      DUEDATE: d(r.dueDate),
+      DATEOFFILING: d(r.filedOn),
+      RETURNACCURATE: t(r.accurate),
+    }));
+    const interestTdsRows: WinmanRow[] = interestTds.map((r) => ({
+      DEDUCTOR: t(deductor),
+      TAN: tanCell,
+      FORMNO: t(r.form),
+      QUARTER: n(quarterNo[r.quarter]),
+      INTERESTPAYABLE: n(r.payable),
+      ...(r.paid !== undefined ? { INTERESTPAID: n(r.paid) } : {}),
+      ...(r.paidOn ? { DATEOFPAYMENT: d(r.paidOn) } : {}),
+    }));
+    const interestTcsRows: WinmanRow[] = interestTcs.map((r) => ({
+      COLLECTOR: t(deductor),
+      TAN: tanCell,
+      FORMNO: t("27EQ"),
+      QUARTER: n(quarterNo[r.quarter]),
+      INTERESTPAYABLE: n(r.payable),
+      ...(r.paid !== undefined ? { INTERESTPAID: n(r.paid) } : {}),
+      ...(r.paidOn ? { DATEOFPAYMENT: d(r.paidOn) } : {}),
+    }));
+    const sheets: Array<[string, WinmanRow[]]> = [
+      ["TDS", tdsRows],
+      ["TCS", tcsRows],
+      ["Return details", returnRows],
+      ["Interest on TDS", interestTdsRows],
+      ["Interest on TCS", interestTcsRows],
+    ];
+    let out = pkg;
+    for (const [sheetName, rows] of sheets) {
+      if (rows.length === 0) continue;
+      let schema: ReturnType<typeof readSchema>;
+      try {
+        schema = readSchema(out, sheetName);
+      } catch (e) {
+        // The workbook may omit a sheet the operator has nothing to fill
+        // (the TCS sheet over a TDS-only year); every other schema defect
+        // still throws.
+        if (e instanceof Error && /no sheet named/.test(e.message)) continue;
+        throw e;
+      }
+      if (schema.formId !== "3cdTDS") {
+        throw new Error(
+          `${sheetName} belongs to form "${schema.formId || "unknown"}": this tool fills the Winman 3cdTDS workbook`,
+        );
+      }
+      out = writeSheetRows(out, sheetName, rows);
+    }
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const stem = basename(opts.sourcePath, extname(opts.sourcePath));
+    if (!opts.outPath) throw new Error("no output location for the filled workbook was given");
+    const target =
+      extname(opts.outPath).toLowerCase() === ".xlsm"
+        ? opts.outPath
+        : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    const sourceId = await realPathId(opts.sourcePath);
+    if (sourceId === (await realPathId(target))) {
+      throw new Error("the outPath target resolves to the source workbook itself; write the copy somewhere else");
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, writeXlsm(out));
+    return target;
+  }
+
+  /**
    * Rewrite the clause-31 / 269ST sheets of a Winman 3CD COPY from the cached
    * loans review's raw rows (write3cdPfEsi mechanics; design of record §2 of
    * the loans 269SS/T/ST plan). Unlike PF/ESI's date+number-only sheets, these
@@ -3486,5 +3859,7 @@ async function realPathId(p: string): Promise<string> {
     write3cdGst44,
     gst44Rows: () => lastGst44,
     writeGstWorksheet,
+    write3cdTdsTcs,
+    tds3cdResult: () => lastTds3cd,
   };
 }

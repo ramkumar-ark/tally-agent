@@ -864,3 +864,181 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - `rekeyed !== deductions` aliasing: when the re-key is skipped, never
   `length = 0` + re-push the same reference — that empties the array (killed
   6 review/report tests). Guard with `if (rekeyed)` on a nullable.
+
+## Sharp edges found implementing the 3CD TDS/TCS summary (2026-09-24)
+
+- Design of record: docs/design/2026-09-24-tds-tcs-3cd-design.md. Read it before touching src/tds3cd.ts / src/tcs*.ts.
+- The Winman TDS dropdown spells the rent sections "194I (a)"/"194I (b)" (space, no hyphen) while the law table uses
+  "194-I(a)"/"194-I(b)": the only conversion is the WINMAN_TDS_SECTIONS table, never string surgery. Column K of both
+  the TDS and TCS sheets is tax deducted/collected BUT NOT DEPOSITED (Winman's header), not the total.
+- Quarter cells in Return details/Interest sheets take numeric literals 1-4 (dropdown INTER!$D$86 is numeric);
+  the engine's "Q1".."Q4" converts only at the write3cdTdsTcs boundary.
+- The operator TAN lives RAW in session memory (panOf precedent), reaches disk only inside the filled workbook,
+  and must never appear in an error, preview, or tool response. Shape errors cite the Settings row, not the value.
+- Interest-on-TDS quarters whose statement form is outside the sheet's five-form dropdown (24Q/26A/26Q/26QB/27Q)
+  are skipped and listed in skippedInterestQuarters as "Q2:26QE" — form+quarter only.
+- 206C(1H) is intentionally absent from TCS_NATURES (Finance Act 2025 removed it); the 13 Winman nature strings
+  are exact-match (no trim) — a stray space breaks the dropdown on import.
+
+## Sharp edges found in the 8-item TDS fix batch (2026-09-26)
+
+- **Duty-line attribution (item 7):** `counterpartyOf` now returns the voucher's
+  `partyLedgerName` whenever that party ledger is present among the entries and
+  is not the line itself; the largest-opposite-sign rule is only the fallback.
+  This is what joins `Dr Expense / Cr Party (net) / Cr TDS` deductions. The
+  LIVE path cannot be fixed gateway-side: the upstream Ledger-Vouchers report
+  row carries one display counterparty (`counterLedgerName`), no per-line
+  entries — a false TDS-001 on live runs means the upstream must expose the
+  party ledger per row.
+- **The Deductor TAN is now parsed** (`WinmanFacts.tan`, item 1): it fills a
+  missing operator Settings TAN, an operator value always wins, and a
+  conflict raises a `tds_master_gap` diagnostic naming neither value. It lives
+  in session memory like a PAN (panOf precedent) — never in an error, preview
+  or tool response; it reaches disk only inside the filled workbook.
+- **No-PAN master-gap is per party+section and only when TDS is due** (items
+  4+5): an agg is reportable when it crossed its threshold, had a liability
+  above tolerance, or its party had a joined deduction. Below-threshold
+  parties are silent. Each gap's amount is that section's own gross.
+- **Exposures:** s.40(a)(ia) is 30% of the EXPENDITURE (booking gross) of the
+  affected bookings — `notDeductedBase`/`notDepositedBase` accumulators — not
+  30% of the tax; s.271C = notDeducted + shortDeducted and now fires on a
+  short-only run (no fully-missed deduction needed).
+- **Deductee type is the PAN's 4th character** (P/H/C/F/A/B/T/L/J/G), incl.
+  PANs derived from GSTINs; the Tally-master `tdsDeducteeType` field is no
+  longer read and the "deductee type missing or Unknown" finding is gone.
+  Letters a section's `pan4thChar` table does not name fall back to that
+  section's standard rate inside `rateFor`.
+- **Day-book bundles now carry per-ledger `pan`+`gstin`** (item 3):
+  `export-daybook.mjs` runs `tally_get_ledgers` verbose; `readDayBook`
+  normalizes both to null-able strings, older bundles load unchanged, and the
+  bundle fills only PAN/GSTIN gaps the live masters left (live wins). Full
+  PAN carry-through on a fresh export also needs the upstream's
+  `tally_get_ledgers` verbose fields list to add `IncomeTaxNumber`
+  (report deliverable, upstream repo) — until then the export carries the
+  GSTIN and the PAN derives from it.
+- Fleet findings label themselves now (item 2): statement findings say
+  `statement Qn`, exposures carry a blank deductee; `maskLedgerName("")
+  === ""` (blank short-circuit; never mint a pseudonym for "") and the
+  statement labels are force-cleared in `tdsReview`'s classifier.
+
+## Sharp edges found implementing the 2026-09-26c TDS addendum (joinEvents, ambiguous duty, 194-I)
+
+- **joinEvents phase-1 must never claim across sections** (`src/tds.ts`): the by-voucher pick and the
+  month-window filter both require `d.section === b.section`. A cross-section claim made BOTH bookings
+  fire TDS-001 and removed the tax from the deposit chain (measured 8 vouchers on real data). When a
+  duty row's section is null (ambiguous ledger), deposits join only by `e.ledger === d.ledger` — the
+  `ledger` stamp on TdsDeduction/TdsDeposit is what makes that work.
+- **Ambiguous duty ledgers resolve per row, never per ledger**: `dutyCandidatesOf` (optional on
+  TdsCtx) supplies the ledger's candidate sections; `extractEvents` intersects same-voucher (else
+  same-date, counterparty-matched) debit-expense sections with that candidate set and adopts the
+  section only when exactly one remains. Evidence outside the candidates never resolves (contradictory
+  evidence, never guess); unresolved rows stay skipped under the ledger-level TDS-012, and two-line
+  journals with no resolving same-date bill stay unresolved by design.
+- **perMonth is a whole-month rule, not excess-only**: when `threshold.perMonth` is set (194-I a/b),
+  every booking of a month whose total exceeds the threshold is fully liable (month-scoped sibling of
+  wholeYearOnCross); `agg.crossed` fires at the first booking of the earliest over-threshold month.
+  Aggregate-only sections are untouched.
+- **Null-section deposits belong to no Winman section**: `tds3cd.ts`'s deposit loop skips
+  `dep.section === null`; never widen that to "resolve by ledger".
+
+## Sharp edges found implementing the 2026-09-26i TDS addendum (subsequent-year challan coverage)
+
+- **Winman challan coverage is deductee-level, never section+month** (`src/tds.ts`
+  `SubsequentDeposit`, `src/tds-file.ts` `WinmanAllocation`, `src/review.ts` winmanName
+  join): a post-FY challan covers a book deduction only on same party (template Winman
+  Deductee Name, exact trimmed match — §8.4 precedent, never fuzzy) + same section +
+  same deduction month + tax within `TDS_TOLERANCE`, only when the books carry no 1:1
+  deposit for it, only when the challan date is after the FY end and on/before the
+  `s139DueDate` audit-case date (`src/tds-law.ts`), each allocation consumed once. Live
+  proof: the template mapped the rent ledger to a 194T-only Winman name while the
+  return's 19,000+6,600 pattern sat under a different deductee — the four Feb/Mar rows
+  correctly stayed `tds_not_deposited`. A wrong declaration fails closed; never
+  "fix" it with fuzzy matching — the operator corrects the name.
+- **Challan matching runs before the month pool and skips it** (`analyzeTds`): a
+  challan-covered deduction never consumes pool FIFO and never fires `tds_not_deposited`
+  (so no s.40(a)(ia) base); lateness interest (ii) still runs deduction→challan date as
+  `tds_late_deposit`, and `tds3cd.ts` excludes the covered credit from notDeposited
+  (the 21(b) writer needs the same exclusion — applied worktree-local in the wt-e
+  merge for the e-workbook; the sibling branch owns that file).
+- **The month pool never contains a 1:1-joined debit** (fixed with 26i): the pool
+  double-spent it — once through the join, once as pool — so a February book deposit
+  silently covered March's need. `test/tds-subsequent.test.ts` guards the 26i paths;
+  the wt-e merged-tree port procedure (copy wt-notds, port hunks, rebuild, run
+  notds-write-e.mjs) is session scaffolding, not repo process.
+
+## Sharp edges found implementing the 2026-09-26k TDS addendum (perMonth year guard, 194Q month matching)
+
+- **The 194-I perMonth proxy is gated on the year cap** (`stampLiabilities`, src/tds.ts): the FA 2025 proviso
+  tests ₹50,000 per month or part of a month, but the books' voucher month is only a proxy (one voucher can
+  book several months' rent as one lump — the TDS-013-75 false positive). Months partition the year, so
+  "some month > 50k" ⇔ "year > 50k × 12"; the proxy now counts only when the year gross exceeds
+  `perMonth * 12`. Accepted residual: a genuine single >50k month in a ≤6L year stays silent (captain's
+  word, 2026-09-26). The old per-booking fixtures pin the guard — scale synthetic 194-I runs past the 6L cap.
+- **194Q findings match at party-month level** (pass 2): the month's resolved duty credits
+  (`monthCredit`) are matched against the month's whole liability — zero credits raise ONE
+  `tds_not_deducted` per party-month, partial credits raise ONE `tds_short_deducted` for the shortfall;
+  the per-booking not/short raise is skipped for 194Q only. The ₹50 lakh FY crossing and the C8
+  excess-only base are untouched, and the 1:1 join still drives late-deduction/deposit chains for the
+  joined row. Month-level details carry the same panNote (206AA / PAN-derived) suffix — tests assert it.
+- **Run-to-run comparisons must pin the operator file version**: the 20260926f run predates the
+  template dedup (its backup `tds-operator-filled-rvs-25-26-dedup-backup-20260926f.xlsx` has 0 statement
+  rows vs 4 now), so statement_missing 3→0 and some deposit-chain reshuffles between f and g are operator
+  data changes, not engine changes. Winman allocations under an undeclared deductee name are dropped by
+  the 26i join in every run — a corrected threshold just changes which bookings surface them, turning
+  late_deposit wording into honest `tds_not_deposited` (fail-closed).
+
+## Sharp edges found in the 2026-09-26o TDS batch (same-PAN, debit notes, 194T)
+
+- **A deductee is keyed by PAN when known, else its canonical ledger name** (`deducteeKeyOf`, src/tds.ts).
+  It is used in aggregate keys, `monthLiability`, `monthCredit`, `joinEvents` and the subsequent-year
+  challan match. Two Tally ledgers of one PAN are one deductee for every per-party figure; never fall back
+  to the raw ledger name in a new per-deductee computation.
+- **`netDebitNotes` nets an expense-ledger credit from a TDS party against that deductee+section's
+  bookings, LIFO (most recent open bill first)**, and drops a fully-netted booking. The grain is
+  **deductee + section, not ledger**: a materials debit note on one material ledger must cancel a bill on
+  another material ledger of the same party (verified on a real materials party). Expense credits count in
+  any voucher type, including `Debit Note`. An advance credit (note before any bill) carries forward.
+- **`counterpartyOf`'s duty-line rule (src/tds-daybook.ts)**: with an empty `partyLedgerName`, a
+  duty-ledger line's counterparty is the voucher's known party line (largest-magnitude party entry,
+  same-sign first) — not merely the largest-opposite-sign expense line. This is what recognises
+  `Dr Interest / Cr Party (net) / Cr TDS on Interest - 194A` journals. The hint is supplied by `review.ts`
+  from the duty/party key sets; without it the old fallback stands.
+- **A deductee's total short-deducted tax for the FY below ₹100 is not reported**
+  (`SHORT_DEDUCTION_MIN`, src/tds.ts), measured per deductee across all rows/sections, not per row. The
+  suppressed amount also leaves the s.271C base.
+- **194T is timing-only** (`timingOnlySection`, src/tds-law.ts): no not-deducted / short / threshold /
+  no-PAN finding ever fires for it; deposit lateness and not-deposited still do. A 194T booking may be
+  formed even when its counterparty is **not** in `ctx.tdsParties` — partner remuneration credits the
+  partners' Capital/Current accounts, so the operator's 194T expense mapping (not a declared party) is the
+  liability signal. Because the 1:1 partner join often cannot fire (lump journals give each partner a
+  different counterparty), a section-level monitor raises `tds_not_deposited` for the un-covered credit
+  and feeds the section's whole booking gross into `notDepositedBase` once — the s.40(a)(ia) exposure is a
+  bounded estimate, never per-partner. The 21(b) clause-34 row aggregates 194T by section.
+- **A lump duty credit splits per partner draw** (2026-09-26o item 038/039): a 194T voucher credits the
+  duty ledger once and debits EACH partner current account (`Dr A 15L / Dr B 15L / Cr Duty 30L`). The
+  day-book projection stamps the credit row's `draws` (`LedgerVoucherRow.draws`, src/downstream.ts /
+  src/tds-daybook.ts `projectLedgerRows`) and `extractEvents` emits one deduction per draw (proportional,
+  last draw takes the round2 remainder). Deposit coverage for a timing-only section then matches by
+  **section + deduction month + tax alone** (`loose = timingOnlySection(d.section)` in the subsequent-challan
+  loop), because the partner Capital Accounts are not operator Parties / Winman names — an allocation whose
+  Winman name no template party declares is carried into `ctx.subsequentDeposits` with `party` = the raw
+  Winman name rather than dropped (src/review.ts). The live Ledger-Vouchers path has no voucher composition
+  and keeps the single-counterparty behaviour. The section's s.40(a)(ia) base is proportional to the tax
+  actually NOT deposited (`section gross × undeposited tax / the section's total tax`, 2026-09-26o item 041):
+  a challan that did cover its share removes that share of the base — never the whole section gross. The same
+  proportional rule applies per booking (`b.gross × ded.tax / liability`) for non-timing sections, so a split
+  draw that carries only part of a booking's tax disallows only that share.
+- **Duty and expense classification is the operator's `Ledger Kind`** (`kind?: "expense" | "duty"`,
+  omitted = expense; src/tds-file.ts, src/review.ts `expenseLedgerNames`). A hand-built test operator that
+  omits `kind` on a duty row makes that ledger expense too, so its duty credit is read as a reduction of
+  the same deductee+section — always set `kind: "duty"` on duty rows in fixtures.
+- **A subsequent-year challan's own Interest column is the interest actually paid** (2026-09-26p):
+  `WinmanAllocation.interestPaid`/`challanId` come from the Challan sheet's `Interest` column joined by
+  `(ID No., Quarter)`; `SubsequentDeposit.interestPaid`/`challanId` carry them to the engine. A timing-only
+  credit covered by such a challan now raises `tds_late_deposit` with s.201(1A)(ii) interest
+  (`1.5% × calendarMonths(deduction, deposit)`, stamped on `ded.interestII`) — but **only for an orphan
+  credit** (`if (d.booking) continue`, src/tds.ts): a booked credit's lateness is already raised by the
+  per-booking `ded.subsequentDeposit` branch, so reporting it here too would double-count. The clause-34
+  `Interest on TDS` row's `paid`/`paidOn` are taken from those challan stamps, **deduped by
+  `subsequentChallanId`** (one challan covering several deductions of a section — the two 194T partners —
+  has its single interest counted once; `section|depositDate` is only the fallback key).

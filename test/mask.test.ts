@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildClassifier } from "../src/classify.js";
+import { buildClassifier, EMPTY_OVERRIDES } from "../src/classify.js";
 import { createVault } from "../src/vault.js";
 import {
   demaskText,
@@ -263,5 +263,21 @@ describe("demaskText", () => {
 
   it("leaves text with no aliases unchanged", () => {
     expect(demaskText("Nothing to see", createVault())).toBe("Nothing to see");
+  });
+});
+
+describe("blank and fleet-label deductees (2026-09-26 addendum, item 2)", () => {
+  it("masks a blank ledger name to a blank, never a minted pseudonym", () => {
+    const v = createVault();
+    const c = buildClassifier([], EMPTY_OVERRIDES);
+    expect(maskLedgerName("", "Sundry Creditors", c, v)).toBe("");
+    expect(maskLedgerName("   ", "Sundry Creditors", c, v)).toBe("");
+    // nothing was vaulted by the blank
+    expect(demaskText("Creditor 1", v)).toBe("Creditor 1");
+  });
+
+  it("returns a forced-clear fleet label unchanged", () => {
+    const c = buildClassifier([], { ...EMPTY_OVERRIDES, forceClearLedgers: ["statement Q1"] });
+    expect(maskLedgerName("statement Q1", "", c, createVault())).toBe("statement Q1");
   });
 });

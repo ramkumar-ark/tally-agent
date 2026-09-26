@@ -41,6 +41,10 @@ export function maskLedgerName(
   c: Classifier,
   v: Vault,
 ): string {
+  // Blank (and whitespace-only) names are fleet-labels, not ledgers: a
+  // pseudonym minted for "" would be a fake alias shared by every blank
+  // finding. maskPolicy defaults to mask, so the short-circuit lives here.
+  if (ledger.trim() === "") return "";
   if (c.ledgerPolicy(ledger, group) === "mask") {
     return v.pseudonym(ledger, c.role(group));
   }

@@ -1,4 +1,6 @@
 import { buildWorkbook, type Sheet } from "./xlsx.js";
+import { TCS_NATURES } from "./tcs-law.js";
+import { INTEREST_FORMS } from "./tds-file.js";
 
 /**
  * The generated, fillable TDS operator template (design of record:
@@ -20,6 +22,8 @@ const YN = ["Y", "N"];
 const FORMS = ["24Q", "26Q", "27Q"];
 const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
 const SETTING_194Q = "194Q Applicable";
+const SETTING_TAN = "TAN";
+const SETTING_LATE_DEDUCTION = "Late Deduction Interest";
 
 const instructions = (company?: string): Sheet => ({
   name: "Instructions",
@@ -35,7 +39,10 @@ const instructions = (company?: string): Sheet => ({
     ["Type dates as 2026-01-15, or pick from the calendar picker in the date columns."],
     ["Ledger Kind on the Sections sheet: leave blank for an expense/purchase ledger; use \"TDS Duty\" for the TDS duty ledger (its row then never counts as a booking)."],
     ["Parties sheet: one row per deductee party ledger. TDS Applicable is required — Y or N, exactly as the party is configured in Tally."],
-    ["Settings sheet: s.194Q is checked by default. Enter N against \"194Q Applicable\" only when the buyer did not meet the previous-year turnover condition (above ₹10 crore), which takes 194Q out of the review. Leave it blank for the default (applicable)."],
+    ["Settings sheet: s.194Q is checked by default. Enter N against \"194Q Applicable\" only when the buyer did not meet the previous-year turnover condition (above ₹10 crore), which takes 194Q out of the review. Leave it blank for the default (applicable). The TAN row is optional: leave it blank to mean absent."],
+    ["Enter N against \"Late Deduction Interest\" only when the s.201(1A) 1%-per-month interest on a late deduction is not to be computed (some companies treat the charge as not applicable). Late-deposit interest (1.5%) is unaffected. Leave it blank, or Y, for the default (computed)."],
+    ["TCS Sections sheet: one row per ledger on which tax is collected at source; its nature must be copied EXACTLY from the dropdown (the Winman text). Interest Paid sheet: interest the assesse paid on its own default — one row per statement form and quarter; duplicate form-and-quarter rows are refused."],
+    ["Statements sheet: Return Accurate? defaults to Yes when blank; enter No only for a quarter whose return was inaccurate."],
     ["One expense ledger may be mapped to more than one section, but nothing is computed for it until the mapping is one-to-one. Fix: split the Tally ledger per section (Rent - Plant & Machinery / Rent - Building) — which is what filing under 194-I(a) vs 194-I(b) requires anyway."],
     ["Worked example (invented names and figures only):"],
     ["Sections     | Site Repairs Contract  | 194C     | Expense"],
@@ -54,11 +61,16 @@ const settingsSheet = (): Sheet => ({
   name: "Settings",
   columns: [
     { header: "Setting", width: 24, format: "text" },
-    { header: "Value", width: 12, format: "text", validation: { list: YN } },
+    { header: "Value", width: 18, format: "text" },
   ],
-  // Pre-filled with the captain's default: 194Q is checked. N suppresses it
-  // when the buyer did not meet the previous-year ₹10 crore turnover condition.
-  rows: [[SETTING_194Q, "Y"]],
+  // Pre-filled with the captain's defaults: 194Q is checked; TAN blank means
+  // absent. N suppresses 194Q when the buyer did not meet the previous-year
+  // ₹10 crore turnover condition.
+  rows: [
+    [SETTING_194Q, "Y"],
+    [SETTING_LATE_DEDUCTION, "Y"],
+    [SETTING_TAN, null],
+  ],
 });
 
 const sectionsSheet = (): Sheet => ({
@@ -114,13 +126,48 @@ const statementsSheet = (): Sheet => ({
     { header: "Quarter", width: 10, format: "text", validation: { list: QUARTERS } },
     { header: "Filed Date", width: 14, format: "date" },
     { header: "TDS Amount", width: 14, format: "money" },
+    { header: "Return Accurate? (Yes/No)", width: 14, format: "text", validation: { list: ["Yes", "No"] } },
   ],
   rows: [],
 });
 
-/** The workbook: Instructions plus the Settings sheet and the five data sheets. */
+const tcsSectionsSheet = (): Sheet => ({
+  name: "TCS Sections",
+  columns: [
+    { header: "Ledger", width: 34, format: "text" },
+    // The 13 exact Winman nature strings exceed the 255-char inline-list cap,
+    // so the dropdown is backed by the hidden TCS Natures range (the
+    // as26-template pattern).
+    { header: "Nature of receipt (exact Winman text)", width: 44, format: "text", validation: { formula: "'TCS Natures'!$A$2:$A$14" } },
+  ],
+  rows: [],
+});
+
+const interestPaidSheet = (): Sheet => ({
+  name: "Interest Paid",
+  columns: [
+    { header: "Form", width: 10, format: "text", validation: { list: [...INTEREST_FORMS] } },
+    { header: "Quarter (Q1-Q4)", width: 14, format: "text", validation: { list: QUARTERS } },
+    { header: "Amount", width: 14, format: "money" },
+    { header: "Paid on", width: 16, format: "date" },
+  ],
+  rows: [],
+});
+
+/** Hidden reference sheet backing the nature dropdown, one range-backed row per nature. */
+const tcsNaturesSheet = (): Sheet => ({
+  name: "TCS Natures",
+  state: "hidden",
+  columns: [{ header: "Nature of receipt (exact Winman text)", width: 44, format: "text" }],
+  rows: TCS_NATURES.map((n) => [n.winman]),
+});
+
+/** The workbook: Instructions plus the Settings sheet, the five TDS data sheets and the clause-34 sheets. */
 export function buildTemplateWorkbook(company?: string): Buffer {
-  return buildWorkbook([instructions(company), settingsSheet(), sectionsSheet(), partiesSheet(), certificatesSheet(), challansSheet(), statementsSheet()]);
+  return buildWorkbook([
+    instructions(company), settingsSheet(), sectionsSheet(), partiesSheet(), certificatesSheet(),
+    challansSheet(), statementsSheet(), tcsSectionsSheet(), interestPaidSheet(), tcsNaturesSheet(),
+  ]);
 }
 
 /** The file name the generator tool writes; blank company means "all". */

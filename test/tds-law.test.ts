@@ -5,7 +5,11 @@ import {
   interestOn,
   lawOf,
   lateFeePerDay,
+  natureOf,
+  s139DueDate,
   statementDue,
+  winmanSectionOf,
+  WINMAN_TDS_DROPDOWN,
   TDS_SECTIONS,
   wholeYearOnCross,
 } from "../src/tds-law.js";
@@ -24,20 +28,20 @@ describe("TDS law table (FY 25-26)", () => {
     expect(law.rates.pan4thChar).toEqual({ P: 0.1, H: 0.1, C: 0.02, F: 0.02 });
     expect(law.threshold).toEqual({ aggregate: 50000 });
   });
-  it("carries 194-I(a) at 2% (plant and machinery), per-month threshold 50000", () => {
+  it("carries 194-I(a) at 2% (plant and machinery), aggregate threshold 600000 (captain's instruction)", () => {
     const law = lawOf("194-I(a)")!;
     expect(law.rates.standard).toBe(0.02);
     expect(law.rates.noPan).toBe(0.2);
     expect(law.rates.pan4thChar).toBeUndefined();
-    expect(law.threshold).toEqual({ perMonth: 50000 });
+    expect(law.threshold).toEqual({ aggregate: 600000 });
     expect(wholeYearOnCross("194-I(a)")).toBe(true);
   });
-  it("carries 194-I(b) at 10% (land and building), per-month threshold 50000", () => {
+  it("carries 194-I(b) at 10% (land and building), aggregate threshold 600000 (captain's instruction)", () => {
     const law = lawOf("194-I(b)")!;
     expect(law.rates.standard).toBe(0.1);
     expect(law.rates.noPan).toBe(0.2);
     expect(law.rates.pan4thChar).toBeUndefined();
-    expect(law.threshold).toEqual({ perMonth: 50000 });
+    expect(law.threshold).toEqual({ aggregate: 600000 });
     expect(wholeYearOnCross("194-I(b)")).toBe(true);
   });
   it("a bare 194-I is no law at all: the two sub-sections never fold", () => {
@@ -110,18 +114,53 @@ describe("statementDue (Rule 31A, FY 25-26)", () => {
   });
 });
 
+describe("s139DueDate (s.139(1), FY 25-26 audit case)", () => {
+  it("due 31 October 2026", () => {
+    expect(s139DueDate("FY 25-26")).toBe("20261031");
+  });
+});
+
 describe("interestOn (s.201(1A))", () => {
   it("review-page worked example: 1.5% x 3 months on 5000 = 225 exactly", () => {
-    expect(interestOn(0.015, 3, 5000, true)).toBe(225);
+    expect(interestOn(0.015, 3, 5000)).toBe(225);
   });
-  it("floors to 100 when round100 is on", () => {
-    expect(interestOn(0.03, 1, 1234, true)).toBe(100);
-    expect(interestOn(0.03, 1, 1234, false)).toBeCloseTo(37.02, 2);
+  it("has no 100 floor: a sub-100 figure is exact (2026-09-26r)", () => {
+    expect(interestOn(0.03, 1, 1234)).toBeCloseTo(37.02, 2);
+    expect(interestOn(0.015, 4, 1059)).toBeCloseTo(63.54, 2);
   });
 });
 
 describe("lateFeePerDay (s.234E)", () => {
   it("is 200 per day", () => {
     expect(lateFeePerDay(5000)).toBe(200);
+  });
+});
+
+describe("winman section mapping", () => {
+  it("maps law keys to the exact dropdown strings", () => {
+    expect(winmanSectionOf("194-I(a)")).toBe("194I (a)");
+    expect(winmanSectionOf("194-I(b)")).toBe("194I (b)");
+    expect(winmanSectionOf("194C")).toBe("194C");
+    expect(winmanSectionOf("194Q")).toBe("194Q");
+  });
+  it("maps every law-table section except 206AA", () => {
+    for (const s of ["194C", "194J", "194-I(a)", "194-I(b)", "194A", "194H", "194Q", "194T"]) {
+      expect(winmanSectionOf(s)).toEqual(s === "194-I(a)" || s === "194-I(b)" ? expect.any(String) : s);
+    }
+    expect(winmanSectionOf("206AA")).toBeNull();
+    expect(winmanSectionOf("195")).toBeNull(); // real dropdown value, not our law table
+  });
+  it("every mapped section's dropdown string is in the real dropdown list", () => {
+    for (const s of ["194C", "194J", "194-I(a)", "194-I(b)", "194A", "194H", "194Q", "194T"]) {
+      const w = winmanSectionOf(s);
+      if (w) expect(WINMAN_TDS_DROPDOWN).toContain(w);
+    }
+    expect(WINMAN_TDS_DROPDOWN).toHaveLength(44);
+    expect(WINMAN_TDS_DROPDOWN).toContain("192"); // first
+    expect(WINMAN_TDS_DROPDOWN).toContain("196D"); // last
+  });
+  it("nature text exists for every emittable section", () => {
+    expect(natureOf("194C")).toMatch(/contractor/i);
+    expect(natureOf("195")).toBe("");
   });
 });

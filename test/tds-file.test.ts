@@ -144,6 +144,121 @@ describe("parseOperatorFile", () => {
   });
 });
 
+describe("parseOperatorFile — clause-34 operator facts", () => {
+  /** Invented shape-valid TAN fixture, like the template tests'; never a real one. */
+  const TAN = "MUMO12345O";
+
+  it("reads a shape-valid tan, compacting spaces and uppercasing, and leaves it absent when the key is", () => {
+    const doc = parseOperatorFile(JSON.stringify({ tan: "mumo 12345 o" }));
+    expect(doc.tan).toBe(TAN);
+    expect(parseOperatorFile(JSON.stringify({})).tan).toBeUndefined();
+  });
+
+  it("rejects a malformed tan citing the JSON key, never the value", () => {
+    const msg = (() => {
+      try {
+        parseOperatorFile(JSON.stringify({ tan: TAN.slice(0, 9) }));
+        return "no error";
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    })();
+    expect(msg).toMatch(/operator file "tan": not a TAN/);
+    expect(msg).not.toContain(TAN.slice(0, 9));
+  });
+
+  it("reads tcsSections with the exact Winman nature strings", () => {
+    const doc = parseOperatorFile(JSON.stringify({
+      tcsSections: [
+        { ledger: "Scrap Sales", nature: "Scrap" },
+        { ledger: "Timber Sales", nature: "Timber-Others" },
+      ],
+    }));
+    expect(doc.tcsSections).toEqual([
+      { ledger: "Scrap Sales", nature: "Scrap" },
+      { ledger: "Timber Sales", nature: "Timber-Others" },
+    ]);
+  });
+
+  it("rejects a nature that is not an exact TCS_NATURES winman string, echoing nothing", () => {
+    const bad = JSON.stringify({ tcsSections: [{ ledger: "Scrap Sales", nature: TAN }] });
+    const msg = (() => {
+      try {
+        parseOperatorFile(bad);
+        return "no error";
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    })();
+    expect(msg).toMatch(/operator file tcsSections row 1: nature is not a TCS nature from the Winman dropdown/);
+    expect(msg).not.toContain(TAN);
+  });
+
+  it("refuses a duplicate tcsSections ledger citing both row numbers", () => {
+    const bad = JSON.stringify({
+      tcsSections: [
+        { ledger: "Scrap Sales", nature: "Scrap" },
+        { ledger: "scrap sales", nature: "Scrap" },
+      ],
+    });
+    expect(() => parseOperatorFile(bad)).toThrow(/tcsSections row 2: this ledger already appears in row 1/);
+  });
+
+  it("reads interestPaid rows with the two interest sheets' form union", () => {
+    const doc = parseOperatorFile(JSON.stringify({
+      interestPaid: [
+        { form: "26Q", quarter: "Q1", amount: 12500, paidOn: "2025-07-21" },
+        { form: "26QB", quarter: "Q2", amount: 500, paidOn: "20250815" },
+        { form: "27EQ", quarter: "Q3", amount: "1,000", paidOn: "2025-12-30" },
+      ],
+    }));
+    expect(doc.interestPaid).toEqual([
+      { form: "26Q", quarter: "Q1", amount: 12500, paidOn: "20250721" },
+      { form: "26QB", quarter: "Q2", amount: 500, paidOn: "20250815" },
+      { form: "27EQ", quarter: "Q3", amount: 1000, paidOn: "20251230" },
+    ]);
+  });
+
+  it("rejects an interestPaid form outside the union and a bad quarter", () => {
+    expect(() => parseOperatorFile(
+      JSON.stringify({ interestPaid: [{ form: "24QX", quarter: "Q1", amount: 1, paidOn: "20250721" }] }),
+    )).toThrow(/interestPaid row 1: form is not one of the interest statement forms/);
+    expect(() => parseOperatorFile(
+      JSON.stringify({ interestPaid: [{ form: "26Q", quarter: "Q5", amount: 1, paidOn: "20250721" }] }),
+    )).toThrow(/interestPaid row 1: quarter is not a calendar quarter/);
+  });
+
+  it("refuses a duplicate interestPaid (form, quarter) citing both row numbers", () => {
+    const bad = JSON.stringify({
+      interestPaid: [
+        { form: "26Q", quarter: "Q1", amount: 1, paidOn: "20250721" },
+        { form: "26q", quarter: "q1", amount: 2, paidOn: "20251017" },
+      ],
+    });
+    expect(() => parseOperatorFile(bad)).toThrow(/interestPaid row 2: this form-and-quarter pair already appears in row 1/);
+  });
+
+  it("reads statements[].returnAccurate as Yes/No, absent when the key is", () => {
+    const doc = parseOperatorFile(JSON.stringify({
+      statements: [
+        { form: "26Q", quarter: "Q1", filedDate: "20250820", tdsAmount: 5000, returnAccurate: "no" },
+        { form: "24Q", quarter: "Q2", filedDate: "20251120", tdsAmount: 100, returnAccurate: true },
+      ],
+    }));
+    expect(doc.statements[0].returnAccurate).toBe("No");
+    expect(doc.statements[1].returnAccurate).toBe("Yes");
+    expect(parseOperatorFile(JSON.stringify({
+      statements: [{ form: "26Q", quarter: "Q1", filedDate: "20250820", tdsAmount: 5000 }],
+    })).statements[0].returnAccurate).toBeUndefined();
+  });
+
+  it("rejects a statements[].returnAccurate that is neither Yes nor No", () => {
+    expect(() => parseOperatorFile(JSON.stringify({
+      statements: [{ form: "26Q", quarter: "Q1", filedDate: "20250820", tdsAmount: 5000, returnAccurate: "maybe" }],
+    }))).toThrow(/statements row 1: returnAccurate is not Yes or No/);
+  });
+});
+
 describe("parseDayBook", () => {
   it("accepts the upstream tally_get_vouchers row shape", () => {
     const rows = parseDayBook(

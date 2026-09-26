@@ -10,8 +10,6 @@ export interface GatewayConfig {
    */
   downstreamTimeoutMs?: number;
   dumpVault: boolean;
-  /** Rule 119A(c) ₹100 interest treatment, default on; TALLY_AGENT_TDS_ROUND100_OFF=1 disables. */
-  tdsRound100: boolean;
   /** Largest operator day-book file accepted, in bytes. TALLY_AGENT_DAYBOOK_MAX_MB, default 64. */
   dayBookMaxBytes: number;
 }
@@ -93,7 +91,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     defaultCompany: env.TALLY_DEFAULT_COMPANY || undefined,
     downstreamTimeoutMs: parseDownstreamTimeoutMs(env.TALLY_AGENT_DOWNSTREAM_TIMEOUT_MS),
     dumpVault: env.TALLY_AGENT_DUMP_VAULT === "1",
-    tdsRound100: env.TALLY_AGENT_TDS_ROUND100_OFF !== "1",
     dayBookMaxBytes: parseDayBookMaxBytes(env.TALLY_AGENT_DAYBOOK_MAX_MB),
   };
 }

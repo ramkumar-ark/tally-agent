@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
+import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
-import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
 
 describe("review", () => {
   it("returns findings for the fixture company", async () => {
@@ -370,8 +370,7 @@ describe("tdsReview", () => {
         deductees: [],
         formType: null,
         skipped: { noSection: 0, noJoin: 0 },
-      }),
-    ).rejects.toThrow(/disagree on 194C 2025-05/);
+      }),    ).rejects.toThrow(/disagree on 194C 2025-05/);
   });
 
   it("adopts a Winman PAN through the declared join, as a TaxId pseudonym and never the PAN", async () => {
@@ -670,5 +669,49 @@ describe("faRegister (session)", () => {
     expect(r.vendors).toHaveLength(1);
     expect(r.vendors[0].vendor).toMatch(/^Creditor \d+$/);
     expect(r.vendors[0].squaredOff).toBe(false);
+  });
+});
+
+describe("Winman TAN carry-through (2026-09-26 addendum, item 1)", () => {
+  const mk = () => {
+    const s = createSession(
+      Object.assign(fakeDownstream({ tally_get_ledgers: MASTERS }), {
+        ledgerVoucherRows: async () => ({ rows: [], dropped: 0 }),
+      } as never),
+      EMPTY_OVERRIDES,
+      EMPTY_WRONG_GROUP,
+    );
+    return s;
+  };
+  const winman = (tan: string | null) => ({
+    challans: [] as never[],
+    deductees: [] as never[],
+    formType: null,
+    skipped: { noSection: 0, noJoin: 0 },
+    tan,
+  });
+
+  const OPERATOR: OperatorFile = {
+    ...EMPTY_TDS_OPERATOR,
+    sections: [{ ledger: "Site Repairs Contract", section: "194C" }],
+    parties: [{ ledger: "Sample Builders LLP", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false }],
+  };
+
+  it("falls back to the Winman Deductor TAN when the operator file carries none", async () => {
+    const s = mk();
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json", winman("MUMA04826B"));
+    // No conflict: the operator file was silent, the Winman TAN fills the gap.
+    expect(r.findings.filter((f) => f.detail.includes("different TANs"))).toEqual([]);
+    expect(JSON.stringify(r)).not.toContain("MUMA");
+  });
+
+  it("flags a TAN conflict, keeps the operator's value and echoes neither", async () => {
+    const s = mk();
+    const op: OperatorFile = { ...OPERATOR, tan: "MUMA04826B" };
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", op, "json", winman("MUMA04827C"));
+    const conflicts = r.findings.filter((f) => f.detail.includes("different TANs"));
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].check).toBe("tds_master_gap");
+    expect(JSON.stringify(r)).not.toContain("MUMA");
   });
 });

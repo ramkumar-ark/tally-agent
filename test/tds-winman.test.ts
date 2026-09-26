@@ -70,9 +70,42 @@ describe("parseWinmanExport over the committed-layout fixture", () => {
     expect(facts.skipped).toEqual({ noSection: 2, noJoin: 1 });
   });
 
-  it("never surfaces the Deductor TAN, even as a string fragment of the result", () => {
-    expect(JSON.stringify(facts)).not.toContain("04826");
-    expect(JSON.stringify(facts)).not.toContain(TAN);
+  it("carries one allocation per joined Deduction row: who the challan's tax was deducted for", () => {
+    // 2026-09-26i: the subsequent-year engine matches on these rows. Bare
+    // labels and join misses never reach here (counted in skipped above).
+    expect(facts.allocations).toEqual([
+      { name: "Sample Movers", section: "194-I(a)", tax: 4944, dedDate: "20250630", paidDate: "20250630", depositDate: "20250716", interestPaid: 0, challanId: "1" },
+      { name: "Sample Movers", section: "194-I(a)", tax: 500, dedDate: "20250520", paidDate: "20250520", depositDate: "20250716", interestPaid: 0, challanId: "1" },
+      { name: "Sample Iron Works", section: "194-I(b)", tax: 12000, dedDate: "20250630", paidDate: "20250630", depositDate: "20250716", interestPaid: 0, challanId: "1" },
+      { name: "Sample Concrete Works ( proprietorship)", section: "194C", tax: 167219, dedDate: "20251224", paidDate: "20251224", depositDate: "20260118", interestPaid: 0, challanId: "2" },
+      { name: "Sample Iron Works", section: "194J", tax: 4800, dedDate: "20260214", paidDate: "20260214", depositDate: "20260214", interestPaid: 0, challanId: "3" },
+    ]);
+  });
+
+  it("carries the Deductor TAN through (in-session only, operator override wins)", () => {
+    // Item 1: the TAN is parsed and surfaced as a fallback for the operator
+    // Settings TAN — it lives in session memory like a PAN (panOf precedent)
+    // and reaches disk only inside the filled workbook. The parse result
+    // carries it; errors and previews must still never echo it.
+    expect(facts.tan).toBe("MUMA04826B");
+  });
+
+  it("carries the Deductor name through so the 3CD sheets show the return's deductor (item 065)", () => {
+    expect(facts.deductorName).toBe("Sample Construction LLP");
+  });
+
+  it("errors never echo the TAN, only the position", () => {
+    // The Deductor TAN scan is the first thing parseWinmanExport does, so a
+    // lone Deductor sheet with a numeric TAN cell must refuse citing
+    // sheet/row/column — never the value.
+    const msg = message(() =>
+      parseWinmanExport(
+        buildWorkbook([{ name: "Deductor", columns: [{ header: "a" }, { header: "b" }], rows: [["TAN", 4826]] }]),
+      ),
+    );
+    expect(msg).toMatch(/numeric — retype the TAN as text/);
+    expect(msg).not.toContain("4826");
+    expect(msg).not.toContain(TAN);
   });
 
   it("skips the veryHidden List decoy by state, not by name", () => {

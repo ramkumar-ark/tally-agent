@@ -4,6 +4,20 @@ import type { TdsLedgerRows } from "./tds.js";
 
 const ZERO = 0.005;
 
+export interface CounterpartyHint {
+  /** Whether a ledger line is a TDS duty ledger (2026-09-26o item 6). */
+  isDutyLedger?: (ledger: string) => boolean;
+  /** Whether a ledger line is a known TDS party ledger (item 6). */
+  isPartyLedger?: (ledger: string) => boolean;
+}
+
+/**
+ * Display-faithful counterparty: the largest opposite-signed line, else the
+ * voucher's party ledger. This is the 26AS/display attribution — a TDS line in
+ * `Dr Expense / Cr Party (net) / Cr TDS` resolves to the expense ledger here,
+ * and the deduction is re-keyed to the deductor later
+ * (`rekeyDeductionsToDeductor`, src/as26.ts).
+ */
 export function counterpartyOf(v: VoucherRow, index: number): string {
   const self = v.entries[index];
   if (!self) return "";
@@ -21,9 +35,74 @@ export function counterpartyOf(v: VoucherRow, index: number): string {
   return bestLedger || v.partyLedgerName;
 }
 
+/**
+ * TDS-path counterparty (2026-09-26o items 6 & 7). When the caller supplies
+ * `hint.isPartyLedger` (the TDS review does), a duty/TDS line is attributed to
+ * the voucher's own party ledger rather than the largest opposite-sign expense
+ * line, so the deduction joins its booking. Without the hint (the 26AS
+ * receivable path) this is exactly `counterpartyOf`, keeping that path
+ * display-faithful.
+ */
+export function deducteeCounterpartyOf(
+  v: VoucherRow,
+  index: number,
+  hint: CounterpartyHint = {},
+): string {
+  const self = v.entries[index];
+  if (!self) return "";
+  if (hint.isPartyLedger) {
+    // Item 7: in `Dr Expense / Cr Party (net) / Cr TDS` the TDS credit's
+    // largest opposite-sign ledger is the expense line, so the deduction never
+    // joined its booking and every such voucher read as tds_not_deducted. The
+    // voucher's own party ledger — present among the entries and not the line
+    // itself — is the right attribution for those lines (and the expense line's
+    // counterparty is unchanged); when the party line is the line itself or is
+    // absent, the largest opposite-sign rule below stands.
+    const party = (v.partyLedgerName ?? "").trim();
+    if (
+      party !== "" &&
+      canonicalKey(party) !== canonicalKey(self.ledger) &&
+      v.entries.some((e) => canonicalKey(e.ledger) === canonicalKey(party))
+    ) {
+      return party;
+    }
+    // Item 6: a duty line in an interest journal (`Dr Interest / Cr Party (net)
+    // / Cr Duty`) carries an EMPTY party ledger name, and its largest
+    // opposite-sign line is the expense, so the deduction was attributed to the
+    // expense ledger and never joined its booking (TDS-001-342..353). For a
+    // duty line, prefer the voucher's known party line — same-sign first (the
+    // ordinary net layout), then either sign (the `Dr Party / Cr Duty` contra
+    // entry) — before the fallback. Scoped to duty lines: the other lines are
+    // already attributed correctly.
+    if (hint.isDutyLedger?.(self.ledger)) {
+      const pickParty = (sameSignOnly: boolean): string => {
+        let best = "";
+        let bestAmount = 0;
+        v.entries.forEach((e, i) => {
+          if (i === index) return;
+          if (Math.abs(e.amount) <= ZERO) return;
+          if (!hint.isPartyLedger!(e.ledger)) return;
+          if (sameSignOnly && Math.sign(e.amount) !== Math.sign(self.amount)) return;
+          if (Math.abs(e.amount) > Math.abs(bestAmount)) {
+            best = e.ledger;
+            bestAmount = e.amount;
+          }
+        });
+        return best;
+      };
+      const sameSign = pickParty(true);
+      if (sameSign) return sameSign;
+      const anySign = pickParty(false);
+      if (anySign) return anySign;
+    }
+  }
+  return counterpartyOf(v, index);
+}
+
 export function projectLedgerRows(
   vouchers: VoucherRow[],
   ledgers: string[],
+  hint: CounterpartyHint = {},
 ): TdsLedgerRows[] {
   const byLedger = new Map<string, LedgerVoucherRow[]>();
   for (const l of ledgers) byLedger.set(canonicalKey(l), []);
@@ -32,15 +111,26 @@ export function projectLedgerRows(
     v.entries.forEach((entry, i) => {
       const rows = byLedger.get(canonicalKey(entry.ledger));
       if (!rows) return;
+      const isDutyRow = hint.isDutyLedger?.(entry.ledger) === true;
+      // A duty credit that sums several same-sign debit lines (`Dr A X /
+      // Dr B Y / Cr Duty X+Y`) is stamped with those draws so the engine can
+      // split it per party (2026-09-26o item 038). Only duty rows carry them.
+      const draws =
+        isDutyRow && entry.amount < -ZERO
+          ? v.entries
+              .filter((e, j) => j !== i && Math.abs(e.amount) > ZERO && e.amount > ZERO)
+              .map((e) => ({ ledger: e.ledger, amount: e.amount }))
+          : undefined;
       rows.push({
         date: String(v.date ?? ""),
         voucherType: String(v.voucherType ?? ""),
         voucherNumber: String(v.voucherNumber ?? ""),
         reference: "",
-        counterparty: counterpartyOf(v, i),
+        counterparty: deducteeCounterpartyOf(v, i, hint),
         amount: entry.amount,
         matchStatus: "unknown",
         tax: null,
+        ...(draws && draws.length >= 2 ? { draws } : {}),
       });
     });
   }
@@ -254,6 +344,9 @@ export function readDayBook(
   ): DayBookLedgerPair[] | null => {
     const v = envelope[key];
     if (!Array.isArray(v)) return null;
+    // Groups carry name+parent only; ledgers may also declare a PAN and a
+    // GSTIN (item 3) — normalized here so every consumer sees the same shape.
+    // An older bundle without the fields loads unchanged (pan/gstin null).
     return v
       .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
       .map((x) => ({

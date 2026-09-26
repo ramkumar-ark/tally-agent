@@ -75,6 +75,25 @@ const baseSheets: Record<string, Sheet> = {
       { header: "Quarter", format: "text" },
       { header: "Filed Date", format: "date" },
       { header: "TDS Amount", format: "money" },
+      { header: "Return Accurate? (Yes/No)", format: "text" },
+    ],
+    rows: [],
+  },
+  "TCS Sections": {
+    name: "TCS Sections",
+    columns: [
+      { header: "Ledger", format: "text" },
+      { header: "Nature of receipt (exact Winman text)", format: "text" },
+    ],
+    rows: [],
+  },
+  "Interest Paid": {
+    name: "Interest Paid",
+    columns: [
+      { header: "Form", format: "text" },
+      { header: "Quarter (Q1-Q4)", format: "text" },
+      { header: "Amount", format: "money" },
+      { header: "Paid on", format: "date" },
     ],
     rows: [],
   },
@@ -107,6 +126,7 @@ describe("parseOperatorTemplate — happy path", () => {
     expect(parseOperatorTemplate(buildTemplateWorkbook())).toEqual({
       sections: [], parties: [], certificates: [], challans: [], statements: [],
       section194QApplicable: true,
+      lateDeductionInterest: true,
     });
   });
 
@@ -176,6 +196,19 @@ describe("parseOperatorTemplate — the optional Settings sheet (s.194Q)", () =>
 
     const blank = message(() => parseOperatorTemplate(settingsWorkbook([[null, "N"]])));
     expect(blank).toMatch(/template Settings row 2, column A \(Setting\)/);
+  });
+});
+
+describe("parseOperatorTemplate — the Late Deduction Interest setting (2026-09-26r inbox 067)", () => {
+  it("defaults to enabled when absent or blank", () => {
+    expect(parseOperatorTemplate(fullWorkbook([])).lateDeductionInterest).toBe(true);
+    expect(parseOperatorTemplate(settingsWorkbook([])).lateDeductionInterest).toBe(true);
+    expect(parseOperatorTemplate(settingsWorkbook([["Late Deduction Interest", null]])).lateDeductionInterest).toBe(true);
+  });
+
+  it("reads an explicit N as the opt-out and Y as enabled", () => {
+    expect(parseOperatorTemplate(settingsWorkbook([["Late Deduction Interest", "N"]])).lateDeductionInterest).toBe(false);
+    expect(parseOperatorTemplate(settingsWorkbook([["Late Deduction Interest", "Y"]])).lateDeductionInterest).toBe(true);
   });
 });
 
@@ -299,6 +332,13 @@ describe("parseOperatorTemplate — structure and duplicates", () => {
     expect(op.sections).toEqual([{ ledger: "L1", section: "194C" }]);
   });
 
+  it("treats a blank Section cell as not applicable for TDS (omitted from sections)", () => {
+    const op = parseOperatorTemplate(
+      fullWorkbook([["Sections", [["L1", "194C"], ["Repairs & Maintenance A/c", ""]]]]),
+    );
+    expect(op.sections).toEqual([{ ledger: "L1", section: "194C" }]);
+  });
+
   it("rejects a rename of a required header with the expected headers listed", () => {
     const sheets: Sheet[] = [
       { name: "Instructions", columns: [{ header: "x" }], rows: [] },
@@ -343,5 +383,169 @@ describe("parseOperatorTemplate — structure and duplicates", () => {
     expect(message(() => parseOperatorTemplate(
       fullWorkbook([["Challans", [["194C", "May 2026", "2025-06-16"]]]]),
     ))).toMatch(/column B \(For Month\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Clause-34 operator facts: TAN (Settings), TCS Sections, Interest Paid and
+// the Statements Return Accurate column.
+// ---------------------------------------------------------------------------
+
+describe("parseOperatorTemplate — clause-34 facts round-trip on the generated template", () => {
+  it("leaves tan, tcsSections, interestPaid and each returnAccurate undefined on the blank template", () => {
+    const op = parseOperatorTemplate(buildTemplateWorkbook("X"));
+    expect(op.tan).toBeUndefined();
+    expect(op.tcsSections).toBeUndefined();
+    expect(op.interestPaid).toBeUndefined();
+    for (const s of op.statements) expect(s.returnAccurate).toBeUndefined();
+  });
+
+  it("parses an old six-sheet template unchanged: the new facts stay absent", () => {
+    const sheets: Sheet[] = [
+      { name: "Instructions", columns: [{ header: "How to fill this template" }], rows: [] },
+      { name: "Settings", columns: [{ header: "Setting" }, { header: "Value" }], rows: [["194Q Applicable", "Y"]] },
+      ...Object.entries(baseSheets)
+        .filter(([name]) => !["TCS Sections", "Interest Paid"].includes(name))
+        .map(([name, sheet]) => ({ ...sheet, rows: [] })),
+    ];
+    const op = parseOperatorTemplate(buildWorkbook(sheets));
+    expect(op.sections).toEqual([]);
+    expect(op.tan).toBeUndefined();
+    expect(op.tcsSections).toBeUndefined();
+    expect(op.interestPaid).toBeUndefined();
+  });
+});
+
+describe("parseOperatorTemplate — the Settings TAN row", () => {
+  it("reads a shape-valid TAN, compacting spaces and uppercasing", () => {
+    const op = parseOperatorTemplate(settingsWorkbook([
+      ["194Q Applicable", "Y"],
+      ["TAN", "mumo 12345 o"],
+    ]));
+    expect(op.tan).toBe("MUMO12345O");
+  });
+
+  it("leaves tan undefined on a blank TAN value", () => {
+    expect(parseOperatorTemplate(settingsWorkbook([["TAN", null]])).tan).toBeUndefined();
+  });
+
+  it("rejects a malformed TAN citing the Settings row and column, never the value", () => {
+    const bad = `${TAN}!`;
+    const wb = settingsWorkbook([["194Q Applicable", "Y"], ["TAN", bad]]);
+    const msg = message(() => parseOperatorTemplate(wb));
+    expect(msg).toMatch(/template Settings row 3, column B \(Value\): not a TAN \(four letters, five digits, one letter\)/);
+    expect(msg).not.toContain(bad);
+  });
+});
+
+describe("parseOperatorTemplate — TCS Sections", () => {
+  it("parses ledger-to-nature rows with exact Winman nature strings", () => {
+    const op = parseOperatorTemplate(fullWorkbook([
+      ["TCS Sections", [["Scrap Sales", "Scrap"], ["Timber Sales", "Timber-Others"]]],
+    ]));
+    expect(op.tcsSections).toEqual([
+      { ledger: "Scrap Sales", nature: "Scrap" },
+      { ledger: "Timber Sales", nature: "Timber-Others" },
+    ]);
+  });
+
+  it("rejects a nature that is not an exact Winman TCS nature, echoing nothing (even a planted TAN)", () => {
+    const wb = fullWorkbook([["TCS Sections", [["Scrap Sales", TAN]]]]);
+    const msg = message(() => parseOperatorTemplate(wb));
+    expect(msg).toMatch(
+      /template TCS Sections row 2, column B \(Nature of receipt \(exact Winman text\)\): not a TCS nature — use the dropdown/,
+    );
+    expect(msg).not.toContain(TAN);
+  });
+
+  it("requires the Ledger cell and cites it blank when empty", () => {
+    const msg = message(() => parseOperatorTemplate(fullWorkbook([["TCS Sections", [["", "Scrap"]]]])));
+    expect(msg).toMatch(/template TCS Sections row 2, column A \(Ledger\): required cell is blank/);
+  });
+
+  it("refuses a duplicate ledger key citing both rows", () => {
+    const wb = fullWorkbook([["TCS Sections", [["Scrap Sales", "Scrap"], ["scrap sales", "Minerals-coal/lignite/iron ore"]]]]);
+    const msg = message(() => parseOperatorTemplate(wb));
+    expect(msg).toMatch(/template TCS Sections row 3, column A \(Ledger\): this ledger already appears in row 2/);
+  });
+});
+
+describe("parseOperatorTemplate — Interest Paid", () => {
+  it("parses form, quarter, amount and paid-on rows", () => {
+    const op = parseOperatorTemplate(fullWorkbook([
+      ["Interest Paid", [
+        ["24Q", "Q4", "1,500", "2026-05-08"],
+        ["26QB", "Q2", 500, "20250815"],
+      ]],
+    ]));
+    expect(op.interestPaid).toEqual([
+      { form: "24Q", quarter: "Q4", amount: 1500, paidOn: "20260508" },
+      { form: "26QB", quarter: "Q2", amount: 500, paidOn: "20250815" },
+    ]);
+  });
+
+  it("rejects a form outside the interest-form union and never echoes it", () => {
+    const msg = message(() => parseOperatorTemplate(
+      fullWorkbook([["Interest Paid", [[TAN, "Q1", 1, "2025-07-21"]]]]),
+    ));
+    expect(msg).toMatch(/template Interest Paid row 2, column A \(Form\): not one of the interest statement forms — use the dropdown/);
+    expect(msg).not.toContain(TAN);
+  });
+
+  it("rejects a quarter outside Q1..Q4", () => {
+    expect(message(() => parseOperatorTemplate(
+      fullWorkbook([["Interest Paid", [["24Q", "Q5", 1, "2025-07-21"]]]]),
+    ))).toMatch(/template Interest Paid row 2, column B \(Quarter \(Q1-Q4\)\)/);
+  });
+
+  it("requires the Paid on date", () => {
+    expect(message(() => parseOperatorTemplate(
+      fullWorkbook([["Interest Paid", [["24Q", "Q1", 1, null]]]]),
+    ))).toMatch(/template Interest Paid row 2, column D \(Paid on\): required cell is blank/);
+  });
+
+  it("refuses a duplicate (form, quarter) pair citing both rows", () => {
+    const msg = message(() => parseOperatorTemplate(
+      fullWorkbook([["Interest Paid", [["26Q", "Q1", 1, "2025-07-21"], ["26Q", "Q1", 2, "2025-10-17"]]]]),
+    ));
+    expect(msg).toMatch(/template Interest Paid row 3, column B \(Quarter \(Q1-Q4\)\): this form-and-quarter pair already appears in row 2/);
+  });
+});
+
+describe("parseOperatorTemplate — Statements Return Accurate", () => {
+  it("reads Yes and No (case-insensitive) and leaves it absent on a blank cell", () => {
+    const op = parseOperatorTemplate(fullWorkbook([
+      ["Statements", [
+        ["26Q", "Q1", "2025-08-20", 5000, "No"],
+        ["24Q", "Q2", "2025-11-20", 100, "yes"],
+        ["26Q", "Q2", "2025-11-20", 100, null],
+      ]],
+    ]));
+    expect(op.statements.map((s) => s.returnAccurate)).toEqual(["No", "Yes", undefined]);
+  });
+
+  it("rejects an unrecognised return-accurate value citing column E", () => {
+    const msg = message(() => parseOperatorTemplate(
+      fullWorkbook([["Statements", [["26Q", "Q1", "2025-08-20", 5000, TAN]]]]),
+    ));
+    expect(msg).toMatch(/template Statements row 2, column E \(Return Accurate\? \(Yes\/No\)\): enter Yes or No/);
+    expect(msg).not.toContain(TAN);
+  });
+
+  it("parses a template whose Statements lack the column (an old template), leaving it absent", () => {
+    const sheets: Sheet[] = [
+      { name: "Instructions", columns: [{ header: "How to fill this template" }], rows: [] },
+      { name: "Settings", columns: [{ header: "Setting" }, { header: "Value" }], rows: [] },
+      ...Object.entries(baseSheets).map(([name, sheet]) => ({
+        ...sheet,
+        columns: name === "Statements"
+          ? sheet.columns.filter((c) => c.header !== "Return Accurate? (Yes/No)")
+          : sheet.columns,
+        rows: [],
+      })),
+    ];
+    const op = parseOperatorTemplate(buildWorkbook(sheets));
+    expect(op.tan).toBeUndefined();
+    for (const s of op.statements) expect(s.returnAccurate).toBeUndefined();
   });
 });

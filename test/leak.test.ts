@@ -14,7 +14,7 @@ import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { buildWorkbook } from "../src/xlsx.js";
 import { buildTemplateWorkbook } from "../src/tds-template.js";
 import { buildWinmanFixture } from "./fixtures/winman-test-fixture.js";
-import { makeWinmanFixture } from "./fixtures/winman-fixture.js";
+import { makeWinmanFixture, makeTdsTcsFixture } from "./fixtures/winman-fixture.js";
 import { readXlsm, partText } from "../src/xlsm.js";
 import { readWorkbook } from "../src/xlsx-read.js";
 import { entry } from "./xlsx.test.js";
@@ -292,6 +292,7 @@ describe("no secret leaves the gateway", () => {
       "tb_write_3cd_gst44",
       "tb_write_3cd_loans",
       "tb_write_3cd_pf_esi",
+      "tb_write_3cd_tds_tcs",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
       "tb_write_gst44_report",
@@ -746,5 +747,116 @@ describe("fixed asset register leak surfaces", () => {
     expect(purchasesXml).toContain("PUR/918020045566771");
     expect(workbookPath.toLowerCase()).not.toContain("orchid");
     expect(csvPath.toLowerCase()).not.toContain("orchid");
+  });
+});
+
+/**
+ * TDS/TCS clause-34 write leak surfaces: the five 3CD sheets are a new
+ * outbound surface. The canary session runs the tool WITHOUT an operator
+ * tan first — so no TAN should exist anywhere at all — and a positive run
+ * proves the TAN is a deliberate write into the TAN (B) column, never an
+ * accident elsewhere.
+ */
+function tdsTcsSecretDownstream() {
+  const masters = JSON.stringify([
+    { name: "Orchid Medical Builders LLP", parent: "Sundry Creditors", state: "Karnataka", IsTDSApplicable: "Yes", TDSDeducteeType: "Company" },
+    { name: "Orchid Medical Works", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+    { name: "TDS Contractors", parent: "Duties & Taxes", IsTDSApplicable: "Yes" },
+  ]);
+  return fakeDownstream({ tally_get_ledgers: masters });
+}
+
+const TDS_TCS_DAYBOOK = JSON.stringify({
+  tallyAgentExport: 1,
+  fromDate: "20250401",
+  toDate: "20260331",
+  groups: [
+    { name: "Purchase Accounts", parent: " Primary" },
+    { name: "Sundry Creditors", parent: "Current Liabilities" },
+    { name: "Current Liabilities", parent: " Primary" },
+    { name: "Duties & Taxes", parent: " Primary" },
+  ],
+  ledgers: [
+    { name: "Orchid Medical Builders LLP", parent: "Sundry Creditors" },
+    { name: "Orchid Medical Works", parent: "Purchase Accounts" },
+    { name: "TDS Contractors", parent: "Duties & Taxes" },
+  ],
+  vouchers: [
+    {
+      date: "20250510", voucherType: "Purchase", voucherNumber: "PU/1", partyLedgerName: "",
+      entries: [
+        { LEDGERNAME: "Orchid Medical Works", AMOUNT: -300000 },
+        { LEDGERNAME: "Orchid Medical Builders LLP", AMOUNT: 300000 },
+      ],
+    },
+    {
+      date: "20250510", voucherType: "Journal", voucherNumber: "JV/1", partyLedgerName: "",
+      entries: [
+        { LEDGERNAME: "Orchid Medical Builders LLP", AMOUNT: -6000 },
+        { LEDGERNAME: "TDS Contractors", AMOUNT: 6000 },
+      ],
+    },
+  ],
+});
+
+const TDS_TCS_TAN = "MUMS12345A";
+
+async function runTdsTcsTool(tan: string | undefined) {
+  const session = createSession(tdsTcsSecretDownstream(), EMPTY_OVERRIDES);
+  const tools = new Map<string, (args: any) => Promise<string>>();
+  const reportDir = mkdtempSync(join(tmpdir(), "tally-agent-leak-"));
+  registerTools((name, _d, _s, handler) => tools.set(name, handler), session, { reportDir });
+  const dir = mkdtempSync(join(tmpdir(), "tally-agent-3cdtds-"));
+  const operatorPath = join(dir, "operator.json");
+  writeFileSync(
+    operatorPath,
+    JSON.stringify({
+      ...(tan ? { tan } : {}),
+      sections: [{ ledger: "Orchid Medical Works", section: "194C" }, { ledger: "TDS Contractors", section: "194C" }],
+      parties: [{ ledger: "Orchid Medical Builders LLP", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false }],
+      certificates: [],
+      challans: [],
+      statements: [],
+    }),
+    "utf8",
+  );
+  const dayBookPath = join(dir, "daybook.json");
+  writeFileSync(dayBookPath, TDS_TCS_DAYBOOK, "utf8");
+  const sourcePath = join(dir, "winman-3cd.xlsm");
+  writeFileSync(sourcePath, makeTdsTcsFixture().buf);
+  await tools.get("tb_tds_review")!({
+    fromDate: "20250401",
+    toDate: "20260331",
+    asOnDate: "20260331",
+    tdsFilePath: operatorPath,
+    dayBookPath,
+  });
+  const out = await tools.get("tb_write_3cd_tds_tcs")!({ sourcePath, outPath: join(dir, "out") });
+  const pkg = readXlsm(await readFile(JSON.parse(out).path, null));
+  const sheetXml = pkg.entries
+    .filter((e) => /^xl\/worksheets\/[^/]+\.xml$/.test(e.name))
+    .map((e) => partText(pkg, e.name))
+    .join("\n");
+  return { session, out, sheetXml };
+}
+
+describe("tds/tcs 3cd write leak surfaces", () => {
+  it("runs the tool with no operator TAN, so the sheets carry neither a canary nor a TAN-shaped string", async () => {
+    const { session, out, sheetXml } = await runTdsTcsTool(undefined);
+    // Non-vacuity: the canary ledger really entered the review (masked), the
+    // vault carries it, and the clause-34 rows were really written.
+    expect(session.vault.entries().some((e) => e.real.toLowerCase().includes("orchid"))).toBe(true);
+    expect(out).toMatch(/"path"/);
+    for (const text of [out, sheetXml]) {
+      expect(text.toLowerCase()).not.toContain("orchid");
+      expect(text.toLowerCase()).not.toContain("medical");
+      expect(text).not.toMatch(/[A-Z]{4}\d{5}[A-Z]/);
+    }
+  });
+
+  it("writes the operator TAN into the TAN (B) column of the TDS sheet on the positive run", async () => {
+    const { sheetXml } = await runTdsTcsTool(TDS_TCS_TAN);
+    expect(sheetXml).toContain(TDS_TCS_TAN);
+    expect(sheetXml).toMatch(new RegExp('\\<c r="B7"[^>]*t="inlineStr"><is><t[^>]*>' + TDS_TCS_TAN + "</t>"));
   });
 });
