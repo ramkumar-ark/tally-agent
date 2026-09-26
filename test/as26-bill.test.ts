@@ -233,6 +233,27 @@ describe("buildBillRows (A2)", () => {
     const rows = buildBillRows(res, facts, f, opts);
     expect(rows.filter((r) => r.kind === "booksded")).toHaveLength(1);
   });
+  it("combination-consumed rows are re-emitted as explained, keeping their source indexes and order", () => {
+    const factsC: BooksFacts = {
+      deductions: [{ ledgerKey: ALPHA, kind: "tds", date: "20250501", tax: 5000,
+        voucherType: "Journal", voucherNumber: "JV 1", reference: null }],
+      sales: [],
+    };
+    const fC = file([
+      tx({ tax: 2000, date: "20250601", bookingDate: "20250601" }),
+      tx({ tax: 3000, date: "20250601", bookingDate: "20250601" }),
+    ]);
+    const resC = analyzeAs26(fC, factsC, map, ["Alpha Traders"], opts);
+    expect(resC.recon[0].combinations).toHaveLength(1);
+    const rows = buildBillRows(resC, factsC, fC, opts);
+    const books = rows.filter((r) => r.kind === "booksded");
+    expect(books).toHaveLength(1);
+    expect(books[0].explained).toBe(true);
+    expect(books[0].dedIdx).toBe(0);
+    const as26 = rows.filter((r) => r.kind === "as26");
+    expect(as26.map((r) => [r.txIdx, r.explained])).toEqual([[0, true], [1, true]]);
+    expect(rows.filter((r) => !r.explained)).toHaveLength(0);
+  });
   it("a booksded row whose approximate invoice is fully claimed by a strong link stays unlinked (addendum 7)", () => {
     // invoice BILL-2 (taxable 350000, 2% = 7000) is exactly claimed by a
     // journal with a taxable-rate link; another journal exceeding the

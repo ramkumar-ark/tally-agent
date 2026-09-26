@@ -372,6 +372,7 @@ describe("writeAs26Report — combination sheet (addendum 7 follow-up)", () => {
                 side: "as26" as const,
                 basis: "taxable-rate" as const,
                 invoiceRef: "Doc 12", invoiceDate: "21-Jul-2025", invoiceTaxable: 2998069,
+                targetId: "D2", partIds: ["B1", "B2", "B3", "B4"],
               },
             ],
             booksTaxableValue: 0, booksGrossValue: 0, as26GrossValue: 0,
@@ -394,12 +395,92 @@ describe("writeAs26Report — combination sheet (addendum 7 follow-up)", () => {
       expect(as26.rows.slice(1).filter((r) => cell(r, 0) !== "")).toHaveLength(0);
       const comboRows = combo.rows.slice(1).filter((r) => cell(r, 0) !== "");
       expect(comboRows).toHaveLength(1);
-      expect(cell(comboRows[0], 1)).toBe("Pseudonym One");
-      expect(cell(comboRows[0], 4)).toBe("4");
-      expect(cell(comboRows[0], 6)).toBe("Doc 12");
-      expect(cell(comboRows[0], 9)).toBe("taxable-rate");
+      expect(cell(comboRows[0], 1)).toBe("as26");
+      expect(cell(comboRows[0], 2)).toBe("Pseudonym One");
+      expect(cell(comboRows[0], 3)).toBe("D2");
+      expect(cell(comboRows[0], 6)).toBe("4");
+      expect(cell(comboRows[0], 7)).toBe("B1, B2, B3, B4");
+      expect(cell(comboRows[0], 9)).toBe("Doc 12");
+      expect(cell(comboRows[0], 12)).toBe("taxable-rate");
       const md = readFileSync(paths.markdownPath, "utf8");
       expect(md).toMatch(/Unmatched after reconciliation: 0 books entries and 0 26AS rows/);
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("books-target aggregate shows its consumed rows and hides them from the unmatched sheets", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "as26-combo2-"));
+    try {
+      const billRow = (over: Partial<As26ReviewResult["billRows"][number]>) => ({
+        sheetId: "booksded" as const, party: "Pseudonym One", date: "31-Mar-2026",
+        tax: 17107, gross: null, voucherType: "Journal", ref: null, status: null,
+        section: null, inWindow: true, linkBasis: "none" as const, windowState: "in" as const,
+        linked: null, delta: null, explained: false, ...over,
+      });
+      const result = {
+        findings: [],
+        gaps: [],
+        totals: { booksTax: 0, as26Tax: 0, partiesMatched: 1, combinationExplained: 1, ambiguous: 0 },
+        mastersUnavailable: false,
+        groupsUnavailable: false,
+        skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+        counts: { credits: 0, receivableLedgers: ["TDS Receivable"] },
+        bookEvents: [],
+        fd20: [],
+        fdAuto: [],
+        bankParties: [],
+        section194QApplicable: true,
+        recon: [
+          {
+            match: { kind: "tds" as const, nameKey: "nk", ledgerKeys: ["lk"], ledgerName: "Pseudonym One", as26Name: "Pseudonym One" },
+            booksTax: 17107, as26Tax: 17107, paired: [], ambiguous: 0,
+            unmatchedBooks: [], unmatchedAs26: [],
+            combinationSearchSkipped: false, lateBookedTax: 0,
+            combinations: [
+              {
+                target: { date: "31-Mar-2026", tax: 17107 },
+                parts: [{ date: "31-Mar-2026", tax: 17107 }],
+                side: "books" as const,
+                targetId: "B1", partIds: ["D1"],
+              },
+            ],
+            booksTaxableValue: 0, booksGrossValue: 0, as26GrossValue: 0,
+          },
+        ],
+        billRows: [
+          billRow({ explained: true }),
+          billRow({ date: "01-Apr-2026", tax: 500 }),
+          billRow({ sheetId: "as26", tax: 1426, voucherType: null, section: "194R", status: "F", explained: true }),
+          billRow({ sheetId: "as26", tax: 8000, voucherType: null, section: "194R", status: "F" }),
+        ],
+      };
+      const paths = await writeAs26Report({
+        reportDir, company: "Demo Traders Pvt Ltd",
+        fromDate: "20250401", toDate: "20260331",
+        markdown: as26Markdown(result, "Demo Traders Pvt Ltd", "20250401", "20260331"),
+        result, vault: createVault(),
+      });
+      const sheets = readWorkbook(readFileSync(paths.workbookPath));
+      const cell = (r: { cells: Map<number, { value: unknown }> }, i: number) => r.cells.get(i)?.value ?? "";
+      const books = sheets.find((x) => x.name === "Books not in 26AS")!;
+      const as26 = sheets.find((x) => x.name === "26AS unmatched")!;
+      const combo = sheets.find((x) => x.name === "Combination matches")!;
+      // Consumed rows keep their reserved ids but are not displayed.
+      const booksShown = books.rows.slice(1).filter((r) => cell(r, 0) !== "");
+      expect(booksShown).toHaveLength(1);
+      expect(cell(booksShown[0], 0)).toBe("B2");
+      const as26Shown = as26.rows.slice(1).filter((r) => cell(r, 0) !== "");
+      expect(as26Shown).toHaveLength(1);
+      expect(cell(as26Shown[0], 0)).toBe("D2");
+      const comboRows = combo.rows.slice(1).filter((r) => cell(r, 0) !== "");
+      expect(comboRows).toHaveLength(1);
+      expect(cell(comboRows[0], 1)).toBe("books");
+      expect(cell(comboRows[0], 3)).toBe("B1");
+      expect(cell(comboRows[0], 6)).toBe("1");
+      expect(cell(comboRows[0], 7)).toBe("D1");
+      expect(cell(comboRows[0], 8)).toBe(17107);
+      expect(cell(comboRows[0], 12)).toBe("aggregate");
     } finally {
       rmSync(reportDir, { recursive: true, force: true });
     }

@@ -151,13 +151,18 @@ promises a sheet that may be empty.
 ### 11.4 D4 — the three drill-down sheets
 
 `writeAs26Report` writes three sheets alongside the existing four, one per
-`billRows` `sheetId`:
+`billRows` `sheetId`. Ids are assigned over **all** rows of a kind — unmatched
+plus combination-consumed — so a consumed row still reserves its ordinal and
+the displayed sheet carries gaps where it was explained. That keeps the ids a
+finding may have named in an earlier run stable and lets the traceability
+sheet (`§11.7`) point at the same `B`/`D` ordinals.
 
-- `Books not in 26AS` — ids `B1..Bn`; unmatched books deductions only
-  (combination-consumed entries were already removed by `reconcileParty`).
-  Columns include `link basis` and `window`.
-- `26AS unmatched` — ids `D1..Dn`; unmatched 26AS transactions (combination
-  parts likewise excluded). Columns include `link basis` and `window`.
+- `Books not in 26AS` — ids `B1..Bn`; books deductions that no 26AS row
+  explains. Combination-consumed entries reserve their `B` ordinal but are
+  hidden. Columns include `link basis` and `window`.
+- `26AS unmatched` — ids `D1..Dn`; 26AS transactions that no books entry
+  explains (combination parts likewise reserve-and-hide). Columns include
+  `link basis` and `window`.
 - `Bill value mismatch` — ids `V1..Vn`; one row per non-approximate 26AS
   transaction of a matched party whose `delta` (26AS amount − linked invoice
   taxable) exceeds `AS26_VALUE_TOLERANCE` in magnitude.
@@ -165,13 +170,34 @@ promises a sheet that may be empty.
 `window` reads `pre-period`/`post-period` and is blank when in-period. Rows
 arrive masked; `writeWorkbook` de-masks on disk only.
 
+### 11.7 The Combination matches sheet
+
+`writeAs26Report` also writes a **`Combination matches`** sheet listing every
+entry of `recon[].combinations`, in both directions:
+
+- `side` is `as26` when one 26AS row was matched to a set of books entries,
+  and `books` when one books entry was matched to a set of 26AS rows (the
+  one-to-many aggregate a deductor reports as many detail lines).
+- Columns: `row` (`C1..Cn`), `side`, `party`, `target row`, `target date`,
+  `target tax`, `matched rows` (count), `matched row ids` (the reserved
+  `B`/`D` ordinals, comma-joined), `entries total`, `invoice ref`,
+  `invoice date`, `invoice taxable`, `link basis`.
+- `target row` / `matched row ids` are the drill-down ids from §11.4, so a
+  reader can trace a consumed `B`/`D` row to the combination that explains it
+  even though the row itself no longer appears on the mismatch sheets.
+- `link basis` is the tier basis when the match was invoice-anchored, else
+  `aggregate` for a books-target match, else blank. A books-target match with
+  no invoice anchor is an aggregate by construction.
+
 ### 11.5 D5 — finding pointers
 
 After every finding detail has passed `maskKnownNames`, the session appends a
 pointer sentence naming that party's drill-down rows, e.g. `see Books not in
 26AS rows B1, B2.` Mappings: 001/008 → B; 002/005 → D (005 restricted to
 out-of-window D ids); 007 → B and D; 003 → V. When a party has no rows of the
-named kind, no pointer is appended. The appending happens after masking so
+named kind, no pointer is appended. A combination-consumed row reserves its
+ordinal but is never a pointer target, so a pointer can only name a row that
+still appears on the sheet. The appending happens after masking so
 row ids can never be re-masked.
 
 ### 11.6 D6 — masking boundary unchanged

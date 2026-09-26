@@ -4,7 +4,7 @@
 // boundary, never inside the builder.
 import {
   round2, AS26_TAX_TOLERANCE, AS26_VALUE_TOLERANCE,
-  type BooksFacts, type BooksSale, type BooksDeduction, type As26Result,
+  type BooksFacts, type BooksSale, type BooksDeduction, type As26Result, type ReconItem,
 } from "./as26.js";
 import { lawOf } from "./tds-law.js";
 import type { As26File, As26Kind, As26Transaction } from "./as26-file.js";
@@ -23,6 +23,14 @@ export interface BillRow {
   inWindow: boolean; linkBasis: LinkBasis;
   linked: { date: string; ref: string | null; taxable: number } | null;
   delta: number | null;
+  /** True for a row the combination search consumed: it carries a reserved
+   * row id (so earlier runs' B/D numbering stays stable) but is NOT shown on
+   * the unmatched sheets — its combination row cites it instead. */
+  explained?: boolean;
+  /** Source indices for the session's id maps (booksded: index into
+   * facts.deductions; as26: index into the party's filtered transaction list). */
+  dedIdx?: number;
+  txIdx?: number;
 }
 
 /** All detailed-sheet transactions of one (kind, nameKey) party. */
@@ -82,9 +90,39 @@ export function buildBillRows(
     const linkOf = (tax: number, date: string, reference: string | null, ledgerKey?: string) =>
       linkInvoiceWithCapacity(pool, { date, tax, reference, section, ledgerKey }, claimed);
 
-    for (const i of r.unmatchedBooks) {
-      const d: BooksDeduction | undefined = i.dedIdx !== undefined ? facts.deductions[i.dedIdx] : undefined;
-      if (!d) continue;
+    // Combination-consumed items are re-emitted as `explained` rows: the
+    // session reserves their B/D ids (stable numbering) and the report hides
+    // them, while the combination row can cite where they went.
+    const consumedBooks = new Set<number>();
+    const consumedAs26 = new Set<number>();
+    const comboItemByTxIdx = new Map<number, ReconItem>();
+    for (const c of r.combinations) {
+      if (c.side === "books") {
+        if (c.target.dedIdx !== undefined) consumedBooks.add(c.target.dedIdx);
+        for (const p of c.parts) if (p.txIdx !== undefined) consumedAs26.add(p.txIdx);
+      } else {
+        if (c.target.txIdx !== undefined) consumedAs26.add(c.target.txIdx);
+        for (const p of c.parts) if (p.dedIdx !== undefined) consumedBooks.add(p.dedIdx);
+      }
+      if (c.target.txIdx !== undefined) comboItemByTxIdx.set(c.target.txIdx, c.target);
+      for (const p of c.parts) if (p.txIdx !== undefined) comboItemByTxIdx.set(p.txIdx, p);
+    }
+    const unmatchedBookIdx = new Set(r.unmatchedBooks.map((i) => i.dedIdx));
+    const unmatchedAs26Idx = new Set(r.unmatchedAs26.map((i) => i.txIdx));
+    const booksOrder = [
+      ...r.unmatchedBooks.flatMap((i) => (i.dedIdx !== undefined ? [{ dedIdx: i.dedIdx, explained: false }] : [])),
+      ...[...consumedBooks].filter((d) => !unmatchedBookIdx.has(d)).map((dedIdx) => ({ dedIdx, explained: true })),
+    ].sort((a, b) => a.dedIdx - b.dedIdx);
+    const as26Order = [
+      ...r.unmatchedAs26.flatMap((i) => (i.txIdx !== undefined ? [{ txIdx: i.txIdx, explained: false, item: i }] : [])),
+      ...[...consumedAs26].filter((t) => !unmatchedAs26Idx.has(t))
+        .map((txIdx) => ({ txIdx, explained: true, item: comboItemByTxIdx.get(txIdx)! }))
+        .filter((o) => o.item !== undefined),
+    ].sort((a, b) => a.txIdx - b.txIdx);
+
+    for (const { dedIdx, explained } of booksOrder) {
+      const d: BooksDeduction | undefined = facts.deductions[dedIdx];
+      if (!d || !keySet.has(d.ledgerKey) || d.kind !== r.match.kind) continue;
       const link = linkOf(d.tax, d.date, d.reference, d.ledgerKey);
       rows.push({
         kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey,
@@ -92,27 +130,24 @@ export function buildBillRows(
         gross: null, status: null, section, inWindow: inWindow(d.date, opts),
         linkBasis: link ? link.basis : "none",
         linked: link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null,
-        delta: null,
+        delta: null, explained, dedIdx,
       });
     }
 
-    for (const i of r.unmatchedAs26) {
-      const led = r.match.ledgerKeys[0] ?? "";
-      const date = i.date;
-      // Section for the rate steps is the transaction's own section (A2);
-      // txIdx indexes the party's filtered transaction list.
-      const tx = i.txIdx !== undefined
-        ? partyTxsOf(file, r.match.kind, r.match.as26NameKey)[i.txIdx]
-        : undefined;
-      const link = linkOf(i.tax, date, null);
+    const txs = partyTxsOf(file, r.match.kind, r.match.as26NameKey);
+    for (const { txIdx, explained, item } of as26Order) {
+      const tx = txs[txIdx];
+      if (!tx) continue;
+      const date = item.date;
+      const link = linkOf(item.tax, date, null);
       rows.push({
-        kind: "as26", ledgerKey: led, nameKey: r.match.as26NameKey,
-        date, tax: i.tax, voucherType: null, ref: null,
-        gross: i.gross ?? null, status: i.status ?? null, section: tx?.section ?? null,
+        kind: "as26", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey,
+        date, tax: item.tax, voucherType: null, ref: null,
+        gross: item.gross ?? null, status: item.status ?? null, section: tx.section,
         inWindow: inWindow(date, opts),
         linkBasis: link ? link.basis : "none",
         linked: link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null,
-        delta: null,
+        delta: null, explained, txIdx,
       });
     }
   }

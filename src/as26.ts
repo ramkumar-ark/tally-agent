@@ -489,6 +489,11 @@ export interface PartyRecon {
     invoiceRef?: string | null;
     invoiceDate?: string | null;
     invoiceTaxable?: number | null;
+    /** Drill-down row ids (B/D) of the matched rows, filled by the session
+     * after numbering; the report shows them so a combination's consumed
+     * rows stay traceable even though they left the unmatched sheets. */
+    targetId?: string;
+    partIds?: string[];
   }>;
   ambiguous: number;
   unmatchedBooks: ReconItem[]; unmatchedAs26: ReconItem[];

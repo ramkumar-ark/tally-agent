@@ -1265,8 +1265,10 @@ export async function writeAs26Report(opts: {
       { header: "link basis", width: 14, format: "text" },
       { header: "window", width: 12, format: "text" },
     ],
-    rows: booksRows.map((r, i) => [
-      `B${i + 1}`, r.party, r.date, r.voucherType ?? "", r.ref ?? "", r.tax,
+    // Ids number over ALL rows of the sheet (including combination-consumed
+    // ones) so the numbering stays stable; consumed rows are not shown.
+    rows: booksRows.map((r, i) => ({ r, id: `B${i + 1}` })).filter(({ r }) => !r.explained).map(({ r, id }) => [
+      id, r.party, r.date, r.voucherType ?? "", r.ref ?? "", r.tax,
       r.linked?.ref ?? "", r.linked ? r.linked.date : "", r.linked?.taxable ?? null,
       r.linkBasis, windowCell(r),
     ]),
@@ -1285,8 +1287,8 @@ export async function writeAs26Report(opts: {
       { header: "link basis", width: 14, format: "text" },
       { header: "window", width: 12, format: "text" },
     ],
-    rows: as26Rows.map((r, i) => [
-      `D${i + 1}`, r.party, r.date, r.section ?? "", r.tax, r.gross ?? null,
+    rows: as26Rows.map((r, i) => ({ r, id: `D${i + 1}` })).filter(({ r }) => !r.explained).map(({ r, id }) => [
+      id, r.party, r.date, r.section ?? "", r.tax, r.gross ?? null,
       r.status ?? "", r.linkBasis, windowCell(r),
     ]),
   };
@@ -1313,30 +1315,37 @@ export async function writeAs26Report(opts: {
     ]),
   };
 
-  // The engine's combination matches with their invoice evidence: rows the
-  // unmatched sheets legitimately lost, shown here so the link stays visible.
+  // Every engine combination, books-target and as26-target alike: these are
+  // the rows the unmatched sheets legitimately lost (combination-consumed),
+  // shown here with the drill-down ids they carried so the link stays
+  // traceable. A books-target combination with no invoice anchor is an
+  // "aggregate" (one books entry absorbed a whole 26AS tail).
   const combinationRows = opts.result.recon.flatMap((r) =>
-    r.combinations.map((c, i) => ({ r, c, i })).filter(({ c }) => c.invoiceRef != null),
+    r.combinations.map((c, i) => ({ r, c, i })),
   );
   const combinationSheet: Sheet = {
     name: "Combination matches",
     columns: [
       { header: "row", width: 8, format: "text" },
+      { header: "side", width: 10, format: "text" },
       { header: "party", width: 26, format: "text" },
-      { header: "26AS date", width: 12, format: "text" },
-      { header: "26AS tax", width: 14, format: "money" },
-      { header: "matched entries", width: 12, format: "text" },
+      { header: "target row", width: 10, format: "text" },
+      { header: "target date", width: 12, format: "text" },
+      { header: "target tax", width: 14, format: "money" },
+      { header: "matched rows", width: 12, format: "text" },
+      { header: "matched row ids", width: 22, format: "text" },
       { header: "entries total", width: 14, format: "money" },
       { header: "invoice ref", width: 16, format: "text" },
       { header: "invoice date", width: 12, format: "text" },
       { header: "invoice taxable", width: 16, format: "money" },
       { header: "link basis", width: 14, format: "text" },
     ],
-    rows: combinationRows.map(({ r, c, i }, k) => [
-      `C${k + 1}`, r.match.as26Name, c.target.date, c.target.tax,
-      String(c.parts.length), c.parts.reduce((t, p) => t + p.tax, 0),
+    rows: combinationRows.map(({ r, c }, k) => [
+      `C${k + 1}`, c.side, r.match.as26Name, c.targetId ?? "", c.target.date, c.target.tax,
+      String(c.parts.length), (c.partIds ?? []).join(", "),
+      c.parts.reduce((t, p) => t + p.tax, 0),
       c.invoiceRef ?? "", c.invoiceDate ?? "", c.invoiceTaxable ?? null,
-      c.basis ?? "",
+      c.basis ?? (c.side === "books" ? "aggregate" : ""),
     ]),
   };
   const fd20Sheet: Sheet = {

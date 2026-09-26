@@ -305,6 +305,9 @@ export interface As26ReviewResult {
     windowState: "in" | "pre" | "post";
     linked: { date: string; ref: string | null; taxable: number } | null;
     delta: number | null;
+    /** Combination-consumed rows carry a reserved id but are hidden from the
+     * unmatched sheets; their combination row cites the id instead. */
+    explained: boolean;
   }>;
 }
 
@@ -1195,6 +1198,8 @@ export function createSession(
         invoiceRef: REF_MASK(c.invoiceRef ?? null),
         invoiceDate: c.invoiceDate ? displayDate(c.invoiceDate) : null,
         invoiceTaxable: c.invoiceTaxable ?? null,
+        targetId: c.targetId,
+        partIds: c.partIds,
       })),
       unmatchedBooks: r.unmatchedBooks.map((i) => ({ ...i, date: displayDate(i.date) })),
       unmatchedAs26: r.unmatchedAs26.map((i) => ({ ...i, date: displayDate(i.date) })),
@@ -1267,27 +1272,56 @@ export function createSession(
         : null,
       delta: r.delta,
       sheetId: r.kind,
+      explained: r.explained ?? false,
     }));
     // Row ids (D5): sequential per sheet across the whole run, grouped by
     // masked party — B/D/V + number. late_booking points only at the party's
     // as26 rows whose engine row fell outside the reviewed window.
+    // Combination-consumed rows still consume a number (so earlier runs' ids
+    // stay stable) but are excluded from the pointer target lists.
     const SHEET_PREFIX: Record<BillKind, string> = { booksded: "B", as26: "D", value: "V" };
     const byParty = new Map<string, Map<BillKind, string[]>>();
     const outOfWindowIds = new Set<string>();
+    const idByDedIdx = new Map<number, string>();
+    const idByTxIdx = new Map<string, string>();
+    const labelOf = (r: (typeof sortedRows)[number]): string =>
+      partyLabel.get(r.nameKey) ?? byLedgerParty.get(r.nameKey) ?? pseudoKey(r.ledgerKey);
     for (const kind of ["booksded", "as26", "value"] as const) {
       let n = 0;
-      for (const r of billRows) {
-        if (r.sheetId !== kind) continue;
+      for (const r of sortedRows) {
+        if (r.kind !== kind) continue;
         n += 1;
         const id = `${SHEET_PREFIX[kind]}${n}`;
-        const rows = byParty.get(r.party) ?? new Map();
+        if (r.dedIdx !== undefined) idByDedIdx.set(r.dedIdx, id);
+        if (r.txIdx !== undefined) idByTxIdx.set(`${r.nameKey}|${r.txIdx}`, id);
+        if (r.explained) continue;
+        const rows = byParty.get(labelOf(r)) ?? new Map();
         const list = rows.get(kind) ?? [];
         list.push(id);
         rows.set(kind, list);
-        byParty.set(r.party, rows);
+        byParty.set(labelOf(r), rows);
         if (kind === "as26" && !r.inWindow) outOfWindowIds.add(id);
       }
     }
+    // Attach each combination's consumed-row ids: the reader sees a books row
+    // (e.g. B110) against the 26AS rows it absorbed (e.g. D2..D13).
+    recon.forEach((m, i) => {
+      const er = result.recon[i];
+      const key = (txIdx: number): string => `${er.match.as26NameKey}|${txIdx}`;
+      m.combinations.forEach((mc, j) => {
+        const ec = er.combinations[j];
+        if (!ec) return;
+        const targetId = ec.side === "books"
+          ? (ec.target.dedIdx !== undefined ? idByDedIdx.get(ec.target.dedIdx) : undefined)
+          : (ec.target.txIdx !== undefined ? idByTxIdx.get(key(ec.target.txIdx)) : undefined);
+        const partIds = ec.parts.map((p) => ec.side === "books"
+          ? (p.txIdx !== undefined ? idByTxIdx.get(key(p.txIdx)) : undefined)
+          : (p.dedIdx !== undefined ? idByDedIdx.get(p.dedIdx) : undefined),
+        ).filter((x): x is string => x !== undefined);
+        mc.targetId = targetId;
+        mc.partIds = partIds;
+      });
+    });
     // Findings point at their drill-down rows. Appended after the findings'
     // maskKnownNames pass (the ids are not known names) and before the
     // outbound sweep; wording fixed by the task addendum (A4.4).

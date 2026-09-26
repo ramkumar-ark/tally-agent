@@ -433,4 +433,71 @@ describe("Session.as26Review", () => {
     // every row carries a legal windowState
     for (const r of res.billRows) expect(["pre", "post", "in"]).toContain(r.windowState);
   });
+
+  it("surfaces a books-target aggregate with reserved row ids and skips consumed rows in pointers", async () => {
+    const def = defaultAs26Fixture();
+    const fileAgg = parseAs26Export(buildAs26Fixture({
+      ...def,
+      tdsSummary: [...def.tdsSummary.slice(0, 7),
+        ["Aggregate Co", "ABCD12345E", 12000, 12000, 0, 600000, "", 600000, "194C"]],
+      tdsDetail: [...def.tdsDetail.slice(0, 3),
+        ["AGGREGATE CO", "10-Apr-2025", 200000, null, 4000, null, "ABCD12345E", null, "F", "15-Apr-2025", "194C"],
+        ["", "10-May-2025", 200000, null, 4000, null, null, null, "F", "15-May-2025", "194C"],
+        ["", "10-Jun-2025", 200000, null, 4000, null, null, null, "F", "15-Jun-2025", "194C"],
+      ],
+    }));
+    const dayBook: DayBookInput = {
+      shape: "bundle", company: "Demo Traders Pvt Ltd",
+      groups: [
+        { name: "Current Assets", parent: "" },
+        { name: "Loans & Advances (Asset)", parent: "Current Assets" },
+        { name: "Sundry Debtors", parent: "Current Assets" },
+      ],
+      ledgers: [
+        { name: "TDS Receivable", parent: "Loans & Advances (Asset)" },
+        { name: "Aggregate Co", parent: "Sundry Debtors" },
+      ],
+      vouchers: [
+        {
+          date: "20250612", voucherType: "Journal", voucherNumber: "JV/1", partyLedgerName: "Aggregate Co",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: 12000 },
+            { ledger: "Aggregate Co", amount: -12000 },
+          ],
+        },
+        {
+          date: "20250620", voucherType: "Journal", voucherNumber: "JV/2", partyLedgerName: "Aggregate Co",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: 500 },
+            { ledger: "Aggregate Co", amount: -500 },
+          ],
+        },
+      ],
+      observedFrom: "20250612",
+      observedTo: "20250620",
+      rejected: 0,
+      emptyMonths: [],
+    };
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", fileAgg, mapFile(
+      JSON.stringify({ mappings: [{ ledger: "Aggregate Co", as26Name: "Aggregate Co" }] }),
+    ), dayBook);
+
+    const combo = res.recon[0].combinations.find((c) => c.side === "books");
+    expect(combo).toBeDefined();
+    // the single 12000 books entry matches the whole 26AS tail it aggregates
+    expect(combo!.targetId).toBe("B1");
+    expect(combo!.partIds).toEqual(["D1", "D2", "D3"]);
+
+    // the consumed books row reserves B1 but is hidden from the sheets and
+    // from finding pointers; only the survivor (the 500 row) is named.
+    const booksded = res.billRows.filter((r) => r.sheetId === "booksded");
+    expect(booksded.some((r) => r.explained)).toBe(true);
+    const f001 = res.findings.find((x) => x.check === "books_tax_not_in_26as");
+    expect(f001).toBeDefined();
+    expect(f001!.detail).toMatch(/see Books not in 26AS rows B2\./);
+    expect(f001!.detail).not.toMatch(/B1\b/);
+  });
 });
