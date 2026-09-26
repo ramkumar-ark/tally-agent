@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyMovements, buildDisposals } from "../src/dep3cd.js";
+import { classifyMovements, buildDisposals, type Dep3cdCtx } from "../src/dep3cd.js";
+import { canonicalKey } from "../src/key.js";
 import { D3_VOUCHERS, D3_EXPECTED_DELETIONS, fixtureCtx } from "./fixtures/dep3cd-fixture.js";
 
 describe("dep3cd disposals", () => {
@@ -47,5 +48,20 @@ describe("dep3cd disposals", () => {
     expect(r.deletions.find((d) => d.voucherNumber === "R-2" && d.ledger === "Old Tractor")!.amount).toBe(225000);
     expect(r.deletions.find((d) => d.voucherNumber === "R-2" && d.ledger === "Pump Set")!.amount).toBe(75000);
     expect(r.findings.some((f) => f.check === "d3cd_consideration_apportioned")).toBe(true);
+  });
+  it("a P/L-on-sale ledger under Sales Accounts is not a disposal ledger", () => {
+    const base = fixtureCtx();
+    const profitKey = canonicalKey("Profit on Sale of Fixed Asset");
+    const ctx: Dep3cdCtx = {
+      ...base,
+      chainOf: (l) => (canonicalKey(l) === profitKey ? [...base.chainOf(l), canonicalKey("Sales Accounts")] : base.chainOf(l)),
+    };
+    const withPl = [
+      ...D3_VOUCHERS,
+      { date: "20250630", voucherType: "Journal", voucherNumber: "J-7", partyLedgerName: "", cancelled: false,
+        entries: [{ ledger: "Pump Set", amount: 81750 }, { ledger: "Profit on Sale of Fixed Asset", amount: -81750 }] },
+    ];
+    const r = buildDisposals(classifyMovements(withPl, ctx), withPl, ctx);
+    expect(r.findings.filter((f) => /disposal_/.test(f.check))).toEqual([]);
   });
 });

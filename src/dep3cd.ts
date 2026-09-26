@@ -493,6 +493,9 @@ export function buildDisposals(
     if (v.cancelled) continue;
     for (const e of v.entries) {
       if (e.amount >= -ZERO || !isSalesAccountsLine(e.ledger, ctx) || !DISPOSAL_NAME.test(e.ledger)) continue;
+      // A profit/loss-on-sale ledger can itself sit under Sales Accounts in a real
+      // company; it is the P/L line beside the asset, never a disposal ledger.
+      if (SALE_PL_NAME.test(e.ledger)) continue;
       const k = canonicalKey(e.ledger);
       const hit = credits.get(k) ?? { name: e.ledger, amount: 0 };
       hit.amount = round2(hit.amount + -e.amount);
