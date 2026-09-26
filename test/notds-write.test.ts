@@ -93,7 +93,7 @@ describe("write3cdNoTds", () => {
     const dir = tmpDir();
     const sourcePath = join(dir, "No TDS Disallowance.xlsm");
     writeFileSync(sourcePath, makeNotdsFixture());
-    const s = mkSession([booking(300000)]);
+    const s = mkSession([booking(700000)]);
     await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     await s.noTdsReview({
       operator: {
@@ -116,7 +116,7 @@ describe("write3cdNoTds", () => {
     const dir = tmpDir();
     const sourcePath = join(dir, "No TDS Disallowance.xlsm");
     writeFileSync(sourcePath, makeNotdsFixture());
-    const s = mkSession([booking(300000)]);
+    const s = mkSession([booking(700000)]);
     await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     await s.noTdsReview({});
     const w = await s.write3cdNoTds({ sourcePath, outPath: join(dir, "out.xlsm") });
@@ -149,7 +149,7 @@ describe("write3cdNoTds", () => {
     const dir = tmpDir();
     const sourcePath = join(dir, "No TDS Disallowance.xlsm");
     writeFileSync(sourcePath, makeNotdsFixture());
-    const s = mkSession([booking(300000)]);
+    const s = mkSession([booking(700000)]);
     await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     await s.noTdsReview({});
     const w = await s.write3cdNoTds({ sourcePath, outPath: join(dir, "out.xlsm") });
@@ -168,7 +168,7 @@ describe("write3cdNoTds", () => {
     const dir = tmpDir();
     const sourcePath = join(dir, "No TDS Disallowance.xlsm");
     writeFileSync(sourcePath, makeNotdsFixture());
-    const s = mkSession([booking(300000)]);
+    const s = mkSession([booking(700000)]);
     await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     await s.noTdsReview({});
     const w = await s.write3cdNoTds({ sourcePath, outPath: join(dir, "out.xlsm") });
@@ -192,7 +192,7 @@ describe("write3cdNoTds", () => {
     );
     const wrongPath = join(dir, "wrong.xlsm");
     await writeFile(wrongPath, writeXlsm(wrong));
-    const s = mkSession([booking(300000)]);
+    const s = mkSession([booking(700000)]);
     await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     await s.noTdsReview({});
     await expect(
@@ -204,7 +204,7 @@ describe("write3cdNoTds", () => {
     const dir = tmpDir();
     const sourcePath = join(dir, "No TDS Disallowance.xlsm");
     writeFileSync(sourcePath, makeNotdsFixture());
-    const s = mkSession([booking(300000)]);
+    const s = mkSession([booking(700000)]);
     await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
     await s.noTdsReview({});
     await expect(s.write3cdNoTds({ sourcePath, outPath: sourcePath })).rejects.toThrow(/resolves to the source/);
