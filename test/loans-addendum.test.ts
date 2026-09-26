@@ -511,7 +511,7 @@ describe("CHECK_ORDINAL pin (auto-exempt ordinal 27)", () => {
   it("loans ordinal block is 19..27 with auto-exempt last", () => {
     expect(CHECK_ORDINAL.loans_auto_exempt).toBe(27);
     expect(CHECK_ORDINAL.loans_party_unmastered).toBe(26);
-    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(23);
+    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(30);
   });
 });
 

@@ -89,7 +89,6 @@ import {
   type TbRow,
   type TdsCheckId,
   type TdsFinding,
-  findingId,
   tdsFindingId,
   type WrongGroupConfig,
   type DepFinding,
@@ -680,6 +679,7 @@ export interface Session {
         vault: Array<{ real: string; alias: string }>;
       }
     | undefined;
+  /**
    * Winman Form 3CD clause 44 — break-up of total expenditure into GST
    * categories (design of record: docs/design/2026-09-24-gst-44-clause-44-
    * design.md). The operator GST Status template arrives already parsed

@@ -150,7 +150,7 @@ describe("check ordinals 19-26 are the loans checks and are stable", () => {
     // total): a newly inserted check — including the clause-44 lane's future
     // 15-18 — must not mint ids silently; pinning the total forces this test
     // to be revisited when CheckId grows.
-    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(23);
+    expect(Object.keys(CHECK_ORDINAL)).toHaveLength(30);
   });
 });
 
