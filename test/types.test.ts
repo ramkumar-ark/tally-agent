@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TDS_CHECK_ORDINAL, tdsFindingId, type TdsFinding } from "../src/types.js";
 import { findingId, LEDGER_CHECK_ORDINAL, ledgerFindingId, sideOf } from "../src/types.js";
 import { DEP_CHECK_ORDINAL, depFindingId } from "../src/types.js";
+import { d3cdFindingId, D3CD_CHECK_ORDINAL } from "../src/types.js";
 
 describe("sideOf", () => {
   it("returns Dr for a positive balance", () => {
@@ -100,5 +101,13 @@ describe("DEP- finding space", () => {
       dep_block_wdv_nil: 14,
       dep_additional_depreciation_unclaimed: 15,
     });
+  });
+});
+
+describe("d3cdFindingId", () => {
+  it("D3CD ids are stable and 13 checks long", () => {
+    expect(d3cdFindingId("d3cd_block_unmapped", 2)).toBe("D3CD-001-2");
+    expect(d3cdFindingId("d3cd_masters_absent", 1)).toBe("D3CD-013-1");
+    expect(Object.keys(D3CD_CHECK_ORDINAL)).toHaveLength(13);
   });
 });

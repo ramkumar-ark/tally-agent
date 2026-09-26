@@ -340,6 +340,39 @@ export interface FaFinding {
   detail: string;
 }
 
+export type D3cdCheckId =
+  | "d3cd_block_unmapped" | "d3cd_block_not_in_list" | "d3cd_credit_unclassified"
+  | "d3cd_consideration_apportioned" | "d3cd_disposal_ledger_unreconciled"
+  | "d3cd_disposal_unmatched" | "d3cd_reduction_unattributed"
+  | "d3cd_addition_to_existing_asset" | "d3cd_multiple_purchases_in_ledger"
+  | "d3cd_charge_capitalised_for_tax" | "d3cd_cash_payment_in_cost"
+  | "d3cd_consideration_split_voucher" | "d3cd_masters_absent";
+
+/** D3CD ids live in their own ordinal space (D3CD-<ordinal>-<n>). Never renumber. */
+export const D3CD_CHECK_ORDINAL: Record<D3cdCheckId, number> = {
+  d3cd_block_unmapped: 1, d3cd_block_not_in_list: 2, d3cd_credit_unclassified: 3,
+  d3cd_consideration_apportioned: 4, d3cd_disposal_ledger_unreconciled: 5,
+  d3cd_disposal_unmatched: 6, d3cd_reduction_unattributed: 7,
+  d3cd_addition_to_existing_asset: 8, d3cd_multiple_purchases_in_ledger: 9,
+  d3cd_charge_capitalised_for_tax: 10, d3cd_cash_payment_in_cost: 11,
+  d3cd_consideration_split_voucher: 12, d3cd_masters_absent: 13,
+};
+
+export function d3cdFindingId(check: D3cdCheckId, ordinal: number): string {
+  return `D3CD-${String(D3CD_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
+export interface D3cdFinding {
+  id: string;
+  check: D3cdCheckId;
+  severity: Severity;
+  /** Real ledger name pre-mask (asset, disposal or charge ledger); "" when none. */
+  ledger: string;
+  amount: number;
+  /** money()/displayDate() only. Quotes a ledger's WHOLE name or none of it. */
+  detail: string;
+}
+
 export interface DepFinding {
   id: string;
   check: DepCheckId;
