@@ -734,3 +734,23 @@ When updating this file, preserve this bar for all agents and keep entries conci
   (deductor spanning zone ledgers); every caller that has a ledger key must
   pass it (`reconcileParty` pools, `buildBillRows`), or cross-zone deposits
   anchor to the wrong zone's invoice and the pools disagree.
+
+## Sharp edges found routing income-counterparty TDS debits (2026-09-26, addendum 9)
+
+- Deduction events key on the row's display counterparty, which is the
+  deductor on a normal two-line TDS-vs-party voucher — but on a gross-up
+  journal (Dr TDS + Dr party, Cr income) the largest opposite-sign row is the
+  income ledger, so the event keys to income, gaps as unmapped, and never
+  joins the deductor's totals (live: a gross-up journal crediting an exempt
+  income ledger left one deductor's 26AS over its books by exactly the TDS).
+  `deductorKey` /
+  `rekeyDeductionsToDeductor` (`src/as26.ts`, wired in `src/review.ts`'s
+  day-book branch) fall back to the voucher's party line ONLY when the
+  counterparty is not a party ledger and the party line is one (under Sundry
+  Debtors/Creditors — a retention-money ledger is itself Sundry Debtors, so the
+  party line must never win blindly: most normal debits carry it while the
+  counterparty is the true deductor). No voucher or no party-type party ⇒ key
+  kept, honest gap. The live path has no voucher party and is untouched.
+- `rekeyed !== deductions` aliasing: when the re-key is skipped, never
+  `length = 0` + re-push the same reference — that empties the array (killed
+  6 review/report tests). Guard with `if (rekeyed)` on a nullable.
