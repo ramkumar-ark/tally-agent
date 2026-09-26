@@ -5,7 +5,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { buildAs26Fixture, defaultAs26Fixture } from "./as26-fixture.js";
 import { parseAs26Export } from "../src/as26-file.js";
 import { createSession } from "../src/review.js";
-import type { CellValue } from "../src/xlsx.js";
+import { buildWorkbook, type CellValue } from "../src/xlsx.js";
 import { buildAs26MapTemplate } from "../src/as26-template.js";
 import { EMPTY_OVERRIDES } from "../src/overrides.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
@@ -241,6 +241,90 @@ describe("Session.as26Review", () => {
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
     await expect(s.as26Review(undefined, "2026-04-01", "20260331", file, "/x")).rejects.toThrow(/YYYYMMDD/);
     await expect(s.as26Review(undefined, "20260401", "20250331", file, "/x")).rejects.toThrow(/YYYYMMDD/);
+  });
+
+  it("counts a bank's receivable credits whose counterparty is the mapped interest/FD ledger (inbox 010)", async () => {
+    const BANK = "Union Bank Of India Ro Chennai";
+    const INTEREST = "Interest Recd on Fd A/c";
+    const FD = "FD - 3412 - Sample";
+    const def = defaultAs26Fixture();
+    const file = parseAs26Export(buildAs26Fixture({
+      ...def,
+      tdsSummary: [
+        ...def.tdsSummary,
+        [BANK, "XYZA01111B", 96226, 96226, 0, 962258, "", 962258, "194A"],
+      ],
+      tdsDetail: [
+        ...def.tdsDetail,
+        [BANK.toUpperCase(), "05-Jan-2026", 962258, null, 96226, 96226, "XYZA01111B", null, "F", "09-Feb-2026", "194A"],
+      ],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), "as26-bank-"));
+    dirs.push(dir);
+    const p = join(dir, "as26-map.xlsx");
+    writeFileSync(p, buildWorkbook([
+      {
+        name: "Mapping", state: "visible",
+        columns: [
+          { header: "26AS name", width: 20, format: "text" },
+          { header: "kind", width: 6, format: "text" },
+          { header: "26AS tax", width: 10, format: "money" },
+          { header: "Tally ledger", width: 20, format: "text" },
+        ],
+        rows: [[INTEREST, "tds", 96226, INTEREST]],
+      },
+      {
+        name: "Bank Interest", state: "visible",
+        columns: [
+          { header: "26AS name (bank)", width: 20, format: "text" },
+          { header: "Interest income ledger", width: 20, format: "text" },
+          { header: "FD ledger", width: 20, format: "text" },
+        ],
+        rows: [[BANK, INTEREST, FD]],
+      },
+    ]));
+    const dayBook: DayBookInput = {
+      shape: "bundle", company: "Demo Traders Pvt Ltd", groups: null, ledgers: null,
+      vouchers: [
+        // same-voucher shape: mapped interest credit AND receivable debit together
+        {
+          date: "20250701", voucherType: "Journal", voucherNumber: "JV/B1", partyLedgerName: INTEREST,
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: 4600 },
+            { ledger: INTEREST, amount: -4600 },
+          ],
+        },
+        // counterparty shape: the receivable debit row's counterparty IS the FD ledger
+        {
+          date: "20250801", voucherType: "Journal", voucherNumber: "JV/B2", partyLedgerName: "TDS Receivable",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: 300 },
+            { ledger: FD, amount: -300 },
+          ],
+        },
+        // negative control: receivable credit with an unrelated counterparty
+        {
+          date: "20250901", voucherType: "Journal", voucherNumber: "JV/B3", partyLedgerName: "TDS Receivable",
+          cancelled: false,
+          entries: [
+            { ledger: "TDS Receivable", amount: 700 },
+            { ledger: "Kaveri Minerals Trading", amount: -700 },
+          ],
+        },
+      ],
+      observedFrom: "20250701",
+      observedTo: "20250901",
+      rejected: 0,
+      emptyMonths: [],
+    };
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, p, dayBook);
+    const r = res.recon.find((x) => x.totalsOnly)!;
+    expect(r.booksTax).toBe(4900);
+    expect(r.booksInterestValue).toBe(4600);
+    expect(res.findings.some((f) => f.check === "as26_totals_mismatch")).toBe(true);
   });
 
   const anandMap = (): string => mapFile(

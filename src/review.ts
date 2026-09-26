@@ -44,7 +44,7 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { readXlsm, writeXlsm } from "./xlsm.js";
 import { readSchema, readHandshake, writeSheetRows, findSheetPart, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
-import { projectLedgerRows, readDayBook, type DayBookInput } from "./tds-daybook.js";
+import { projectLedgerRows, counterpartyOf, readDayBook, type DayBookInput } from "./tds-daybook.js";
 import {
   EMPTY_LOANS_OPERATOR,
   LOANS_SHEET_LABELS,
@@ -1075,13 +1075,25 @@ export function createSession(
       const events: BankBooksEvent[] = [];
       for (const v of voucherList) {
         if (v.cancelled) continue;
-        let interest = 0, tax = 0, fd = 0, touched = false;
-        for (const e of v.entries) {
-          const k = canonicalKey(e.ledger);
-          if (ik.has(k) && e.amount < 0) { interest += -e.amount; touched = true; }
-          else if (fk.has(k) && e.amount > 0) { fd += e.amount; touched = true; }
-          else if (touched && receivableKeySet.has(k) && e.amount < 0) { tax += -e.amount; }
-        }
+        const keys = v.entries.map((e) => canonicalKey(e.ledger));
+        // Touched is voucher-wide: the receivable debit can be listed before
+        // the bank's own ledger rows in the same voucher.
+        let touched = keys.some((k) => ik.has(k) || fk.has(k));
+        let interest = 0, tax = 0, fd = 0;
+        v.entries.forEach((e, i) => {
+          const k = keys[i];
+          if (ik.has(k) && e.amount < 0) { interest += -e.amount; }
+          else if (fk.has(k) && e.amount > 0) { fd += e.amount; }
+          else if (receivableKeySet.has(k) && e.amount > 0) {
+            // A bank's TDS receivable debit counts when the voucher also
+            // carries one of the bank's own ledgers — OR when its display
+            // counterparty IS one of them (the month-end interest/TDS posting
+            // shows the receivable debit and the interest credit as separate
+            // display rows, so the same-voucher test alone reads 0). Inbox 010.
+            const cpKey = canonicalKey(counterpartyOf(v, i));
+            if (touched || ik.has(cpKey) || fk.has(cpKey)) tax += e.amount;
+          }
+        });
         if (touched) {
           events.push({
             nameKey: canonicalKey(b.as26Name), date: String(v.date),
