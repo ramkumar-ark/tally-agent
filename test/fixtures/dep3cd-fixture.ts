@@ -1,4 +1,7 @@
 import type { VoucherRow } from "../../src/downstream.js";
+import type { Dep3cdCtx } from "../../src/dep3cd.js";
+import { canonicalKey } from "../../src/key.js";
+import { DEFAULT_BLOCK_LISTS } from "../../src/dep3cd-law.js";
 
 export const D3_GROUPS = [
   { name: "Fixed Assets", parent: "\u0004 Primary" },
@@ -70,3 +73,20 @@ export const D3_EXPECTED_DELETIONS = [
   { ledger: "Old Loader", block: "5. Plant/ Machinery 15%:", date: "20251106", amount: 90000, basis: "receipt" },
   { ledger: "Old Tractor", block: "5. Plant/ Machinery 15%:", date: "20251215", amount: 300000, basis: "receipt" },
 ];
+export function fixtureCtx(over: Partial<Dep3cdCtx> = {}): Dep3cdCtx {
+  const parent = new Map<string, string>();
+  for (const p of [...D3_GROUPS, ...D3_LEDGERS]) parent.set(canonicalKey(p.name), p.parent);
+  const chainOf = (name: string): string[] => {
+    const out: string[] = []; let c = parent.get(canonicalKey(name));
+    while (c && !c.startsWith("\u0004") && out.length < 20) { out.push(canonicalKey(c)); c = parent.get(canonicalKey(c)); }
+    return out;
+  };
+  return {
+    fromDate: "20250401", toDate: "20260331", chainOf,
+    isAssetLedger: (l) => chainOf(l).includes(canonicalKey("Fixed Assets")),
+    assetGroupOf: (l) => parent.get(canonicalKey(l)) ?? "",
+    blockLists: DEFAULT_BLOCK_LISTS,
+    operator: { groupBlocks: new Map(), ledgerBlocks: new Map(), adjustments: [] },
+    ...over,
+  };
+}

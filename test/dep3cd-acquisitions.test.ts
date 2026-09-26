@@ -1,26 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyMovements, buildAcquisitions, type Dep3cdCtx } from "../src/dep3cd.js";
-import { canonicalKey } from "../src/key.js";
-import { DEFAULT_BLOCK_LISTS } from "../src/dep3cd-law.js";
-import { D3_GROUPS, D3_LEDGERS, D3_VOUCHERS } from "./fixtures/dep3cd-fixture.js";
-
-export function fixtureCtx(over: Partial<Dep3cdCtx> = {}): Dep3cdCtx {
-  const parent = new Map<string, string>();
-  for (const p of [...D3_GROUPS, ...D3_LEDGERS]) parent.set(canonicalKey(p.name), p.parent);
-  const chainOf = (name: string): string[] => {
-    const out: string[] = []; let c = parent.get(canonicalKey(name));
-    while (c && !c.startsWith("\u0004") && out.length < 20) { out.push(canonicalKey(c)); c = parent.get(canonicalKey(c)); }
-    return out;
-  };
-  return {
-    fromDate: "20250401", toDate: "20260331", chainOf,
-    isAssetLedger: (l) => chainOf(l).includes(canonicalKey("Fixed Assets")),
-    assetGroupOf: (l) => parent.get(canonicalKey(l)) ?? "",
-    blockLists: DEFAULT_BLOCK_LISTS,
-    operator: { groupBlocks: new Map(), ledgerBlocks: new Map(), adjustments: [] },
-    ...over,
-  };
-}
+import { classifyMovements, buildAcquisitions } from "../src/dep3cd.js";
+import { D3_VOUCHERS, fixtureCtx } from "./fixtures/dep3cd-fixture.js";
 
 describe("dep3cd acquisitions", () => {
   const ctx = fixtureCtx();

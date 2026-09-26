@@ -17,6 +17,9 @@ import {
   PURCHASE_VOUCHER,
   REDUCTION_VOUCHER,
   SALE_PL_NAME,
+  TAX_NAME,
+  HALFADD_DEFAULT,
+  DEPN_TEXT,
 } from "./dep3cd-law.js";
 import type { D3cdFinding } from "./types.js";
 
@@ -145,6 +148,10 @@ function matchAdjustments(
         String(m.voucherNumber) === String(a.voucherNumber),
     );
     if (hits.length === 0) {
+      // A "Consideration" adjustment legitimately cites an asset the books never
+      // relieved and creates the deletion itself (Task 5, D3CD-006 closure); every
+      // other action must point at a real movement.
+      if (a.action === "Consideration") continue;
       throw new Error(
         `Adjustments row ${a.row} matches no movement in the books for the ledger, date and voucher given; correct or remove the row`,
       );
@@ -360,4 +367,170 @@ export function buildAcquisitions(
 
   additions.sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate) || a.ledger.localeCompare(b.ledger));
   return { additions, findings };
+}
+
+export interface Dep3cdDeletion {
+  ledger: string; block: string | null; date: string; amount: number; voucherNumber: string;
+  basis: "transfer" | "receipt" | "operator"; halfAdd: "Yes" | "No"; depn: "No";
+  /** Asset-ledger credit, for the report's "books vs consideration" column only. */
+  bookCredit: number;
+}
+
+const DUTIES_TAXES = canonicalKey("Duties & Taxes");
+const SALES_ACCOUNTS = canonicalKey("Sales Accounts");
+const DISPOSAL_NAME = /sale of (fixed )?asset|asset sale|disposal/i;
+
+function isMoneyOrPartyLine(ledger: string, ctx: Dep3cdCtx): boolean {
+  const chain = ctx.chainOf(ledger);
+  return chainHits(chain, MONEY_ROOTS) || chain.includes(CURRENT_ASSETS);
+}
+
+function isTaxLine(ledger: string, ctx: Dep3cdCtx): boolean {
+  return TAX_NAME.test(ledger) || ctx.chainOf(ledger).includes(DUTIES_TAXES);
+}
+
+function isSalesAccountsLine(ledger: string, ctx: Dep3cdCtx): boolean {
+  return ctx.chainOf(ledger).includes(SALES_ACCOUNTS);
+}
+
+/** Q6: the consideration is gross of selling expenses and excludes GST. The receipt
+ *  pool is the money/party debits of the voucher less any tax credits on it. */
+function receiptPool(v: VoucherRow, ctx: Dep3cdCtx): number {
+  let debits = 0;
+  let taxes = 0;
+  for (const e of v.entries) {
+    if (e.amount > ZERO && !ctx.isAssetLedger(e.ledger) && isMoneyOrPartyLine(e.ledger, ctx)) debits += e.amount;
+    if (e.amount < -ZERO && isTaxLine(e.ledger, ctx)) taxes += -e.amount;
+  }
+  return round2(debits - taxes);
+}
+
+function makeDeletion(
+  ledger: string, v: VoucherRow, amount: number, basis: Dep3cdDeletion["basis"], bookCredit: number,
+): Dep3cdDeletion {
+  return {
+    ledger, block: null, date: String(v.date), amount: round2(amount), voucherNumber: String(v.voucherNumber),
+    basis, halfAdd: HALFADD_DEFAULT, depn: DEPN_TEXT, bookCredit: round2(bookCredit),
+  };
+}
+
+export function buildDisposals(
+  moves: AssetMovement[], vouchers: VoucherRow[], ctx: Dep3cdCtx,
+): { deletions: Dep3cdDeletion[]; findings: Omit<D3cdFinding, "id">[] } {
+  const deletions: Dep3cdDeletion[] = [];
+  const findings: Omit<D3cdFinding, "id">[] = [];
+
+  const byVoucher = new Map<VoucherRow, AssetMovement[]>();
+  for (const m of moves) {
+    if (m.kind !== "consideration") continue;
+    const list = byVoucher.get(m.voucher) ?? [];
+    list.push(m);
+    byVoucher.set(m.voucher, list);
+  }
+
+  for (const [v, ms] of byVoucher) {
+    const transfers = ms.filter((m) => m.basis === "transfer");
+    const receipts = ms.filter((m) => m.basis === "receipt");
+    for (const m of transfers) {
+      deletions.push(makeDeletion(m.ledger, v, Math.abs(m.amount), "transfer", Math.abs(m.amount)));
+    }
+    if (receipts.length === 0) continue;
+    const pool = receiptPool(v, ctx);
+    if (receipts.length === 1) {
+      const m = receipts[0];
+      deletions.push(makeDeletion(m.ledger, v, pool, "receipt", Math.abs(m.amount)));
+      continue;
+    }
+    const total = receipts.reduce((s, m) => s + Math.abs(m.amount), 0);
+    let allocated = 0;
+    receipts.forEach((m, i) => {
+      const share = i === receipts.length - 1
+        ? round2(pool - allocated)
+        : round2((pool * Math.abs(m.amount)) / total);
+      allocated = round2(allocated + share);
+      deletions.push(makeDeletion(m.ledger, v, share, "receipt", Math.abs(m.amount)));
+    });
+    findings.push({
+      check: "d3cd_consideration_apportioned", severity: "review", ledger: "", amount: pool,
+      detail: `one receipt of ${money(pool)} on ${displayDate(String(v.date))} was apportioned across ${count(receipts.length)} assets`,
+    });
+  }
+
+  for (const a of ctx.operator.adjustments) {
+    const key = canonicalKey(a.ledger);
+    const existing = deletions.find(
+      (d) => canonicalKey(d.ledger) === key && d.date === String(a.date) && d.voucherNumber === String(a.voucherNumber),
+    );
+    if (a.action === "Consideration") {
+      if (existing) {
+        if (a.amount !== null) existing.amount = round2(a.amount);
+        existing.basis = "operator";
+      } else if (a.amount !== null) {
+        const v = vouchers.find((x) => String(x.voucherNumber) === String(a.voucherNumber) && String(x.date) === String(a.date));
+        const stub: VoucherRow = v ?? {
+          date: a.date, voucherType: "", voucherNumber: a.voucherNumber, partyLedgerName: "", cancelled: false, entries: [],
+        };
+        deletions.push(makeDeletion(a.ledger, stub, a.amount, "operator", 0));
+      }
+    } else if (a.action === "Deduct from 2nd half" && existing) {
+      existing.halfAdd = "Yes";
+    }
+  }
+
+  const transfersOut = new Map<string, number>();
+  for (const m of moves) {
+    if (m.kind !== "consideration" || m.basis !== "transfer") continue;
+    const k = canonicalKey(m.counter);
+    if (!k) continue;
+    transfersOut.set(k, round2((transfersOut.get(k) ?? 0) + Math.abs(m.amount)));
+  }
+
+  const credits = new Map<string, { name: string; amount: number }>();
+  for (const v of vouchers) {
+    if (v.cancelled) continue;
+    for (const e of v.entries) {
+      if (e.amount >= -ZERO || !isSalesAccountsLine(e.ledger, ctx) || !DISPOSAL_NAME.test(e.ledger)) continue;
+      const k = canonicalKey(e.ledger);
+      const hit = credits.get(k) ?? { name: e.ledger, amount: 0 };
+      hit.amount = round2(hit.amount + -e.amount);
+      credits.set(k, hit);
+    }
+  }
+
+  for (const [k, hit] of credits) {
+    if (!transfersOut.has(k)) {
+      findings.push({
+        check: "d3cd_disposal_unmatched", severity: "critical", ledger: hit.name, amount: hit.amount,
+        detail: `${money(hit.amount)} of asset sales were booked with no asset relieved; add a Consideration adjustment for the asset sold`,
+      });
+    }
+  }
+  for (const [k, out] of transfersOut) {
+    const hit = credits.get(k);
+    const diff = round2(out - (hit?.amount ?? 0));
+    if (Math.abs(diff) > 1) {
+      findings.push({
+        check: "d3cd_disposal_ledger_unreconciled", severity: "warning", ledger: hit?.name ?? k, amount: Math.abs(diff),
+        detail: `asset transfers out of ${money(out)} do not reconcile with the sales booked there (${money(hit?.amount ?? 0)})`,
+      });
+    }
+  }
+
+  for (const d of deletions) {
+    if (d.basis !== "receipt") continue;
+    const split = vouchers.some(
+      (v) => !v.cancelled && String(v.date) === d.date && String(v.voucherNumber) !== d.voucherNumber
+        && v.entries.some((e) => e.amount < -ZERO && SALE_PL_NAME.test(e.ledger))
+        && v.entries.some((e) => e.amount > ZERO && isMoneyOrPartyLine(e.ledger, ctx)),
+    );
+    if (split) {
+      findings.push({
+        check: "d3cd_consideration_split_voucher", severity: "review", ledger: d.ledger, amount: d.amount,
+        detail: `another voucher on ${displayDate(d.date)} posts a profit or loss on sale against a receipt; the consideration may be split across vouchers`,
+      });
+    }
+  }
+
+  deletions.sort((a, b) => a.date.localeCompare(b.date) || a.ledger.localeCompare(b.ledger));
+  return { deletions, findings };
 }
