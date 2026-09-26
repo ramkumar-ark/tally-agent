@@ -357,6 +357,39 @@ describe("reconcileParty", () => {
     expect(r.unmatchedBooks).toHaveLength(0);
     expect(r.unmatchedAs26).toHaveLength(0);
   });
+  it("aggregate: one books deduction equal to the SUM of many 26AS lines matches one-to-many", () => {
+    // The books booked a single deduction; the deductor reported the same tax
+    // as many small 26AS detail rows. No subset of size 2..4 can reach the
+    // target, so the old books-direction cap left both sides unexplained.
+    const parts = [...Array.from({ length: 11 }, () => 1426), 1421];
+    expect(parts.reduce((a, b) => a + b, 0)).toBe(17107);
+    const facts = bookFacts([["20260331", 17107]]);
+    const file = txFile(parts.map((t) => txn(t, null, "20251231")), 17107);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].side).toBe("books");
+    expect(r.combinations[0].parts).toHaveLength(12);
+    expect(r.combinations[0].parts.reduce((t, p) => t + p.tax, 0)).toBe(17107);
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+    expect(r.ambiguous).toBe(0);
+  });
+  it("aggregate: a five-line 26AS tail is still one fit (minuscule pool)", () => {
+    const facts = bookFacts([["20260331", 8000]]);
+    const file = txFile([1600, 1600, 1600, 1600, 1600].map((t) => txn(t, null, "20251231")), 8000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.combinations[0].parts).toHaveLength(5);
+  });
+  it("aggregate: a large 26AS tail keeps the size-4 cap (no combinatorial blow-up)", () => {
+    // Pool larger than COMBINATION_GROUP_POOL_MAX stays at size 4: the 16-line
+    // 26AS tail is NOT reassembled into the single books entry.
+    const facts = bookFacts([["20260331", 1600]]);
+    const file = txFile(Array.from({ length: 16 }, () => txn(100, null, "20251231")), 1600);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(0);
+    expect(r.unmatchedBooks).toHaveLength(1);
+  });
   it("ambiguous: multiple fitting subsets never force a pick", () => {
     const facts = bookFacts([["20250612", 30000]]);
     const file = txFile([txn(20000), txn(10000), txn(25000, null, "20250620"), txn(5000, null, "20250621")], 60000);

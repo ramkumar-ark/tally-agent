@@ -1110,12 +1110,20 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
   if (!searchSkipped) {
     const takenBooks = new Set<number>();
     const takenAs26 = new Set<number>();
-    // combinations targeting a books item, parts from 26AS
+    // combinations targeting a books item, parts from 26AS. Symmetric to the
+    // as26-target direction below: when the 26AS tail is exhaustively
+    // enumerable the cap is raised so one books entry equal to the SUM of a
+    // deductor's whole 26AS tail is recognised as one aggregate match (a
+    // deductor reporting a single payment across many 26AS detail rows).
+    // Only a UNIQUE fit is taken; anything else stays ambiguous.
     const bookTargets = unmatchedBooks.filter((_, i) => !takenBooks.has(i));
     for (const target of bookTargets) {
       const pool = unmatchedAs26.filter((_, i) => !takenAs26.has(i));
+      const maxSize = pool.length <= COMBINATION_GROUP_POOL_MAX
+        ? COMBINATION_GROUP_MAX_SIZE
+        : COMBINATION_MAX_SIZE;
       const fitAs26: ReconItem[][] = [];
-      for (const s of subsets(pool, COMBINATION_MAX_SIZE)) {
+      for (const s of subsets(pool, maxSize)) {
         if (fits(sumTax(s), target.tax)) fitAs26.push(s);
       }
       if (fitAs26.length === 1) {
