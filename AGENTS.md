@@ -673,14 +673,21 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   (prior-year reader), `src/gst44-worksheet.ts` (engine),
   `src/gst44-worksheet-template.ts` (writer); tool `tb_write_gst_working_sheet`;
   findings TB-019/020/021 (ordinals 19–21, TDS-table-only numbering).
-- **Column B is the ledger's FY DEBIT total, never the signed net.** Design
-  §4.1-B; the walk does `if (e.amount <= 0) continue` before accumulating, so
-  credits (depreciation, reversals, year-end closing entries) are excluded from
-  the amount AND from every treatment pot. Netting depreciation credits against
-  asset debits produced a negative capital sheet (−₹27.8 lakh) on the first real
-  run; with the fix the raw day-book debit sum (₹1.4410 cr) ties the engine's
-  capital books total exactly. The design doc's Phase-A "≈₹3.16 cr" capital
-  figure is the abs-sum of both sides, not the debit total.
+- **Column B (captain 2026-09-26h): REVENUE is the ledger's net FY movement
+  (debits minus credits); CAPITAL is the debit total (additions only).** The
+  26e fix had made the walk debit-only throughout (`if (e.amount <= 0) continue`),
+  which left a real mismatch: the REVENUE "As per books" total was
+  ₹72,12,02,418.73 against Tally's purchase + direct + indirect expense total
+  ₹71,46,12,343.70 — the entire ₹65,90,075.03 difference was the credit side
+  (returns, discounts, credit notes) of 19 three-root ledgers that debit-only
+  column B dropped. Revenue now accumulates signed entries into `amount` and
+  every treatment pot, so B and the buckets tie Tally to the paisa (modulo
+  Tally's own aggregate rounding). Capital still skips credits: a year-end
+  depreciation credit is the annual charge, not a reversal of an addition
+  (netting it produced a negative capital sheet, −₹27.8 lakh, on the first real
+  run), so capital's `amount` stays a debit sum and the 26e zero-row drop still
+  holds. The Phase-A analysis doc's "≈₹3.16 cr" capital figure is the abs-sum of
+  both sides, not the debit total.
 - The FY 25-26 day book's group parents arrive **HTML-escaped** in the raw
   export (`"&#4; Primary"` for the root-of-primaries control char); the gateway
   reader de-escapes. Any direct raw-JSON probe must account for that.

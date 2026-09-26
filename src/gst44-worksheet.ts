@@ -34,6 +34,11 @@ import type { PriorYearSheets } from "./gst44-prior.js";
  *   5. rate-suffix pattern   (explicit "- 18%" -> others, "0%" -> exempt)
  *   6. nothing               -> the row stays blank + a review finding
  *
+ * Column B is the ledger's NET FY movement on the REVENUE sheet (debits minus
+ * credits, captain 2026-09-26h) and its debit total on CAPITAL (additions
+ * only). The treatment pots are the same signed measure, so a revenue row's
+ * buckets always sum to B.
+ *
  * The sheet's own semantics (Q-C): the operator fills D/E/H/J only; I = B,
  * G = I - H - J and F = G - E - D derive. A seeded row therefore writes
  * literals ONLY into D/E/H/J and formulas into G/F/I — a wholly-others row
@@ -64,7 +69,10 @@ export interface WsLedgerRow {
   ledger: string;
   group: string;
   rowKey: WsRowKey;
-  /** The ledger's FY debit total (column B). */
+  /**
+   * Column B: the ledger's net FY movement for REVENUE (debits minus credits)
+   * or its FY debit total for CAPITAL (additions only).
+   */
   amount: number;
   seed: WorksheetSeed | null;
 }
@@ -113,7 +121,12 @@ interface Acc {
   ledger: string;
   group: string;
   rowKey: WsRowKey;
-  debit: number;
+  /**
+   * Column B accumulator: net FY movement (debits minus credits) on the
+   * REVENUE sheet; FY debit total only on the CAPITAL sheet. Every treatment
+   * pot below is the same signed measure, so the pots sum to `amount`.
+   */
+  amount: number;
   pots: { others: number; exempt: number; unregistered: number; unknown: number };
   noParty: number;
   /**
@@ -156,7 +169,7 @@ export function gst44Worksheet(
         ledger: masterNames.get(key) ?? ledger,
         group: ctx.groupOf(ledger),
         rowKey,
-        debit: 0,
+        amount: 0,
         pots: emptyPots(),
         noParty: 0,
         taxNoGstin: 0,
@@ -201,11 +214,15 @@ export function gst44Worksheet(
       const rowKey: WsRowKey | null = CAPITAL_ROOTS.has(root) ? "capital" : REVENUE_ROOTS.has(root) ? "revenue" : null;
       if (!rowKey) continue;
       const acc = ensure(e.ledger, rowKey);
-      // Column B is the FY debit total (design §4.1-B): credits on the ledger
-      // are returns/reversals/closing entries, not expenditure, so they are
-      // excluded from the amount and from every treatment pot.
-      if (e.amount <= 0) continue;
-      acc.debit += e.amount;
+      // REVENUE contributes its NET FY movement — debits minus credits
+      // (captain 2026-09-26h, superseding design §4.1-B's debit-only column
+      // B): purchase returns, discounts and credit notes legitimately net down
+      // expenditure, so the "As per books" total ties Tally's P&L group total.
+      // CAPITAL stays debit-only: a year-end depreciation credit is the annual
+      // charge, not a reversal of the asset's addition, so it must not reduce
+      // capital expenditure (this also keeps the 26e zero-row fix meaningful).
+      if (rowKey === "capital" && e.amount <= 0) continue;
+      acc.amount += e.amount;
       if (!party) {
         acc.noParty += e.amount;
         unattributed[rowKey] += e.amount;
@@ -268,14 +285,14 @@ export function gst44Worksheet(
         prior && !prior.split && prior.treatment === policy.treatment
           ? `rule '${policy.rule.id}': ${policy.rule.note} (FY 24-25 agreed: ${WS_TREATMENT_LABELS[prior.treatment]})`
           : `rule '${policy.rule.id}': ${policy.rule.note}`;
-      acc.seed = seedFor(policy.treatment, acc.debit, "policy keyword", priorNote);
+      acc.seed = seedFor(policy.treatment, acc.amount, "policy keyword", priorNote);
       if (prior && (prior.split || prior.treatment !== policy.treatment)) {
         push(
           "gst44_ws_prior_year_changed",
           "warning",
           acc.ledger,
           acc.group,
-          acc.debit,
+          acc.amount,
           `the policy rule '${policy.rule.id}' seeds this ledger as ${WS_TREATMENT_LABELS[policy.treatment]}, ` +
             `but FY 24-25 showed ${prior.split ? `a split (${prior.profile})` : WS_TREATMENT_LABELS[prior.treatment]} — adjust the break-up if the old treatment still applies`,
         );
@@ -287,7 +304,7 @@ export function gst44Worksheet(
           "warning",
           acc.ledger,
           acc.group,
-          acc.debit,
+          acc.amount,
           `policy rule '${policy.rule.id}' seeds ${WS_TREATMENT_LABELS[policy.treatment]} but rule '${disagree.rule.id}' reads the name as ${WS_TREATMENT_LABELS[disagree.treatment]}; the policy rule wins — check the ledger`,
         );
       }
@@ -297,7 +314,7 @@ export function gst44Worksheet(
     if (prior) {
       acc.seed = seedFor(
         prior.treatment,
-        acc.debit,
+        acc.amount,
         "prior year",
         prior.split
           ? `prior year FY 24-25 (${prior.label}): last year was split (${prior.profile}); seeded wholly as ${WS_TREATMENT_LABELS[prior.treatment]} — adjust the columns`
@@ -309,7 +326,7 @@ export function gst44Worksheet(
           "warning",
           acc.ledger,
           acc.group,
-          acc.debit,
+          acc.amount,
           `FY 24-25 split this ledger's spend across columns (${prior.profile}); the seed keeps only the largest column (${WS_TREATMENT_LABELS[prior.treatment]}) — restore the split`,
         );
       }
@@ -317,7 +334,7 @@ export function gst44Worksheet(
     }
 
     if (evidence) {
-      acc.seed = seedFor(evidence.treatment, acc.debit, "evidence keyword", `rule '${evidence.rule.id}': ${evidence.rule.note}`);
+      acc.seed = seedFor(evidence.treatment, acc.amount, "evidence keyword", `rule '${evidence.rule.id}': ${evidence.rule.note}`);
       const scoped = opts.rules.filter((r) => r.scope !== (acc.rowKey === "capital" ? "revenue" : "capital"));
       const later = allEvidenceHits(acc.ledger, scoped).filter(
         (h) => h.rule.id !== evidence.rule.id && h.treatment !== evidence.treatment,
@@ -328,7 +345,7 @@ export function gst44Worksheet(
           "warning",
           acc.ledger,
           acc.group,
-          acc.debit,
+          acc.amount,
           `evidence rule '${evidence.rule.id}' seeds ${WS_TREATMENT_LABELS[evidence.treatment]} but rule '${hit.rule.id}' reads the name as ${WS_TREATMENT_LABELS[hit.treatment]}; the earlier rule wins — check the ledger`,
         );
       }
@@ -345,13 +362,13 @@ export function gst44Worksheet(
     if (
       pattern &&
       pattern.rule.id === "rate-zero" &&
-      Math.abs(acc.debit) > ZERO &&
+      Math.abs(acc.amount) > ZERO &&
       Math.abs(acc.pots.unregistered) <= ZERO &&
       Math.abs(unknownAmount) <= ZERO &&
       Math.abs(acc.noTaxGstin) > ZERO
     ) {
-      const exemptPart = round2(Math.min(acc.noTaxGstin, acc.debit));
-      const whole = Math.abs(acc.debit - exemptPart) <= ZERO;
+      const exemptPart = round2(Math.min(acc.noTaxGstin, acc.amount));
+      const whole = Math.abs(acc.amount - exemptPart) <= ZERO;
       acc.seed = {
         d: exemptPart,
         e: 0,
@@ -363,13 +380,13 @@ export function gst44Worksheet(
           `rule 'rate-zero': ${pattern.rule.note} — its registered suppliers charged no tax on ${money(exemptPart)}, so the 0% name keeps that part exempt` +
           (whole
             ? ""
-            : `; ${money(round2(acc.debit - exemptPart))} came from tax-charged vouchers and stays Registered - others (derives through F)`),
+            : `; ${money(round2(acc.amount - exemptPart))} came from tax-charged vouchers and stays Registered - others (derives through F)`),
       };
       continue;
     }
     if (Math.abs(unknownAmount) <= ZERO) {
       const { others, unregistered } = acc.pots;
-      if (Math.abs(acc.debit) <= ZERO) {
+      if (Math.abs(acc.amount) <= ZERO) {
         acc.seed = { d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "zero balance", reason: "no expenditure in the period (zero balance)" };
         continue;
       }
@@ -399,7 +416,7 @@ export function gst44Worksheet(
 
     if (pattern) {
       acc.seed = {
-        ...seedFor(pattern.treatment, acc.debit, "pattern rule", `rule '${pattern.rule.id}': ${pattern.rule.note}`),
+        ...seedFor(pattern.treatment, acc.amount, "pattern rule", `rule '${pattern.rule.id}': ${pattern.rule.note}`),
         reason:
           `rule '${pattern.rule.id}': ${pattern.rule.note}` +
           (Math.abs(acc.pots.unknown) > ZERO ? `; party GSTIN unknown for ${money(Math.abs(acc.pots.unknown))} — verify` : "") +
@@ -409,13 +426,13 @@ export function gst44Worksheet(
     }
 
     acc.seed = null;
-    if (Math.abs(acc.debit) > ZERO) {
+    if (Math.abs(acc.amount) > ZERO) {
       push(
         "gst44_ws_unclassified",
         "review",
         acc.ledger,
         acc.group,
-        acc.debit,
+        acc.amount,
         `matched no treatment rule and stays blank` +
           (Math.abs(acc.pots.unknown) > ZERO ? `; party GSTIN unknown for ${money(Math.abs(acc.pots.unknown))}` : "") +
           (Math.abs(acc.noParty) > ZERO ? `; ${money(Math.abs(acc.noParty))} had no party on its vouchers` : "") +
@@ -428,14 +445,15 @@ export function gst44Worksheet(
     .filter((acc) => acc.rowKey === rowKey)
     // Year-end depreciation journals credit ~130 asset ledgers without ever
     // debiting them, which seeded a page of zero-balance capital rows (26e).
-    // Zero-debit rows carry no expenditure, so capital drops them; revenue
-    // keeps its (zero) rows unchanged.
-    .filter((acc) => rowKey !== "capital" || Math.abs(acc.debit) > ZERO)
+    // Capital's `amount` is still its debit total (additions), so a row with
+    // no addition is dropped; revenue keeps every row, including a negative
+    // net (a ledger whose credits exceeded its debits), to tie Tally.
+    .filter((acc) => rowKey !== "capital" || Math.abs(acc.amount) > ZERO)
     .map((acc): WsLedgerRow => ({
       ledger: acc.ledger,
       group: acc.group,
       rowKey: acc.rowKey,
-      amount: acc.debit,
+      amount: acc.amount,
       seed: acc.seed,
     }));
   return {

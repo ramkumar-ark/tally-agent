@@ -266,10 +266,11 @@ describe("gst44Worksheet gaps", () => {
   });
 });
 
-describe("gst44Worksheet debit-total semantics", () => {
-  it("credits on a tracked ledger do not reduce column B or the treatment pots", () => {
+describe("gst44Worksheet net FY semantics (captain 2026-09-26h)", () => {
+  it("credits on a revenue ledger reduce column B to the net FY movement", () => {
     // A purchase (debit 1,00,000) later reversed by a credit note (credit
-    // -40,000) still books 1,00,000 of expenditure per design §4.1-B.
+    // 40,000) books 60,000 of net expenditure: revenue B = debits - credits,
+    // so the "As per books" total ties Tally's P&L group total.
     const r = gst44Worksheet(
       [
         taxedBuy("Site Materials", 100000),
@@ -279,8 +280,23 @@ describe("gst44Worksheet debit-total semantics", () => {
       base,
     );
     const row = r.revenue.find((x) => x.ledger === "Site Materials")!;
-    expect(row.amount).toBe(100000);
+    expect(row.amount).toBe(60000);
     expect(row.seed!.treatment).toBe("others");
+    expect(row.seed!.reason).toContain("registered purchase");
+  });
+
+  it("credits also net the treatment pot: an unregistered ledger seeds the reduced amount", () => {
+    const r = gst44Worksheet(
+      [
+        v("Prime Haulage", [["Site Materials", 50000], ["Prime Haulage", -50000]]),
+        v("Prime Haulage", [["Site Materials", -1250], ["Prime Haulage", 1250]]),
+      ],
+      ctxOf({}),
+      base,
+    );
+    const row = r.revenue.find((x) => x.ledger === "Site Materials")!;
+    expect(row.amount).toBe(48750);
+    expect(row.seed).toMatchObject({ h: 48750, treatment: "unregistered", kind: "party evidence" });
   });
 
   it("a capital ledger with only depreciation credits is dropped from the capital sheet", () => {

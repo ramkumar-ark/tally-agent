@@ -84,7 +84,9 @@ and only then does the approved flow above write any Winman workbook.
    prior-year break-up workbook's path, when you have one). It writes a new
    dated `.xlsx` next to the day book with four sheets: REVENUE, CAPITAL,
    Instructions, Vocabulary.
-   - Column B is each ledger's FY debit total; the engine pre-fills columns
+   - Column B is each REVENUE ledger's net FY movement (debits minus credits,
+     so returns/discounts/credit notes net down) and each CAPITAL ledger's FY
+     debit total (additions only); the engine pre-fills columns
      D/E/H/J per ledger from a keyword vocabulary (see the sheet's
      **Vocabulary** tab), the prior-year sheet and the party-GSTIN evidence,
      with column K showing what was seeded and why.
