@@ -9,6 +9,7 @@ import { findingId, type CheckId, type Severity } from "./types.js";
 import {
   policyMatch,
   evidenceMatch,
+  allEvidenceHits,
   patternMatch,
   type TreatmentRule,
   type WorksheetTreatment,
@@ -110,6 +111,13 @@ interface Acc {
   debit: number;
   pots: { others: number; exempt: number; unregistered: number; unknown: number };
   noParty: number;
+  /**
+   * Spend routed to `others` by voucher tax lines while the supplier master
+   * carries no GSTIN (26e: tax-charged vouchers are registered purchases even
+   * without a party GSTIN). Quoted in the seed reason so the operator verifies
+   * the supplier's registration.
+   */
+  taxNoGstin: number;
   seed: WorksheetSeed | null;
 }
 
@@ -138,6 +146,7 @@ export function gst44Worksheet(
         debit: 0,
         pots: emptyPots(),
         noParty: 0,
+        taxNoGstin: 0,
         seed: null,
       };
       accs.set(key, acc);
@@ -191,6 +200,14 @@ export function gst44Worksheet(
       }
       if (partyGstin) {
         acc.pots[taxCharged ? "others" : "exempt"] += e.amount;
+      } else if (taxCharged) {
+        // The voucher itself charged GST (Input CGST/SGST lines), so this is
+        // a registered purchase even though the supplier master carries no
+        // GSTIN (addendum 2026-09-26e) — never park tax-charged spend in H.
+        // Exempt needs positive evidence (a supplier GSTIN with no tax on
+        // the voucher); unregistered needs a known party with no tax.
+        acc.pots.others += e.amount;
+        acc.taxNoGstin += e.amount;
       } else if (partyKnown) {
         acc.pots.unregistered += e.amount;
       } else {
@@ -279,6 +296,20 @@ export function gst44Worksheet(
 
     if (evidence) {
       acc.seed = seedFor(evidence.treatment, acc.debit, "evidence keyword", `rule '${evidence.rule.id}': ${evidence.rule.note}`);
+      const scoped = opts.rules.filter((r) => r.scope !== (acc.rowKey === "capital" ? "revenue" : "capital"));
+      const later = allEvidenceHits(acc.ledger, scoped).filter(
+        (h) => h.rule.id !== evidence.rule.id && h.treatment !== evidence.treatment,
+      );
+      for (const hit of later) {
+        push(
+          "gst44_ws_rule_conflict",
+          "warning",
+          acc.ledger,
+          acc.group,
+          acc.debit,
+          `evidence rule '${evidence.rule.id}' seeds ${WS_TREATMENT_LABELS[evidence.treatment]} but rule '${hit.rule.id}' reads the name as ${WS_TREATMENT_LABELS[hit.treatment]}; the earlier rule wins — check the ledger`,
+        );
+      }
       continue;
     }
 
@@ -294,6 +325,10 @@ export function gst44Worksheet(
       if (Math.abs(exempt) > ZERO) parts.push(`registered without tax ${money(exempt)}`);
       if (Math.abs(unregistered) > ZERO) parts.push(`unregistered ${money(unregistered)}`);
       const nonzeroPots = parts.length;
+      const taxNote =
+        Math.abs(acc.taxNoGstin) > ZERO
+          ? `; ${money(Math.abs(acc.taxNoGstin))} of it charged GST on its vouchers while the supplier carries no GSTIN in the masters — treated as a registered purchase, verify the supplier's registration`
+          : "";
       acc.seed = {
         d: exempt,
         e: 0,
@@ -301,7 +336,7 @@ export function gst44Worksheet(
         j: 0,
         treatment: nonzeroPots > 1 ? "mixed" : others ? "others" : exempt ? "exempt" : "unregistered",
         kind: "party evidence",
-        reason: `party GSTIN evidence: ${parts.join(", ")}`,
+        reason: `party GSTIN evidence: ${parts.join(", ")}${taxNote}`,
       };
       continue;
     }
@@ -335,6 +370,11 @@ export function gst44Worksheet(
 
   const byKey = (rowKey: WsRowKey) => sorted
     .filter((acc) => acc.rowKey === rowKey)
+    // Year-end depreciation journals credit ~130 asset ledgers without ever
+    // debiting them, which seeded a page of zero-balance capital rows (26e).
+    // Zero-debit rows carry no expenditure, so capital drops them; revenue
+    // keeps its (zero) rows unchanged.
+    .filter((acc) => rowKey !== "capital" || Math.abs(acc.debit) > ZERO)
     .map((acc): WsLedgerRow => ({
       ledger: acc.ledger,
       group: acc.group,

@@ -691,6 +691,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Prior-year `Rates and Taxes` carried not_supply (J ₹40.46 lakh), agreeing with
   the policy rule, so it raises no change finding; the only prior_year_changed
   finding on the real run is Pooja Expenses (split profile, largest column kept).
+- Addendum 2026-09-26e fixes (`src/gst44-worksheet.ts`, `src/gst44-treatments.ts`):
+  capital drops zero-debit rows (year-end depreciation credits); a voucher that
+  charged GST seeds others even when the supplier master carries no GSTIN (the
+  seed reason tells the operator to verify the registration — RCM is the known
+  limitation); new `credit-card` evidence rule; `insurance` (incl. the
+  `insurence` misspelling) always beats `urd`, with a `gst44_ws_rule_conflict`
+  warning when a later evidence rule disagrees.
+- Seeded D/E/F/G/H/I/J cells: D/E/H/J are literals but F/G/I are formulas
+  (I=B, G=I-H-J, F=G-E-D) with no cached values until Excel recalculates — so
+  a raw read of the .xlsx sees F=blank. Diff runs via Seeded-as + H literals,
+  or implied F = B-H-J-E-D.
 
 ## Maintaining this file
 

@@ -124,9 +124,21 @@ describe("addendum 2026-09-26d generic rules", () => {
       "Insurance Premium",
       "Insurance Expense - 18%",
       "Insurance Premium @ 5%",
+      // Captain 2026-09-26e: insurance always wins, even URD-marked or
+      // misspelled — the insurer is a mandated registrant.
+      "Fleet Insurance - URD A/c",
+      "Fleet Insurence - URD A/c",
+      "Insurence Premium A/c",
     ]) {
       expect(evidenceMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("others");
       expect(evidenceMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("insurance");
+    }
+  });
+
+  it("credit-card charges seed others by their own rule, never unregistered", () => {
+    for (const name of ["Credit Card Fee", "Corporate Credit Card Charges"]) {
+      expect(evidenceMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("others");
+      expect(evidenceMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("credit-card");
     }
   });
 

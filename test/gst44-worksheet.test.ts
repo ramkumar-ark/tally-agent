@@ -14,6 +14,8 @@ const groupOf: Record<string, string> = {
   "Repair & Maintenance": "Indirect Expenses",
   "Penalty on GST - 18%": "Indirect Expenses",
   "Mystery Ledger": "Indirect Expenses",
+  "Corporate Credit Card Charges A/c": "Indirect Expenses",
+  "Fleet Insurence - URD A/c": "Indirect Expenses",
   "Printing Charges - 18%": "Indirect Expenses",
   "Bank Charges A/c": "Bank Charges",
   "Interest on GST A/c": "Interest Expenses",
@@ -273,7 +275,7 @@ describe("gst44Worksheet debit-total semantics", () => {
     expect(row.seed!.treatment).toBe("others");
   });
 
-  it("a capital ledger with only depreciation credits rows with a zero debit total", () => {
+  it("a capital ledger with only depreciation credits is dropped from the capital sheet", () => {
     const r = gst44Worksheet(
       [
         v(null, [["JCB Purchased", -450000], ["Depreciation A/c", 450000]]),
@@ -281,9 +283,7 @@ describe("gst44Worksheet debit-total semantics", () => {
       ctxOf({}),
       base,
     );
-    const row = r.capital.find((x) => x.ledger === "JCB Purchased")!;
-    expect(row.amount).toBe(0);
-    expect(row.seed).toMatchObject({ kind: "zero balance" });
+    expect(r.capital.find((x) => x.ledger === "JCB Purchased")).toBeUndefined();
     expect(r.findings.filter((f) => f.check === "gst44_ws_unclassified")).toHaveLength(0);
   });
 });
@@ -377,5 +377,56 @@ describe("gst44Worksheet policy beats prior year (addendum 2026-09-26e)", () => 
     expect(row.seed!.kind).toBe("policy keyword");
     expect(row.seed!.reason).toContain("FY 24-25 agreed");
     expect(r.findings.some((f) => f.check === "gst44_ws_prior_year_changed")).toBe(false);
+  });
+});
+
+describe("gst44Worksheet addendum 2026-09-26e", () => {
+  it("a tax-charged voucher from a known party without a GSTIN seeds others, not unregistered", () => {
+    const r = gst44Worksheet([taxedBuy("Site Materials", 100000, "Prime Haulage")], ctxOf({}), base);
+    const row = r.revenue.find((x) => x.ledger === "Site Materials")!;
+    expect(row.seed).toMatchObject({ d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence" });
+    expect(row.seed!.reason).toContain("registered with tax");
+    expect(row.seed!.reason).toContain("no GSTIN in the masters");
+    expect(r.findings).toHaveLength(0);
+  });
+
+  it("a no-tax voucher from a known party without a GSTIN still seeds unregistered", () => {
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Site Materials", 30000], ["Prime Haulage", -30000]])],
+      ctxOf({}),
+      base,
+    );
+    expect(r.revenue.find((x) => x.ledger === "Site Materials")!.seed).toMatchObject({
+      h: 30000,
+      treatment: "unregistered",
+      kind: "party evidence",
+    });
+  });
+
+  it("a credit-card charges ledger seeds others even with no party GSTIN and no tax", () => {
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Corporate Credit Card Charges A/c", 12000], ["Prime Haulage", -12000]])],
+      ctxOf({}),
+      { ...base, masterNames: masters(["Corporate Credit Card Charges A/c", "Prime Haulage", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Corporate Credit Card Charges A/c")!;
+    expect(row.seed).toMatchObject({ treatment: "others", kind: "evidence keyword" });
+    expect(row.seed!.reason).toContain("credit-card");
+    expect(r.findings).toHaveLength(0);
+  });
+
+  it("a URD-marked insurance ledger seeds others by the insurance rule and raises a rule-conflict warning", () => {
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Fleet Insurence - URD A/c", 50000], ["Prime Haulage", -50000]])],
+      ctxOf({}),
+      { ...base, masterNames: masters(["Fleet Insurence - URD A/c", "Prime Haulage", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Fleet Insurence - URD A/c")!;
+    expect(row.seed).toMatchObject({ treatment: "others", kind: "evidence keyword" });
+    expect(row.seed!.reason).toContain("insurance");
+    const conflicts = r.findings.filter((f) => f.check === "gst44_ws_rule_conflict");
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].detail).toContain("'urd'");
+    expect(conflicts[0].severity).toBe("warning");
   });
 });

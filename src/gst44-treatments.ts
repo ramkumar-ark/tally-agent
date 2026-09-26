@@ -61,6 +61,10 @@ export const GST44_TREATMENT_RULES: readonly TreatmentRule[] = [
   // because the prior year treated it that way — a POLICY rule, so it beats
   // a prior-year exact match in the seed chain.
   { id: "electricity", kind: "policy", treatment: "exempt", keywords: ["electricity", "electric charge", "eb charge", "eb bill", "power charge", "current charge"], note: "electricity/EB charges are exempt supplies (captain's policy)" },
+  // Insurance is ALWAYS a registered purchase (captain 2026-09-26e), even with
+  // a URD marker or ineligible-ITC reading in the name — listed BEFORE urd so
+  // it wins; "insurence" covers the common misspelling.
+  { id: "insurance", kind: "evidence", treatment: "others", keywords: ["insurance", "insurence"], note: "insurance ledgers are always registered purchases — including Ineligible ITC and URD-marked ones, which are NOT exempt" },
   { id: "urd", kind: "evidence", treatment: "unregistered", keywords: ["urd", "unregistered"], note: "the name itself declares an unregistered dealer" },
   // Banks and NBFCs are mandated to register, so their charges are always
   // registered purchases (others) — never exempt, never unregistered. As
@@ -68,7 +72,10 @@ export const GST44_TREATMENT_RULES: readonly TreatmentRule[] = [
   // in H (evidence beats party in the seed chain).
   { id: "bank-charges", kind: "evidence", treatment: "others", keywords: ["bank charge", "loan charge", "loan processing charge", "processing charge", "bank commission", "forex charge", "exchange charge", "cheque charge", "collection charge", "annual maintenance charge"], note: "bank/NBFC charges come from mandated registered dealers — others, never exempt or unregistered" },
   { id: "fuel", kind: "evidence", treatment: "exempt", scope: "revenue", keywords: ["fuel", "diesel", "petrol", "hsd"], note: "fuel expenses are always exempt (registered dealers)" },
-  { id: "insurance", kind: "evidence", treatment: "others", keywords: ["insurance"], note: "insurance ledgers are registered purchases — including Ineligible ITC ones, which are NOT exempt" },
+  // Credit-card charges are bank charges (captain 2026-09-26e): the issuer is
+  // a mandated registrant, so these are always registered purchases (others),
+  // never unregistered — regardless of party-GSTIN evidence.
+  { id: "credit-card", kind: "evidence", treatment: "others", keywords: ["credit card"], note: "credit-card charges come from the (registered) card issuer — others, never unregistered" },
   { id: "loan-interest", kind: "evidence", treatment: "exempt", keywords: ["interest on bank", "interest on loan", "interest on non bank", "interest on od", "interest on cc", "bank interest", "nbfc interest", "loan interest", "vehicle loan", "equipment loan", "finance charge", "finance cost"], note: "interest on bank/NBFC loans is an exempt financial service" },
   { id: "rate-zero", kind: "evidence", treatment: "exempt", pattern: String.raw`(?:^|[\s\-@])0+(?:\.0+)?\s*%`, note: "explicit 0% rate suffix: zero-rated supply" },
   { id: "rate-gst", kind: "evidence", treatment: "others", pattern: String.raw`(?:^|[\s\-@])\d+(?:\.\d+)?\s*%`, note: "explicit GST rate suffix: registered purchase with tax" },
@@ -117,6 +124,20 @@ export function policyMatch(name: string, rules: readonly TreatmentRule[]): Trea
 /** Chain step 3: the first EVIDENCE keyword rule that matches. */
 export function evidenceMatch(name: string, rules: readonly TreatmentRule[]): TreatmentHit | null {
   return firstHit(rules.filter((r) => r.kind === "evidence" && r.keywords), name);
+}
+
+/**
+ * Every EVIDENCE keyword rule that matches, in chain order — the caller uses
+ * the entries AFTER the winner to warn when a later rule reads the name
+ * differently (e.g. a URD marker losing to an earlier always-registered rule).
+ */
+export function allEvidenceHits(name: string, rules: readonly TreatmentRule[]): TreatmentHit[] {
+  const out: TreatmentHit[] = [];
+  for (const rule of rules.filter((r) => r.kind === "evidence" && r.keywords)) {
+    const c = compiledOf(rule);
+    if (c.words.some((re) => re.test(name))) out.push({ rule, treatment: rule.treatment });
+  }
+  return out;
 }
 
 /** Chain step 5: the first EVIDENCE pattern rule that matches. */
