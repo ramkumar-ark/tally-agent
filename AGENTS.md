@@ -782,6 +782,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   onto whichever main carries the TDS lane's current `Settings` schema (e.g.
   `Late Deduction Interest`, 26o 061-067). `parseOperatorTemplate` throws on an
   unknown Settings row by design — do not loosen it to unblock a stale base.
+- **A no-deduction 21(b) row must show an explicit `0` in the TDS done /
+  TDS deposited columns** (captain 2026-09-27; a blank cell read as "not
+  reported"). `write3cdNoTds` (`src/review.ts`) therefore emits each cell
+  whenever the sheet carries the column (`doneKeyOf`/`depositedKeyOf`), not
+  only when the value is `> 0`; the `40(a)(iii)` sheet has neither column key
+  and stays unchanged. Test: `test/notds-write.test.ts` "writes an explicit 0…".
 
 ## Maintaining this file
 
