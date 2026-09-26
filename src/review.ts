@@ -22,6 +22,7 @@ import {
   deductionEvents,
   isFdLedgerName,
   receivableLedgers,
+  rekeyDeductionsToDeductor,
   type BooksDeduction,
   type PartyMatch,
   type PartyRecon,
@@ -994,6 +995,33 @@ export function createSession(
         const ev = deductionEvents(rowsByLedger(rows, r.name), r.kind);
         deductions.push(...ev.events);
         credits += ev.credits;
+      }
+      // Addendum 9: a gross-up journal's TDS debit displays against the
+      // income ledger, so its event keys to income and can never join the
+      // deductor's party. Re-key to the voucher's party line wherever the
+      // counterparty is not a party ledger and the party line is one; the
+      // live path has no voucher party and is untouched. A party ledger is
+      // one parked under Sundry Debtors/Creditors — not merely any asset.
+      const parentOfDed = new Map<string, string>();
+      for (const l of masterPairs) parentOfDed.set(canonicalKey(l.name), l.parent);
+      for (const g of groups) parentOfDed.set(canonicalKey(g.name), g.parent);
+      const PARTY_ROOTS = new Set(["sundry debtors", "sundry creditors"]);
+      const isPartyLedger = (name: string): boolean => {
+        let p: string | undefined = parentOfDed.get(canonicalKey(name));
+        const seen = new Set<string>();
+        while (p && !seen.has(p)) {
+          seen.add(p);
+          if (PARTY_ROOTS.has(canonicalKey(p))) return true;
+          p = parentOfDed.get(canonicalKey(p));
+        }
+        return false;
+      };
+      const rekeyed = dayBook
+        ? rekeyDeductionsToDeductor(deductions, voucherList, isPartyLedger)
+        : null;
+      if (rekeyed) {
+        deductions.length = 0;
+        deductions.push(...rekeyed);
       }
     }
 

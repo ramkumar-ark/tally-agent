@@ -115,7 +115,8 @@ describe("matchParties — mapping-only", () => {
 // --- Task 6: books facts helpers ---
 
 import type { LedgerVoucherRow, VoucherRow } from "../src/downstream.js";
-import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty } from "../src/as26.js";
+import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty, deductorKey, rekeyDeductionsToDeductor } from "../src/as26.js";
+import { projectLedgerRows } from "../src/tds-daybook.js";
 import type { GstCtx } from "../src/gst.js";
 
 const lvRow = (date: string, counterparty: string, amount: number, voucherType = "Journal"): LedgerVoucherRow => ({
@@ -171,6 +172,68 @@ describe("deductionEvents", () => {
     const { events, credits } = deductionEvents([lvRow("20250612", "X", 0)], "tds");
     expect(events).toHaveLength(0);
     expect(credits).toBe(0);
+  });
+});
+
+describe("deductorKey / rekeyDeductionsToDeductor (addendum 9)", () => {
+  // Mirrors the review's party test: a ledger parked under Sundry
+  // Debtors/Creditors, nothing else.
+  const parentOf = new Map([
+    ["d-engineer", "Sundry Debtors"],
+    ["contractee receivable", "Sundry Debtors"],
+    ["exempt contract income", "Indirect Incomes"],
+    ["site expenses", "Indirect Expenses"],
+  ]);
+  const isPartyLedger = (n: string): boolean =>
+    ["sundry debtors", "sundry creditors"].includes((parentOf.get(canonicalKey(n)) ?? "").toLowerCase());
+  it("a party counterparty always wins, even when the voucher party differs", () => {
+    expect(deductorKey("D-Engineer", "Contractee Receivable", isPartyLedger)).toBe("d-engineer");
+  });
+  it("an income counterparty falls back to the voucher party line", () => {
+    expect(deductorKey("Exempt Contract Income", "D-Engineer", isPartyLedger)).toBe("d-engineer");
+  });
+  it("a non-party counterparty with no party evidence keeps its key (honest gap)", () => {
+    expect(deductorKey("Exempt Contract Income", "Site Expenses", isPartyLedger))
+      .toBe("exempt contract income");
+    expect(deductorKey("Exempt Contract Income", null, isPartyLedger))
+      .toBe("exempt contract income");
+  });
+  it("a gross-up journal's TDS debit joins the deductor; normal rows are untouched", () => {
+    const grossUp: VoucherRow = {
+      date: "20251201", voucherType: "Journal", voucherNumber: "1001",
+      partyLedgerName: "D-Engineer", cancelled: false,
+      entries: [
+        { ledger: "D-Engineer", amount: 1500000 },
+        { ledger: "TDS Receivable", amount: 30000 },
+        { ledger: "Exempt Contract Income", amount: -1530000 },
+      ],
+    };
+    const normal: VoucherRow = {
+      date: "20250411", voucherType: "Journal", voucherNumber: "1002",
+      partyLedgerName: "Contractee Receivable", cancelled: false,
+      entries: [
+        { ledger: "Contractee Receivable", amount: 60000 },
+        { ledger: "TDS Receivable", amount: 50000 },
+        { ledger: "D-Engineer", amount: -110000 },
+      ],
+    };
+    const byLedger = new Map(
+      projectLedgerRows([grossUp, normal], ["TDS Receivable"])
+        .map((p) => [canonicalKey(p.ledger), p.rows] as const),
+    );
+    const { events } = deductionEvents(byLedger.get("tds receivable") ?? [], "tds");
+    expect(events).toHaveLength(2);
+    // The projector is display-faithful: the gross-up row shows the income ledger.
+    expect(events[0].ledgerKey).toBe("exempt contract income");
+    const rekeyed = rekeyDeductionsToDeductor(events, [grossUp, normal], isPartyLedger);
+    expect(rekeyed[0].ledgerKey).toBe("d-engineer");
+    expect(rekeyed[0].tax).toBe(30000);
+    expect(rekeyed[1].ledgerKey).toBe("d-engineer");
+    // An event whose voucher is gone keeps its key rather than guessing.
+    const orphan = rekeyDeductionsToDeductor(
+      [{ ...events[0], voucherNumber: "nope" }], [grossUp, normal], isPartyLedger,
+    );
+    expect(orphan[0].ledgerKey).toBe("exempt contract income");
   });
 });
 

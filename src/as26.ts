@@ -213,6 +213,49 @@ export function deductionEvents(rows: LedgerVoucherRow[], kind: As26Kind): { eve
   return { events, credits };
 }
 
+/** Addendum 9: the deductor behind one receivable-ledger debit.
+ *
+ * Deduction events are keyed by the row's display counterparty, which is the
+ * deductor on a normal two-line TDS-vs-party voucher — but on a gross-up
+ * journal (Dr TDS + Dr party, Cr income) the largest opposite-sign row is the
+ * income ledger, so the event keys to income and can never join the
+ * deductor's party. The voucher's own party line is the fallback evidence:
+ * it wins only when the counterparty is not itself a party ledger and the
+ * party line is one — otherwise the event keeps its counterparty key and
+ * surfaces as an unmapped gap, never silently dropped. */
+export function deductorKey(
+  counterparty: string,
+  voucherParty: string | null,
+  isPartyLedger: (name: string) => boolean,
+): string {
+  if (isPartyLedger(counterparty)) return canonicalKey(counterparty);
+  if (voucherParty && isPartyLedger(voucherParty)) return canonicalKey(voucherParty);
+  return canonicalKey(counterparty);
+}
+
+/** Addendum 9: re-key day-book deduction events to their deductor. The
+ * projector keeps the display counterparty (the sheets stay faithful); the
+ * join key moves to the voucher party wherever the counterparty is not a
+ * party ledger. Events whose voucher cannot be found, or whose voucher party
+ * is no party ledger either, keep their key. Returns a new array. */
+export function rekeyDeductionsToDeductor(
+  deductions: BooksDeduction[],
+  vouchers: VoucherRow[],
+  isPartyLedger: (name: string) => boolean,
+): BooksDeduction[] {
+  const partyOf = new Map<string, string>();
+  for (const v of vouchers) {
+    if (v.cancelled) continue;
+    partyOf.set(`${v.date}|${v.voucherType}|${v.voucherNumber}`, v.partyLedgerName);
+  }
+  return deductions.map((d) => {
+    const party = partyOf.get(`${d.date}|${d.voucherType}|${d.voucherNumber ?? ""}`);
+    if (party === undefined) return d;
+    const key = deductorKey(d.ledgerKey, party || null, isPartyLedger);
+    return key === d.ledgerKey ? d : { ...d, ledgerKey: key };
+  });
+}
+
 /** Per-party sales + invoice refs from the period's day book (sale and
  * deduction are separate vouchers — the join is party+period). One
  * BooksSale per outward voucher; that is per-invoice evidence, which
