@@ -7,12 +7,16 @@ export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approxi
 
 export interface BooksDeduction { ledgerKey: string; kind: As26Kind; date: string; tax: number; voucherType: string; voucherNumber: string | null; reference: string | null; }
 export interface BooksSale { ledgerKey: string; date: string; ref: string | null; taxable: number; gross: number; }
+/** Addendum 10: an income-side ledger (Direct/Indirect Incomes etc.) credited
+ * in the same voucher that debits a party's TDS receivable is part of that
+ * party's gross basis, even though it is not a Sales-Accounts sale. */
+export interface BooksOtherIncome { partyKey: string; incomeLedger: string; date: string; amount: number; voucherType: string; voucherNumber: string | null; }
 /** One books voucher of an operator-mapped bank (design §12.2): interest
  * credited on the bank's interest ledgers, TDS credited on a receivable
  * ledger in the same voucher, FD principal debited (carried, not compared). */
 export interface BankBooksEvent { nameKey: string; date: string; interest: number; tax: number; fdDebit: number; }
 export interface BankBooks { nameKey: string; events: BankBooksEvent[]; }
-export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; bankEvents?: BankBooks[]; /** Addendum 3: FD auto-detection outcome computed by the caller (owner of the group tree): auto-assigned rows for the workbook audit, and the unassigned remainder with its interest-side credit total. */ fdAuto?: { rows: FdAssignment[]; unassigned: string[]; interest: number }; }
+export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; otherIncome?: BooksOtherIncome[]; bankEvents?: BankBooks[]; /** Addendum 3: FD auto-detection outcome computed by the caller (owner of the group tree): auto-assigned rows for the workbook audit, and the unassigned remainder with its interest-side credit total. */ fdAuto?: { rows: FdAssignment[]; unassigned: string[]; interest: number }; }
 
 /** The Bank Interest sheet's parsed rows (design §12.5): presence marks the
  * 26AS name a bank; its interest income and FD ledgers feed the bank-194A
@@ -290,6 +294,40 @@ export function booksSales(vouchers: VoucherRow[], ctx: GstCtx): BooksSale[] {
   return sales;
 }
 
+/** Voucher identity used to join a deduction row back to its day-book
+ * voucher: date + type + number, with empty/null numbers normalized alike. */
+export function voucherIdentity(date: string, voucherType: string, voucherNumber: string | null): string {
+  return `${date}|${voucherType}|${voucherNumber ?? ""}`;
+}
+
+/** Addendum 10: income-side credits (Direct/Indirect Incomes roots) posted in
+ * the same voucher that debits a party's TDS receivable, attributed to that
+ * party. `partyKeyByVoucher` maps a voucher identity to the party ledger key
+ * (built from this run's tds deductions); `excludeKeys` holds ledgers already
+ * in the party basis (mapped bank interest/FD ledgers) so the basis never
+ * double counts, which keeps every 194A/bank figure unchanged. */
+export function otherIncomeCredits(
+  vouchers: VoucherRow[],
+  ctx: GstCtx,
+  partyKeyByVoucher: Map<string, string>,
+  excludeKeys: Set<string>,
+): BooksOtherIncome[] {
+  const out: BooksOtherIncome[] = [];
+  for (const v of vouchers) {
+    if (v.cancelled) continue;
+    const partyKey = partyKeyByVoucher.get(voucherIdentity(v.date, v.voucherType, v.voucherNumber));
+    if (!partyKey) continue;
+    for (const e of v.entries) {
+      if (e.amount >= 0) continue; // positive=debit: income sits as a credit line
+      const root = ctx.rootOf(ctx.groupOf(e.ledger));
+      if (root !== "Direct Incomes" && root !== "Indirect Incomes") continue;
+      if (excludeKeys.has(canonicalKey(e.ledger))) continue;
+      out.push({ partyKey, incomeLedger: e.ledger, date: v.date, amount: round2(-e.amount), voucherType: v.voucherType, voucherNumber: v.voucherNumber || null });
+    }
+  }
+  return out;
+}
+
 /** Receivable ledgers by name heuristic under an asset root; kind by name.
  * None ⇒ empty array — the wiring turns that into a hard operator-facing
  * error rather than a silent zero. */
@@ -504,6 +542,10 @@ export interface PartyRecon {
   booksTaxableValue?: number;
   booksGrossValue?: number;
   as26GrossValue?: number;
+  /** Addendum 10: same-voucher other-income credits folded into the party's
+   * books basis, and their total (empty/zero for totals-only parties). */
+  otherIncome?: BooksOtherIncome[];
+  otherIncomeTotal?: number;
   /** Addendum 5a: books interest credited (bank parties) and the value-basis
    * interpretation the Deductors sheet's value delta is measured on. */
   booksInterestValue?: number;
@@ -1246,13 +1288,10 @@ export function analyzeAs26(
     const r = reconcileParty(file, facts, match, opts.toDate);
     recons.push(r);
     const partySales = match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []);
-    const booksTaxable = sumSales(partySales, (s) => s.taxable);
-    const booksGross = sumSales(partySales, (s) => s.gross);
+    const booksTaxableBase = sumSales(partySales, (s) => s.taxable);
+    const booksGrossBase = sumSales(partySales, (s) => s.gross);
     const summary = file.summaries.find((s) => s.kind === match.kind && s.nameKey === match.as26NameKey);
     const as26Gross = summary?.gross ?? 0;
-    r.booksTaxableValue = booksTaxable;
-    r.booksGrossValue = booksGross;
-    r.as26GrossValue = as26Gross;
 
     // Totals-only parties (design §12.1): every 26AS section of the party is
     // 194R, or 194A with the operator-marked bank. Their entries are many
@@ -1266,6 +1305,20 @@ export function analyzeAs26(
     const totalsOnly = toks.length > 0 &&
       toks.every((t) => t === "194r" || (t === "194a" && bankKeyOf.has(match.as26NameKey)));
     r.totalsOnly = totalsOnly;
+
+    // Addendum 10: an income-side ledger credited in the same voucher that
+    // debits this party's TDS receivable belongs in the party's gross basis
+    // (the 26AS gross includes it). Totals-only parties (banks/194R) keep
+    // their own books channel, so the extras are never folded in there.
+    const extras = totalsOnly ? [] : (facts.otherIncome ?? []).filter((x) => match.ledgerKeys.includes(x.partyKey));
+    const otherIncomeTotal = round2(extras.reduce((s, x) => s + x.amount, 0));
+    r.otherIncome = extras;
+    r.otherIncomeTotal = otherIncomeTotal;
+    const booksTaxable = round2(booksTaxableBase + otherIncomeTotal);
+    const booksGross = round2(booksGrossBase + otherIncomeTotal);
+    r.booksTaxableValue = booksTaxable;
+    r.booksGrossValue = booksGross;
+    r.as26GrossValue = as26Gross;
 
     // 20% TDS split (design §12.4) runs whenever the operator mapped the
     // bank's interest/FD ledgers; a 20%-taxed event never reflects in 26AS

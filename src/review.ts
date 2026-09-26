@@ -21,8 +21,10 @@ import {
   booksSales,
   deductionEvents,
   isFdLedgerName,
+  otherIncomeCredits,
   receivableLedgers,
   rekeyDeductionsToDeductor,
+  voucherIdentity,
   type BooksDeduction,
   type PartyMatch,
   type PartyRecon,
@@ -290,7 +292,7 @@ export interface As26ReviewResult {
   /** Every books evidence row behind the recon, party-pseudonymed: the
    * written report's Books Events sheet (the drill-down the deduction and
    * sale vouchers give the operator). */
-  bookEvents: Array<{ party: string; source: "deduction" | "sale"; date: string; tax: number; voucherType: string; ref: string | null }>;
+  bookEvents: Array<{ party: string; source: "deduction" | "sale" | "other income"; date: string; tax: number; voucherType: string; ref: string | null; ledger: string | null }>;
   /** Bill-level drill-down rows behind the recon (masked): sheetId B = books
    * deductions not in 26AS, D = 26AS transactions not in books, V = value
    * mismatches. Party labels equal the findings' masked labels, so the
@@ -1134,7 +1136,23 @@ export function createSession(
       }
       if (events.length > 0) bankEvents.push({ nameKey: canonicalKey(b.as26Name), events });
     }
-    const result = analyzeAs26(file, { deductions, sales, bankEvents, fdAuto }, map, ledgerNames, { fromDate, toDate });
+    // Addendum 10: an income-side ledger credited in the same voucher that
+    // debits a party's TDS receivable belongs to that party's gross basis.
+    // Attributed through this run's tds deductions; ledgers already in the
+    // bank/FD basis are excluded so no 194A/bank figure moves (inbox 030).
+    const partyKeyByVoucher = new Map<string, string>();
+    for (const d of deductions) {
+      if (d.kind !== "tds") continue;
+      partyKeyByVoucher.set(voucherIdentity(d.date, d.voucherType, d.voucherNumber), d.ledgerKey);
+    }
+    const otherIncomeExclude = new Set(
+      [
+        ...(map.banks ?? []).flatMap((b) => [...b.interestLedgers, ...b.fdLedgers]),
+        ...fdAuto.rows.map((r) => r.ledger),
+      ].map(canonicalKey),
+    );
+    const otherIncome = otherIncomeCredits(voucherList, ctx, partyKeyByVoucher, otherIncomeExclude);
+    const result = analyzeAs26(file, { deductions, sales, otherIncome, bankEvents, fdAuto }, map, ledgerNames, { fromDate, toDate });
     // Bill-level drill-down (pure, unmasked): the SAME file instance the
     // session analyzed, so the rows and the findings share one provenance.
     const billRowsEngine = buildBillRows(result, { deductions, sales, bankEvents }, file, { fromDate, toDate });
@@ -1212,12 +1230,18 @@ export function createSession(
     const bookEvents = [
       ...deductions.map((e) => ({
         party: pseudoKey(e.ledgerKey), source: "deduction" as const, date: displayDate(e.date),
-        tax: e.tax, voucherType: e.voucherType, ref: null as string | null,
+        tax: e.tax, voucherType: e.voucherType, ref: null as string | null, ledger: null as string | null,
       })),
       ...sales.map((s) => ({
         party: pseudoKey(s.ledgerKey), source: "sale" as const, date: displayDate(s.date),
-        tax: s.gross, voucherType: "Sales", ref: REF_MASK(s.ref),
+        tax: s.gross, voucherType: "Sales", ref: REF_MASK(s.ref), ledger: null as string | null,
       })),
+      ...result.recon.flatMap((r) =>
+        (r.otherIncome ?? []).map((x) => ({
+          party: pseudoKey(x.partyKey), source: "other income" as const, date: displayDate(x.date),
+          tax: x.amount, voucherType: x.voucherType, ref: REF_MASK(x.voucherNumber), ledger: pseudoName(x.incomeLedger),
+        })),
+      ),
     ];
     const gaps = result.gaps.map((g) => ({
       ...g,

@@ -115,7 +115,7 @@ describe("matchParties — mapping-only", () => {
 // --- Task 6: books facts helpers ---
 
 import type { LedgerVoucherRow, VoucherRow } from "../src/downstream.js";
-import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty, deductorKey, rekeyDeductionsToDeductor } from "../src/as26.js";
+import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty, deductorKey, rekeyDeductionsToDeductor, otherIncomeCredits, voucherIdentity } from "../src/as26.js";
 import { projectLedgerRows } from "../src/tds-daybook.js";
 import type { GstCtx } from "../src/gst.js";
 
@@ -253,6 +253,40 @@ describe("booksSales", () => {
       ledgerKey: "nagar palika nagar bhavan", date: "20250612",
       taxable: 40000, gross: 47200, ref: "CS/9",
     });
+  });
+});
+
+describe("otherIncomeCredits (addendum 10)", () => {
+  const ctx: GstCtx = {
+    groupOf: (l) => (l === "Bonus Income" || l === "Interest Recd on FD A/c" ? "Indirect Incomes" : "Sundry Debtors"),
+    rootOf: (g) => (g === "Indirect Incomes" ? "Indirect Incomes" : null),
+    roleOf: () => "other",
+    inDutiesAndTaxes: () => false,
+    gstinOf: () => null,
+  };
+  const v: VoucherRow = {
+    date: "20250620", voucherType: "Journal", voucherNumber: "JV/2", reference: "",
+    partyLedgerName: "Bonus Co", cancelled: false,
+    entries: [
+      { ledger: "TDS Receivable", amount: 300 },
+      { ledger: "Bonus Co", amount: 2300 },
+      { ledger: "Bonus Income", amount: -2600 },
+    ],
+  };
+  const partyKeyByVoucher = new Map([[voucherIdentity("20250620", "Journal", "JV/2"), "bonus co"]]);
+
+  it("attributes a same-voucher income credit to the voucher's party", () => {
+    const out = otherIncomeCredits([v], ctx, partyKeyByVoucher, new Set());
+    expect(out).toHaveLength(1);
+    expect(out[0].amount).toBe(2600);
+    expect(out[0].partyKey).toBe("bonus co");
+    expect(out[0].incomeLedger).toBe("Bonus Income");
+    expect(out[0].voucherType).toBe("Journal");
+  });
+
+  it("never counts an income ledger already in the bank/FD basis (guard)", () => {
+    const out = otherIncomeCredits([v], ctx, partyKeyByVoucher, new Set([canonicalKey("Bonus Income")]));
+    expect(out).toEqual([]);
   });
 });
 

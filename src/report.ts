@@ -1214,14 +1214,15 @@ export async function writeAs26Report(opts: {
     name: "Books Events",
     columns: [
       { header: "party", width: 26, format: "text" },
-      { header: "source", width: 10, format: "text" },
+      { header: "source", width: 12, format: "text" },
       { header: "date", width: 12, format: "text" },
       { header: "tax", width: 14, format: "money" },
       { header: "voucher type", width: 12, format: "text" },
       { header: "ref", width: 16, format: "text" },
+      { header: "ledger", width: 28, format: "text" },
     ],
     rows: opts.result.bookEvents.map((e) => [
-      e.party, e.source, e.date, e.tax, e.voucherType, e.ref,
+      e.party, e.source, e.date, e.tax, e.voucherType, e.ref, e.ledger,
     ]),
   };
   const mappingSheet: Sheet = {

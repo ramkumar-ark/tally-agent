@@ -500,4 +500,52 @@ describe("Session.as26Review", () => {
     expect(f001!.detail).toMatch(/see Books not in 26AS rows B2\./);
     expect(f001!.detail).not.toMatch(/B1\b/);
   });
+
+  it("includes same-voucher other income in the party gross basis (addendum 10)", async () => {
+    const def = defaultAs26Fixture();
+    const fileBonus = parseAs26Export(buildAs26Fixture({
+      ...def,
+      tdsSummary: [...def.tdsSummary.slice(0, 7),
+        ["Bonus Co", "ABCD12345E", 300, 300, 0, 52600, "", 52600, "194C"]],
+      tdsDetail: [...def.tdsDetail.slice(0, 3),
+        ["BONUS CO", "15-Apr-2025", 15000, null, 300, null, "ABCD12345E", null, "F", "15-Apr-2025", "194C"]],
+    }));
+    const dayBook: DayBookInput = {
+      shape: "bundle", company: "Demo Traders Pvt Ltd",
+      groups: [
+        { name: "Current Assets", parent: "" },
+        { name: "Loans & Advances (Asset)", parent: "Current Assets" },
+        { name: "Sundry Debtors", parent: "Current Assets" },
+        { name: "Sales Accounts", parent: "" },
+        { name: "Works Contract Service", parent: "Sales Accounts" },
+        { name: "Indirect Incomes", parent: "" },
+      ],
+      ledgers: [
+        { name: "TDS Receivable", parent: "Loans & Advances (Asset)" },
+        { name: "Bonus Co", parent: "Sundry Debtors" },
+        { name: "Contract Income", parent: "Works Contract Service" },
+        { name: "Bonus Income", parent: "Indirect Incomes" },
+      ],
+      vouchers: [
+        { date: "20250605", voucherType: "Sales", voucherNumber: "CS/1", partyLedgerName: "Bonus Co", cancelled: false,
+          entries: [{ ledger: "Bonus Co", amount: 50000 }, { ledger: "Contract Income", amount: -50000 }] },
+        { date: "20250620", voucherType: "Journal", voucherNumber: "JV/2", partyLedgerName: "Bonus Co", cancelled: false,
+          entries: [{ ledger: "TDS Receivable", amount: 300 }, { ledger: "Bonus Co", amount: 2300 }, { ledger: "Bonus Income", amount: -2600 }] },
+      ],
+      observedFrom: "20250605", observedTo: "20250620", rejected: 0, emptyMonths: [],
+    };
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", fileBonus, mapFile(
+      JSON.stringify({ mappings: [{ ledger: "Bonus Co", as26Name: "Bonus Co" }] }),
+    ), dayBook);
+
+    // taxable basis = Sales-Accounts credits (50000) + same-voucher bonus (2600)
+    expect(res.recon[0].booksTaxableValue).toBe(52600);
+    expect(res.findings.some((x) => x.check === "assessable_value_mismatch")).toBe(false);
+
+    const extra = res.bookEvents.find((e) => e.source === "other income");
+    expect(extra).toBeDefined();
+    expect(extra!.tax).toBe(2600);
+    expect(extra!.ledger).toBeDefined();
+  });
 });

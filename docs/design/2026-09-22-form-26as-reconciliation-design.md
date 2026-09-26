@@ -282,3 +282,32 @@ Mapping sheet is *not* cross-refused — the two sheets serve different
 questions. Older filled templates (no such sheet) load unchanged with empty
 bank rows; the JSON map channel never carries banks.
 
+## 13. Same-voucher other income in the party gross basis (addendum 10, 2026-09-26)
+
+A party's books gross basis was the Sales-Accounts-root taxable credits alone.
+That omits income that is *not* contract turnover but is still reported to the
+department against the party's TAN — e.g. an exempt contract bonus credited by
+a gross-up journal (`Dr party` + `Dr TDS receivable`, `Cr income`), which the
+department reports as a 194C receipt. Check 003 then showed the 26AS gross
+exceeding the books taxable by exactly that income.
+
+Rule: when a voucher debits a mapped party's TDS receivable (a `tds`
+`BooksDeduction`, after the addendum-9 re-key) **and** credits a ledger under an
+income root (`Direct Incomes`, `Indirect Incomes`), that credit joins the
+party's gross basis. Other income carries no GST, so the amount is added to
+**both** `booksTaxableValue` and `booksGrossValue`. Attribution is by voucher
+identity `` `${date}|${voucherType}|${voucherNumber}` `` (`voucherIdentity`),
+never by name; the credits come from the same day-book voucher walk as the
+deductions.
+
+Guard (inbox 030): an income ledger already inside the party's measured basis —
+a mapped bank's interest/FD ledgers (`map.banks`) or an auto-assigned FD ledger —
+is excluded (`otherIncomeCredits`'s `excludeKeys`), so no 194A/bank figure
+moves. Totals-only parties (194R, bank 194A) take no other income.
+
+Traceability: the **Books Events** sheet gains a `ledger` column and a `source`
+value `other income`, one row per included credit (party, date, tax = amount,
+voucher type, ref, ledger), so a reader sees why the basis grew. Masking is
+unchanged and stays at the session boundary (`pseudoKey` / `pseudoName` /
+`REF_MASK`).
+
