@@ -1,23 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
-import { D3_GROUPS, D3_LEDGERS, D3_VOUCHERS } from "./fixtures/dep3cd-fixture.js";
-
-export function writeD3Bundle(dir: string, opts: { masters?: boolean } = {}): string {
-  const path = join(dir, "daybook.json");
-  const toIso = (d: string) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
-  writeFileSync(path, JSON.stringify({
-    tallyAgentExport: 1, company: "Demo Co", fromDate: "20250401", toDate: "20260331",
-    groups: opts.masters === false ? [] : D3_GROUPS, ledgers: opts.masters === false ? [] : D3_LEDGERS,
-    vouchers: D3_VOUCHERS.map((v) => ({ date: toIso(v.date), voucherType: v.voucherType, voucherNumber: v.voucherNumber,
-      entries: v.entries.map((e) => ({ LEDGERNAME: e.ledger, AMOUNT: -e.amount })) })),
-  }));
-  return path;
-}
+import { D3_GROUPS, D3_LEDGERS, D3_VOUCHERS, writeD3Bundle } from "./fixtures/dep3cd-fixture.js";
 
 describe("Session.dep3cdReview", () => {
   it("masks ledgers, shows block text clear, caches raw rows", async () => {

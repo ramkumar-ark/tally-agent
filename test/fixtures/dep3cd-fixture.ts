@@ -2,6 +2,8 @@ import type { VoucherRow } from "../../src/downstream.js";
 import type { Dep3cdCtx } from "../../src/dep3cd.js";
 import { canonicalKey } from "../../src/key.js";
 import { DEFAULT_BLOCK_LISTS } from "../../src/dep3cd-law.js";
+import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 
 export const D3_GROUPS = [
   { name: "Fixed Assets", parent: "\u0004 Primary" },
@@ -73,6 +75,18 @@ export const D3_EXPECTED_DELETIONS = [
   { ledger: "Old Loader", block: "5. Plant/ Machinery 15%:", date: "20251106", amount: 90000, basis: "receipt" },
   { ledger: "Old Tractor", block: "5. Plant/ Machinery 15%:", date: "20251215", amount: 300000, basis: "receipt" },
 ];
+/** Writes the fixture day book to `<dir>/daybook.json` and returns its path. */
+export function writeD3Bundle(dir: string, opts: { masters?: boolean } = {}): string {
+  const path = join(dir, "daybook.json");
+  const toIso = (d: string) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+  writeFileSync(path, JSON.stringify({
+    tallyAgentExport: 1, company: "Demo Co", fromDate: "20250401", toDate: "20260331",
+    groups: opts.masters === false ? [] : D3_GROUPS, ledgers: opts.masters === false ? [] : D3_LEDGERS,
+    vouchers: D3_VOUCHERS.map((v) => ({ date: toIso(v.date), voucherType: v.voucherType, voucherNumber: v.voucherNumber,
+      entries: v.entries.map((e) => ({ LEDGERNAME: e.ledger, AMOUNT: -e.amount })) })),
+  }));
+  return path;
+}
 export function fixtureCtx(over: Partial<Dep3cdCtx> = {}): Dep3cdCtx {
   const parent = new Map<string, string>();
   for (const p of [...D3_GROUPS, ...D3_LEDGERS]) parent.set(canonicalKey(p.name), p.parent);

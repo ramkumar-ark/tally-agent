@@ -51,6 +51,7 @@ import type { OperatorPfEsi } from "./pf-esi-file.js";
 import { lawFor, type FundKey } from "./pf-esi-law.js";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { readXlsm, writeXlsm } from "./xlsm.js";
 import { readSchema, readHandshake, writeSheetRows, findSheetPart, readListValues, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
@@ -78,7 +79,7 @@ import {
   type Dep3cdDeletion,
 } from "./dep3cd.js";
 import { EMPTY_DEP3CD_OPERATOR, parseDep3cdTemplate } from "./dep3cd-file.js";
-import { DEFAULT_BLOCK_LISTS } from "./dep3cd-law.js";
+import { ADDITIONAL_DEPRECIATION_TEXT, DEFAULT_BLOCK_LISTS, DEPN_TEXT } from "./dep3cd-law.js";
 
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
 const DAY_BOOK_FINDING = "(day-book file)";
@@ -735,6 +736,18 @@ export interface Session {
    */
   write3cdLoans(opts: { sourcePath: string; outPath?: string }): Promise<{ written: string }>;
   /**
+   * Rewrite the `Depreciation additions` and `Depreciation deletions` sheets of
+   * a Winman 3CD workbook COPY from the cached clause-18 rows. Blocked rows are
+   * skipped; the source is never written to.
+   */
+  write3cdDepreciation(opts: { sourcePath: string; outPath?: string }): Promise<{
+    written: string;
+    additions: number;
+    deletions: number;
+    skipped: number;
+    notes: string[];
+  }>;
+  /**
    * Rewrite the five TDS/TCS clause-34 sheets (TDS, TCS, Return details,
    * Interest on TDS, Interest on TCS) of a Winman 3CD workbook COPY from the
    * cached review's rows and return the written path. The source is never
@@ -832,6 +845,7 @@ export interface Session {
     rulesPath?: string;
     outPath: string;
   }): Promise<GstWorksheetWriteResult>;
+  /**
    * Winman Form 3CD clause 18 (depreciation under the Income-tax Act) books
    * side: additions and deletions from the operator day book, one row per
    * asset, at actual consideration for disposals. Day book only (no live
@@ -3959,6 +3973,127 @@ export function createSession(
     };
   }
 
+  /**
+   * Rewrite the clause-18 `Depreciation additions` / `Depreciation deletions`
+   * sheets of a Winman 3CD workbook COPY from the cached depreciation review's
+   * raw rows (write3cdPfEsi mechanics; design of record §2/§3). Block strings
+   * are Winman constants, not sensitive, so the original-case block text is
+   * written verbatim; ledger names never reach this writer. A row with no
+   * resolvable block is skipped and counted; each sheet is written only when it
+   * carries rows and the source is never written to.
+   */
+  async function write3cdDepreciation(opts: {
+    sourcePath: string;
+    outPath?: string;
+  }): Promise<{ written: string; additions: number; deletions: number; skipped: number; notes: string[] }> {
+    if (!lastDep3cd) {
+      throw new Error("run tb_dep3cd_review first: there are no clause-18 rows to write");
+    }
+    const cache = lastDep3cd;
+    const notes: string[] = [];
+    const additions = cache.additions.filter((a) => a.block !== null);
+    const deletions = cache.deletions.filter((d) => d.block !== null);
+    const skipped =
+      cache.additions.length - additions.length + (cache.deletions.length - deletions.length);
+    if (additions.length === 0 && deletions.length === 0) {
+      throw new Error("run tb_dep3cd_review first: there are no clause-18 rows to write");
+    }
+
+    const pkg = readXlsm(await readFile(opts.sourcePath));
+    // The handshake is the only reliable Winman discriminator; asserting it
+    // (and the form id on both writable sheets) refuses anything else loudly.
+    readHandshake(pkg);
+    for (const sheetName of ["Depreciation additions", "Depreciation deletions"]) {
+      const schema = readSchema(pkg, sheetName);
+      if (schema.formId !== "DepreciationNew") {
+        throw new Error(
+          `${sheetName} belongs to form "${schema.formId || "unknown"}": this tool fills the Winman DepreciationNew workbook`,
+        );
+      }
+    }
+    // Winman's dropdown validation is only a warning, so the writer enforces
+    // the workbook's own list itself; a block text outside it would import as
+    // invalid. The block text is a Winman constant and safe to echo.
+    const addList = readListValues(pkg, "Depreciation additions", "FISTCOL");
+    const delList = readListValues(pkg, "Depreciation deletions", "DELETIONDTLS");
+    for (const a of additions) {
+      if (!addList.includes(a.block!)) {
+        throw new Error(
+          `Depreciation additions: block "${a.block}" is not in this workbook's list; ` +
+            `re-run tb_dep3cd_review with sourcePath=<this workbook>`,
+        );
+      }
+    }
+    for (const d of deletions) {
+      if (!delList.includes(d.block!)) {
+        throw new Error(
+          `Depreciation deletions: block "${d.block}" is not in this workbook's list; ` +
+            `re-run tb_dep3cd_review with sourcePath=<this workbook>`,
+        );
+      }
+    }
+
+    let out = pkg;
+    if (additions.length > 0) {
+      const rows = [...additions]
+        .sort((a, b) =>
+          a.purchaseDate !== b.purchaseDate
+            ? a.purchaseDate < b.purchaseDate
+              ? -1
+              : 1
+            : a.block! !== b.block!
+              ? a.block! < b.block!
+                ? -1
+                : 1
+              : a.amount - b.amount,
+        )
+        .map<WinmanRow>((a) => ({
+          FISTCOL: { kind: "text", value: a.block! },
+          DATE: { kind: "date", ymd: String(a.purchaseDate) },
+          AMOUNT: { kind: "number", value: Math.round(a.amount * 100) / 100 },
+          DEPRECIATION: { kind: "text", value: ADDITIONAL_DEPRECIATION_TEXT },
+          TOUSE: { kind: "date", ymd: String(a.putToUse) },
+        }));
+      out = writeSheetRows(out, "Depreciation additions", rows);
+    }
+    if (deletions.length > 0) {
+      const rows = [...deletions]
+        .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.block! < b.block! ? -1 : 1))
+        .map<WinmanRow>((d) => ({
+          DELETIONDTLS: { kind: "text", value: d.block! },
+          DATE: { kind: "date", ymd: String(d.date) },
+          AMOUNT: { kind: "number", value: Math.round(d.amount * 100) / 100 },
+          HALFADD: { kind: "text", value: d.halfAdd },
+          DEPN: { kind: "text", value: DEPN_TEXT },
+        }));
+      out = writeSheetRows(out, "Depreciation deletions", rows);
+    }
+
+    // Excel's "~$" owner file beside the source means the workbook is open; the
+    // copy still reflects its last saved state. This is not an error.
+    if (existsSync(join(dirname(opts.sourcePath), "~$" + basename(opts.sourcePath)))) {
+      notes.push("the source workbook is open in Excel; the copy reflects its last saved state");
+    }
+
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const stem = basename(opts.sourcePath, extname(opts.sourcePath));
+    if (!opts.outPath) throw new Error("no output location for the filled workbook was given");
+    const target =
+      extname(opts.outPath).toLowerCase() === ".xlsm"
+        ? opts.outPath
+        : join(opts.outPath, `${stem} - filled - ${stamp}.xlsm`);
+    // Copying onto the source would destroy the operator's template before its
+    // contents were used; both entries are resolved through their real paths
+    // where they exist so a dot-dotted outPath cannot slip past.
+    const sourceId = await realPathId(opts.sourcePath);
+    if (sourceId === (await realPathId(target))) {
+      throw new Error("the outPath target resolves to the source workbook itself; write the copy somewhere else");
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, writeXlsm(out));
+    return { written: target, additions: additions.length, deletions: deletions.length, skipped, notes };
+  }
+
 /**
  * An identity for a possibly-not-yet-existing path: its realpath when the
  * entry is there, else its parent directory's realpath joined with its
@@ -4113,6 +4248,7 @@ async function realPathId(p: string): Promise<string> {
     dep3cdReview,
     dep3cdRows: () => lastDep3cd,
     write3cdLoans,
+    write3cdDepreciation,
     gst44Review,
     write3cdGst44,
     gst44Rows: () => lastGst44,
