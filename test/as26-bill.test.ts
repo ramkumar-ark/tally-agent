@@ -128,9 +128,22 @@ describe("linkInvoice (A2 four-step linkage)", () => {
     expect(link?.sale).toBe(s3);
   });
   it("(d) an approximate link when neither reference nor rate matches", () => {
-    const link = linkInvoice([s1, s2], { date: "20250701", tax: 9999, reference: null, section: "194C" });
+    // 6500 matches no rate but sits under s2's whole 2% TDS (7000) — plausible part
+    const link = linkInvoice([s1, s2], { date: "20250701", tax: 6500, reference: null, section: "194C" });
     expect(link?.sale.ref).toBe("REFX"); // latest sale on or before the item date
     expect(link?.basis).toBe("approximate");
+  });
+  it("(d2) approximate never names an invoice whose whole section-rate TDS is smaller than the entry", () => {
+    // 9999 exceeds even s2's 7000 TDS: no earlier invoice could carry it
+    const none = linkInvoice([s1, s2], { date: "20250701", tax: 9999, reference: null, section: "194C" });
+    expect(none).toBeNull();
+    // a later-but-still-too-small invoice is skipped in favour of an earlier plausible one
+    const s3 = sale("20250701", "TOO-SMALL", 300000, 354000); // 2% = 6000 < 6800
+    const pick = linkInvoice([s1, s3, s2], { date: "20250801", tax: 6800, reference: null, section: "194C" });
+    expect(pick?.sale.ref).toBe("REFX");
+    // no law entry for the section: the gate is off, old behaviour stands
+    const noLaw = linkInvoice([s1, s2], { date: "20250701", tax: 999999, reference: null, section: "194ZZ" });
+    expect(noLaw?.sale.ref).toBe("REFX");
   });
   it("(e) null when no sale precedes the item date", () => {
     expect(linkInvoice([s1, s2], { date: "20250401", tax: 2000, reference: null, section: "194C" })).toBeNull();

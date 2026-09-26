@@ -115,7 +115,7 @@ describe("matchParties — mapping-only", () => {
 // --- Task 6: books facts helpers ---
 
 import type { LedgerVoucherRow, VoucherRow } from "../src/downstream.js";
-import { deductionEvents, booksSales, receivableLedgers } from "../src/as26.js";
+import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty } from "../src/as26.js";
 import type { GstCtx } from "../src/gst.js";
 
 const lvRow = (date: string, counterparty: string, amount: number, voucherType = "Journal"): LedgerVoucherRow => ({
@@ -300,8 +300,7 @@ describe("reconcileParty", () => {
   it("tolerance: ₹0.60 reconciles, ₹1.60 does not", () => {
     const near = bookFacts([["20250612", 10000.6]]);
     const fNear = txFile([txn(10000)], 10000);
-    expect(reconcileParty(fNear, near, matchOf(fNear, near), "20251231").paired).toHaveLength(1);
-    const far = bookFacts([["20250612", 10001.6]]);
+    expect(reconcileParty(fNear, near, matchOf(fNear, near), "20251231").paired).toHaveLength(1);    const far = bookFacts([["20250612", 10001.6]]);
     const r = reconcileParty(fNear, far, matchOf(fNear, far), "20251231");
     expect(r.paired).toHaveLength(0);
     expect(r.unmatchedBooks).toHaveLength(1);
@@ -536,6 +535,119 @@ const tx194 = (section: string, tx: As26Transaction[], total: number, gross = 0)
 });
 const tx194n = (tax: number, section: string, date = "20250612", bookingDate: string | null = null, amount?: number): As26Transaction => ({
   kind: "tds", nameKey: NK, date, amount: amount ?? tax, tax, status: bookingDate ? "O" : "F", bookingDate, section,
+});
+
+/** Invoice-anchored group matching (addendum 6): synthetic 194C party with
+ * sales the deductions can rate-link to. `grossOnTx` becomes the 26AS row's
+ * amount paid/credited. */
+const saleOf = (date: string, ref: string, taxable: number) => ({
+  ledgerKey: NK, date, ref, taxable, gross: round2ForTest(taxable * 1.18),
+});
+const round2ForTest = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+const txGross = (tax: number, gross: number, date = "20250809"): As26Transaction => ({
+  kind: "tds", nameKey: NK, date, amount: gross, tax, status: "F", bookingDate: null, section: "194C",
+});
+
+describe("reconcileParty — invoice-anchored tiers (addendum 6)", () => {
+  it("tier 2: two single-journal invoice pools unite when the invoices' taxable sums to the row's gross", () => {
+    // one purchase order invoiced as two bills; the deductor's deposit covers both
+    const invA = saleOf("20250526", "INV A", 13191869);
+    const invB = saleOf("20250526", "INV B", 4887539);
+    const facts: BooksFacts = {
+      deductions: [
+        { ledgerKey: NK, kind: "tds", date: "20250526", tax: 263837, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds", date: "20250526", tax: 97751, voucherType: "Journal" },
+      ],
+      sales: [invA, invB],
+    };
+    const file = txFile([txGross(361588, 18079400)], 361588);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].parts).toHaveLength(2);
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
+
+  it("tier 1: a too-big approximate entry is excluded by the plausibility gate and the plausible subset matches", () => {
+    // three journals split one invoice's TDS; a fourth entry (a different
+    // bill's TDS) exceeds that invoice's whole TDS, so it never pollutes the pool
+    const invBig = saleOf("20250917", "INV BIG", 39417820);
+    const invSmall = saleOf("20251016", "INV SML", 3262076);
+    const facts: BooksFacts = {
+      deductions: [432983, 25199, 26333, 13709].map((tax) => ({
+        ledgerKey: NK, kind: "tds" as const, date: "20251016", tax, voucherType: "Journal",
+      })),
+      sales: [invBig, invSmall],
+    };
+    const file = txFile([txGross(65241, 3262050, "20260228")], 65241);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].parts.map((p) => p.tax).sort((a, b) => a - b)).toEqual([13709, 25199, 26333]);
+    expect(r.unmatchedBooks.map((b) => b.tax)).toEqual([432983]);
+    expect(r.unmatchedAs26).toHaveLength(0);
+    // and the excluded entry links approximately to the plausible big invoice
+    const link = linkInvoice([invSmall, invBig], { date: "20251016", tax: 432983, reference: null, section: "194C" });
+    expect(link?.sale.ref).toBe("INV BIG");
+    expect(link?.basis).toBe("approximate");
+  });
+
+  it("a pool with two distinct fitting subsets stays ambiguous, never forced", () => {
+    // invoice taxable 1000000 -> whole TDS 20000; entries pair up two ways
+    const facts: BooksFacts = {
+      deductions: [12000, 8000, 6000, 14000].map((tax) => ({
+        ledgerKey: NK, kind: "tds" as const, date: "20250610", tax, voucherType: "Journal",
+      })),
+      sales: [saleOf("20250501", "INV X", 1000000)],
+    };
+    const file = txFile([txGross(20000, 1000000)], 20000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20251231");
+    expect(r.combinations).toHaveLength(0);
+    expect(r.ambiguous).toBeGreaterThanOrEqual(1);
+    expect(r.unmatchedBooks).toHaveLength(4);
+  });
+
+  it("whole-pool fallback: one deductor spanning two ledgers — the deposit ties the other zone's invoice pool exactly", () => {
+    // zone A ledger books the TDS journals; the deposit row's amount names
+    // zone B's invoice, but the zone-A pool sums to the deposit exactly
+    const facts: BooksFacts = {
+      deductions: [21428, 25522].map((tax) => ({
+        ledgerKey: "zone-a", kind: "tds" as const, date: "20251014", tax, voucherType: "Journal",
+      })),
+      sales: [
+        { ledgerKey: "zone-a", date: "20251014", ref: "INV A", taxable: 2151293, gross: 2538525 },
+        { ledgerKey: "zone-b", date: "20251014", ref: "INV B", taxable: 2347500, gross: 2770050 },
+      ],
+    };
+    const file = txFile([txGross(46950, 2347500, "20260212")], 46950);
+    const match = { kind: "tds" as const, as26NameKey: NK, ledgerKeys: ["zone-a", "zone-b"], ledgerNames: ["zone-a", "zone-b"], ledgerName: "zone-a + zone-b" };
+    const r = reconcileParty(file, facts, match, "20260331");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].parts.map((p) => p.tax).sort((a, b) => a - b)).toEqual([21428, 25522]);
+    expect(r.unmatchedBooks).toHaveLength(0);
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
+
+  it("whole-pool fallback stays silent when two invoice pools both fit — ambiguous, not forced", () => {
+    // two invoices, each anchoring a pool that sums to the deposit; neither
+    // invoice matches the deposit's own amount or rate
+    const facts: BooksFacts = {
+      deductions: [
+        { ledgerKey: NK, kind: "tds" as const, date: "20251015", tax: 6000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20251015", tax: 12000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20251025", tax: 17500, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20251025", tax: 500, voucherType: "Journal" },
+      ],
+      sales: [
+        { ledgerKey: NK, date: "20251001", ref: "INV A", taxable: 800000, gross: 944000 },
+        { ledgerKey: NK, date: "20251020", ref: "INV B", taxable: 950000, gross: 1121000 },
+      ],
+    };
+    const file = txFile([txGross(18000, 1234567, "20260212")], 18000);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(0);
+    expect(r.ambiguous).toBeGreaterThanOrEqual(1);
+    expect(r.unmatchedBooks).toHaveLength(4);
+  });
 });
 
 describe("analyzeAs26 — totals-only reconciliation (design §12)", () => {
