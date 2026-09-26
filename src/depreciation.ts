@@ -30,14 +30,14 @@ export interface DepCtx {
 const canon = (s: string): string => s.trim().toLowerCase();
 const isCredit = (row: LedgerVoucherRow): boolean => row.amount < 0;
 
-const EXPENSE_ROOTS = new Set(["indirect expenses", "direct expenses", "expenses (indirect)", "expenses (direct)"]);
-const INCOME_ROOTS = new Set(["indirect incomes", "direct incomes", "income (indirect)", "income (direct)", "sales accounts"]);
-const MONEY_ROOTS = new Set(["bank accounts", "bank od a/c", "cash-in-hand", "sundry debtors"]);
-const SUPPLIER_ROOTS = new Set(["sundry creditors", "current liabilities"]);
+export const EXPENSE_ROOTS = new Set(["indirect expenses", "direct expenses", "expenses (indirect)", "expenses (direct)"]);
+export const INCOME_ROOTS = new Set(["indirect incomes", "direct incomes", "income (indirect)", "income (direct)", "sales accounts"]);
+export const MONEY_ROOTS = new Set(["bank accounts", "bank od a/c", "cash-in-hand", "sundry debtors"]);
+export const SUPPLIER_ROOTS = new Set(["sundry creditors", "current liabilities"]);
 
-const DEPRECIATION_NAME = /deprecia/i;
+export const DEPRECIATION_NAME = /deprecia/i;
 const DISCOUNT_NAME = /discount|rebate/i;
-const WRITEOFF_NAME = /loss on (sale|disposal)|writ(e|ten).?off|discard|scrap/i;
+export const WRITEOFF_NAME = /loss on (sale|disposal)|writ(e|ten).?off|discard|scrap/i;
 
 /**
  * The block rate, read from the GROUP name only. Never from a ledger name:
