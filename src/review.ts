@@ -52,7 +52,7 @@ import { lawFor, type FundKey } from "./pf-esi-law.js";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { readXlsm, writeXlsm } from "./xlsm.js";
-import { readSchema, readHandshake, writeSheetRows, findSheetPart, type WinmanRow } from "./winman3cd.js";
+import { readSchema, readHandshake, writeSheetRows, findSheetPart, readListValues, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
 import { projectLedgerRows, counterpartyOf, readDayBook, type DayBookInput } from "./tds-daybook.js";
 import { timingOnlySection } from "./tds-law.js";
@@ -71,6 +71,14 @@ import {
   type LoansSheetRow,
 } from "./loans.js";
 import { parseLoansTemplate } from "./loans-file.js";
+import {
+  analyzeDep3cd,
+  type Dep3cdAddition,
+  type Dep3cdCtx,
+  type Dep3cdDeletion,
+} from "./dep3cd.js";
+import { EMPTY_DEP3CD_OPERATOR, parseDep3cdTemplate } from "./dep3cd-file.js";
+import { DEFAULT_BLOCK_LISTS } from "./dep3cd-law.js";
 
 /** Provenance literal used as a day-book finding's deductee (cleared in the classifier). */
 const DAY_BOOK_FINDING = "(day-book file)";
@@ -117,6 +125,8 @@ import {
   tdsFindingId,
   type WrongGroupConfig,
   type DepFinding,
+  type D3cdCheckId,
+  d3cdFindingId,
 } from "./types.js";
 
 /** A PAN is five letters, four digits, one letter. */
@@ -567,6 +577,53 @@ export interface LedgerScrutinyResult {
   findings: LedgerMaskedFinding[];
 }
 
+/**
+ * tb_dep3cd_review's result: the Winman clause-18 rows (additions and
+ * deletions) with masked ledger names, block text clear (a Winman constant),
+ * dates in display form, plus totals and findings. The raw rows live in the
+ * session cache (`dep3cdRows`) for the writer.
+ */
+export interface Dep3cdReviewResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  counts: Record<Severity, number>;
+  blockSource: "workbook" | "template" | "default";
+  additions: Array<{
+    ledger: string;
+    block: string | null;
+    purchaseDate: string;
+    putToUse: string;
+    amount: number;
+    secondHalf: boolean;
+    parts: number;
+    orphan: boolean;
+  }>;
+  deletions: Array<{
+    ledger: string;
+    block: string | null;
+    date: string;
+    amount: number;
+    basis: string;
+    halfAdd: string;
+    bookCredit: number;
+  }>;
+  totals: {
+    additions: number;
+    deletions: number;
+    unwrittenAdditions: number;
+    unwrittenDeletions: number;
+  };
+  findings: Array<{
+    id: string;
+    check: D3cdCheckId;
+    severity: Severity;
+    ledger: string;
+    amount: number;
+    detail: string;
+  }>;
+}
+
 export interface Session {
   review(company: string | undefined, asOnDate: string): Promise<ReviewResult>;
   ledgerActivity(findingId: string, fromDate: string, toDate: string): Promise<unknown[]>;
@@ -775,6 +832,27 @@ export interface Session {
     rulesPath?: string;
     outPath: string;
   }): Promise<GstWorksheetWriteResult>;
+   * Winman Form 3CD clause 18 (depreciation under the Income-tax Act) books
+   * side: additions and deletions from the operator day book, one row per
+   * asset, at actual consideration for disposals. Day book only (no live
+   * fallback); the optional template supplies block mappings and adjustments.
+   */
+  dep3cdReview(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    dayBookPath: string;
+    templatePath?: string;
+    sourcePath?: string;
+  }): Promise<Dep3cdReviewResult>;
+  /** The cached raw clause-18 rows (real names, YYYYMMDD dates) plus the block lists write3cdDepreciation consumes. */
+  dep3cdRows():
+    | {
+        additions: Dep3cdAddition[];
+        deletions: Dep3cdDeletion[];
+        blockLists: { additions: readonly string[]; deletions: readonly string[] };
+      }
+    | undefined;
   vault: Vault;
 }
 
@@ -808,6 +886,14 @@ export function createSession(
    * refuses rather than silently stamping the Tally name on the return.
    */
   let lastWinmanNameMissing = false;
+  /** Paperback of the clause-18 review: raw rows + block lists for write3cdDepreciation. */
+  let lastDep3cd:
+    | {
+        additions: Dep3cdAddition[];
+        deletions: Dep3cdDeletion[];
+        blockLists: { additions: readonly string[]; deletions: readonly string[] };
+      }
+    | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -2689,6 +2775,176 @@ export function createSession(
   }
 
   /**
+   * Winman Form 3CD clause 18 (depreciation under the Income-tax Act) books
+   * side (Session.dep3cdReview). Day book only: the path-only channel keeps
+   * the export off the wire, and the bundle's groups/ledgers are what make an
+   * asset ledger knowable — without them the review degrades to a single
+   * D3CD-013, never a throw.
+   */
+  async function dep3cdReview(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    dayBookPath: string;
+    templatePath?: string;
+    sourcePath?: string;
+  }): Promise<Dep3cdReviewResult> {
+    const { company, fromDate, toDate } = opts;
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+
+    const text = await readFile(opts.dayBookPath, "utf8");
+    const dayBook = readDayBook(text, { company, fromDate, toDate });
+    const voucherList = dayBook.vouchers;
+    const groups = dayBook.groups ?? [];
+    const ledgers = dayBook.ledgers ?? [];
+
+    const template = opts.templatePath
+      ? parseDep3cdTemplate(await readFile(opts.templatePath))
+      : null;
+
+    // Block lists: workbook (read-only) > template > default.
+    let blockLists: { additions: readonly string[]; deletions: readonly string[] } = DEFAULT_BLOCK_LISTS;
+    let blockSource: Dep3cdReviewResult["blockSource"] = "default";
+    if (opts.sourcePath) {
+      const pkg = readXlsm(await readFile(opts.sourcePath));
+      const additions = readListValues(pkg, "Depreciation additions", "FISTCOL");
+      const deletions = readListValues(pkg, "Depreciation deletions", "DELETIONDTLS");
+      if (additions.length > 0 || deletions.length > 0) {
+        blockLists = { additions, deletions };
+        blockSource = "workbook";
+      }
+    }
+    if (blockSource === "default" && template?.blockLists) {
+      blockLists = template.blockLists;
+      blockSource = "template";
+    }
+
+    if (groups.length === 0 || ledgers.length === 0) {
+      lastDep3cd = undefined;
+      return {
+        company,
+        fromDate: displayDate(fromDate),
+        toDate: displayDate(toDate),
+        counts: { critical: 1, warning: 0, review: 0 },
+        blockSource,
+        additions: [],
+        deletions: [],
+        totals: { additions: 0, deletions: 0, unwrittenAdditions: 0, unwrittenDeletions: 0 },
+        findings: [
+          {
+            id: d3cdFindingId("d3cd_masters_absent", 1),
+            check: "d3cd_masters_absent",
+            severity: "critical",
+            ledger: "",
+            amount: 0,
+            detail:
+              `The day-book export carries no ledger masters, so asset ledgers and their ` +
+              `fixed-asset groups are unknowable: ${count(voucherList.length)} vouchers were read and no ` +
+              `addition or deletion could be identified. Re-export the day book with its groups and ` +
+              `ledgers and run again.`,
+          },
+        ],
+      };
+    }
+
+    const parent = new Map<string, string>();
+    for (const p of [...groups, ...ledgers]) parent.set(canonicalKey(p.name), p.parent);
+    const chainOf = (name: string): string[] => {
+      const out: string[] = [];
+      let cur = parent.get(canonicalKey(name));
+      while (cur && !cur.startsWith("\u0004") && out.length < 20) {
+        out.push(canonicalKey(cur));
+        cur = parent.get(canonicalKey(cur));
+      }
+      return out;
+    };
+    const fixedAssets = canonicalKey("Fixed Assets");
+    const ctx: Dep3cdCtx = {
+      fromDate,
+      toDate,
+      chainOf,
+      isAssetLedger: (l) => chainOf(l).includes(fixedAssets),
+      assetGroupOf: (l) => parent.get(canonicalKey(l)) ?? "",
+      blockLists,
+      operator: template?.operator ?? EMPTY_DEP3CD_OPERATOR,
+    };
+
+    const result = analyzeDep3cd(voucherList, ctx);
+
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const l of ledgers) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    const groupOf = (ledger: string): string => groupOfLedger.get(canonicalKey(ledger)) ?? "";
+
+    const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
+    for (const f of result.findings) counts[f.severity] += 1;
+
+    // Register every real ledger against its finding id BEFORE masking, as
+    // faRegister does; then mask. The block text is a Winman constant and
+    // passes clear. Details go through the whole-token sweep then scrubSecrets.
+    for (const f of result.findings) {
+      if (f.ledger) realLedgerByFinding.set(f.id, f.ledger);
+    }
+    const findings = result.findings.map((f) => ({
+      id: f.id,
+      check: f.check,
+      severity: f.severity,
+      ledger: f.ledger ? maskLedgerName(f.ledger, groupOf(f.ledger), c, vault) : "",
+      amount: f.amount,
+      detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+    }));
+
+    const additions = result.additions.map((a) => ({
+      ledger: maskLedgerName(a.ledger, groupOf(a.ledger), c, vault),
+      block: a.block,
+      purchaseDate: displayDate(a.purchaseDate),
+      putToUse: displayDate(a.putToUse),
+      amount: a.amount,
+      secondHalf: a.secondHalf,
+      parts: a.parts.length,
+      orphan: a.orphan,
+    }));
+    const deletions = result.deletions.map((d) => ({
+      ledger: maskLedgerName(d.ledger, groupOf(d.ledger), c, vault),
+      block: d.block,
+      date: displayDate(d.date),
+      amount: d.amount,
+      basis: d.basis,
+      halfAdd: d.halfAdd,
+      bookCredit: d.bookCredit,
+    }));
+
+    // Paperback first (raw rows, raw dates) with the block lists the writer
+    // re-checks every row against.
+    lastDep3cd = {
+      additions: result.additions,
+      deletions: result.deletions,
+      blockLists,
+    };
+
+    const sum = (xs: number[]): number => round2(xs.reduce((s, x) => s + x, 0));
+    return {
+      company,
+      fromDate: displayDate(fromDate),
+      toDate: displayDate(toDate),
+      counts,
+      blockSource,
+      additions,
+      deletions,
+      totals: {
+        additions: sum(result.additions.map((a) => a.amount)),
+        deletions: sum(result.deletions.map((d) => d.amount)),
+        unwrittenAdditions: result.additions.filter((a) => a.block === null).length,
+        unwrittenDeletions: result.deletions.filter((d) => d.block === null).length,
+      },
+      findings,
+    };
+  }
+
+  /**
    * Winman 3CD clause 31 (l.269SS/l.269T) and l.269ST books side
    * (Session.loansReview, task-6). Source: day-book primary by absolute path
    * (the path-only channel: the gateway reads the file, nothing rides the
@@ -3854,6 +4110,8 @@ async function realPathId(p: string): Promise<string> {
       lastLoansSheets
         ? { sheets: lastLoansSheets, vault: lastLoansVault ?? [] }
         : undefined,
+    dep3cdReview,
+    dep3cdRows: () => lastDep3cd,
     write3cdLoans,
     gst44Review,
     write3cdGst44,
