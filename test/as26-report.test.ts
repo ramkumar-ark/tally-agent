@@ -245,6 +245,69 @@ describe("tb_write_26as_report", () => {
   });
 });
 
+describe("tb_write_26as_report > Deductors cell placement", () => {
+  // Inbox 009: the captain's viewer showed the GST-inclusive value under the
+  // "books interest" header for sales parties. The sheet was already correct
+  // (blank value cells shift dense viewers); this test pins the layout so a
+  // regression cannot reintroduce an actual mis-assignment.
+  it("puts GST-inclusive value in 'gross incl GST', interest in 'books interest', nothing shifted", async () => {
+    const session = createSession(fakeDown(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const mk = (as26Name: string, ledger: string, over: Partial<As26ReviewResult["recon"][number]>): As26ReviewResult["recon"][number] => ({
+      match: {
+        ledgerKeys: [ledger], ledgerNames: [ledger], ledgerName: ledger,
+        as26NameKey: ledger, as26Name, kind: "tds", source: "operator",
+      },
+      booksTax: 0, as26Tax: 0, paired: [], combinations: [], ambiguous: 0,
+      unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false,
+      lateBookedTax: 0,
+      ...over,
+    });
+    const result = {
+      company: "Demo Traders Pvt Ltd", fromDate: "20250401", toDate: "20260331",
+      findings: [], gaps: [],
+      totals: { booksTax: 0, as26Tax: 0, partiesMatched: 2, combinationExplained: 0, ambiguous: 0 },
+      mastersUnavailable: false, groupsUnavailable: false,
+      skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+      counts: { credits: 0, receivableLedgers: [] }, bookEvents: [], billRows: [],
+      recon: [
+        // sales party: taxable book 1800000, GST-inclusive 2124000
+        mk("Acme Vendor", "Acme Vendor Sales A/c", {
+          booksTax: 4600, as26Tax: 4600, booksTaxableValue: 1800000,
+          booksGrossValue: 2124000, as26GrossValue: 1800000,
+          valueBasis: "taxable", valueDelta: 0,
+        }),
+        // bank party: books interest 1199509, no sales value
+        mk("Union Finance Bank", "FD Interest Ledger", {
+          booksTax: 0, as26Tax: 0, booksInterestValue: 1199509,
+          as26GrossValue: 962258, valueBasis: "interest", valueDelta: 237251,
+        }),
+      ],
+    } as As26ReviewResult;
+    const paths = await writeAs26Report({
+      reportDir: tempDir("as26-deductors-"), company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401", toDate: "20260331",
+      markdown: "narrative", result, vault: session.vault,
+    });
+    const wb = readWorkbook(readFileSync(paths.workbookPath));
+    const sheet = wb.find((s) => s.name === "Deductors")!;
+    // header row: column letters must hold the right header
+    const header = sheet.rows[0];
+    expect(header.cells.get(7)!.value).toBe("books interest"); // H
+    expect(header.cells.get(8)!.value).toBe("gross incl GST"); // I
+    const cell = (eRow: number, col: number): unknown => sheet.rows[eRow].cells.get(col)?.value;
+    const sales = 1, bank = 2;
+    // sales row: taxable G, GST-inclusive I, H EMPTY
+    expect(cell(sales, 6)).toBe(1800000); // G taxable
+    expect(cell(sales, 7) ?? null).toBeNull(); // H books interest stays empty
+    expect(cell(sales, 8)).toBe(2124000); // I gross incl GST
+    expect(cell(sales, 10)).toBe("taxable"); // K basis
+    // bank row: interest H, no GST-inclusive value
+    expect(cell(bank, 7)).toBe(1199509); // H books interest
+    expect(cell(bank, 8) ?? null).toBeNull(); // I gross incl GST stays empty
+    expect(cell(bank, 10)).toBe("interest"); // K basis
+  });
+});
+
 describe("tb_write_26as_report > FD interest 20% TDS sheet", () => {
   it("lists the 20%-taxed FD interest entries with a totals row, de-masked on disk", async () => {
     const session = createSession(fakeDown(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
