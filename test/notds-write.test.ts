@@ -126,6 +126,19 @@ describe("write3cdNoTds", () => {
     expect(row).not.toContain("194-I(a)");
   });
 
+  it("writes an explicit 0 into TDS done / TDS deposited when the row deducted nothing", async () => {
+    const dir = tmpDir();
+    const sourcePath = join(dir, "No TDS Disallowance.xlsm");
+    writeFileSync(sourcePath, makeNotdsFixture());
+    const s = mkSession([booking(700000)]);
+    await s.tdsReview(undefined, "20250401", "20260331", "20260331", OPERATOR, "json");
+    await s.noTdsReview({});
+    const w = await s.write3cdNoTds({ sourcePath, outPath: join(dir, "out.xlsm") });
+    const row = partText(readXlsm(await readFile(w.path)), NOTDS_PARTS.resident).match(/<row r="7".*?<\/row>/s)![0];
+    expect(row).toMatch(/<c r="D7"[^>]*><v>0<\/v><\/c>/);
+    expect(row).toMatch(/<c r="E7"[^>]*><v>0<\/v><\/c>/);
+  });
+
   it("lands a sheet4 row at row 8 with no D–G keys written", async () => {
     const dir = tmpDir();
     const sourcePath = join(dir, "No TDS Disallowance.xlsm");
