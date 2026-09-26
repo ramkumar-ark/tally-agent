@@ -222,7 +222,14 @@ export function gst44Worksheet(
     const pattern = patternMatch(acc.ledger, opts.rules);
 
     if (policy) {
-      acc.seed = seedFor(policy.treatment, acc.debit, "policy keyword", `rule '${policy.rule.id}': ${policy.rule.note}`);
+      // Captain policy keyword rules take precedence over prior-year exact
+      // matches (addendum 2026-09-26e: the seed reason must name the rule,
+      // not the prior year). A prior-year agreement is noted as secondary.
+      const priorNote =
+        prior && !prior.split && prior.treatment === policy.treatment
+          ? `rule '${policy.rule.id}': ${policy.rule.note} (FY 24-25 agreed: ${WS_TREATMENT_LABELS[prior.treatment]})`
+          : `rule '${policy.rule.id}': ${policy.rule.note}`;
+      acc.seed = seedFor(policy.treatment, acc.debit, "policy keyword", priorNote);
       if (prior && (prior.split || prior.treatment !== policy.treatment)) {
         push(
           "gst44_ws_prior_year_changed",

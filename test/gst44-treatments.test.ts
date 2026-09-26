@@ -105,8 +105,8 @@ describe("addendum 2026-09-26d generic rules", () => {
 
   it("electricity/EB charges seed exempt by the keyword rule", () => {
     for (const name of ["Electricity Charges A/c", "Electricity Expense - KSEB", "EB Charges", "EB Bill A/c"]) {
-      expect(evidenceMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("exempt");
-      expect(evidenceMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("electricity");
+      expect(policyMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("exempt");
+      expect(policyMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("electricity");
     }
   });
 
@@ -221,5 +221,22 @@ describe("operator rules", () => {
     await expect(loadGst44TreatmentRules(file, () => {})).rejects.toThrow(/rule 1/);
     await dir.writeFile(file, "{not json");
     await expect(loadGst44TreatmentRules(file, () => {})).rejects.toThrow(/not valid JSON/);
+  });
+});
+
+describe("addendum 2026-09-26e electricity policy", () => {
+  it("electricity/EB seeds exempt via the POLICY rule across name variants", () => {
+    for (const name of [
+      "Electricity Charges Paid",
+      "Electricity Charges A/c",
+      "Electric Charge",
+      "EB Charges",
+      "EB Bill",
+      "Power Charges A/c",
+      "Current Charges A/c",
+    ]) {
+      expect(policyMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("exempt");
+      expect(policyMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("electricity");
+    }
   });
 });

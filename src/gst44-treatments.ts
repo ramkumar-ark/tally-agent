@@ -57,13 +57,16 @@ export const GST44_TREATMENT_RULES: readonly TreatmentRule[] = [
   // loan-interest rule, so "Interest on GST A/c" reads not_supply while
   // "Interest on Bank Loan A/c" reads exempt. Registered first in the chain.
   { id: "interest-tax", kind: "policy", treatment: "not_supply", keywords: ["interest on tax", "interest on duty", "late fee on tax", "late fee on duty", "interest on gst", "interest on tds", "interest on income tax", "interest on professional tax", "late fee on gst", "late fee on tds"], note: "interest or late fee on taxes/duties is not a supply" },
+  // Electricity/EB is exempt by captain's policy (addendum 2026-09-26e), NOT
+  // because the prior year treated it that way — a POLICY rule, so it beats
+  // a prior-year exact match in the seed chain.
+  { id: "electricity", kind: "policy", treatment: "exempt", keywords: ["electricity", "electric charge", "eb charge", "eb bill", "power charge", "current charge"], note: "electricity/EB charges are exempt supplies (captain's policy)" },
   { id: "urd", kind: "evidence", treatment: "unregistered", keywords: ["urd", "unregistered"], note: "the name itself declares an unregistered dealer" },
   // Banks and NBFCs are mandated to register, so their charges are always
   // registered purchases (others) — never exempt, never unregistered. As
   // evidence rules these override party-GSTIN pots that would park any part
   // in H (evidence beats party in the seed chain).
   { id: "bank-charges", kind: "evidence", treatment: "others", keywords: ["bank charge", "loan charge", "loan processing charge", "processing charge", "bank commission", "forex charge", "exchange charge", "cheque charge", "collection charge", "annual maintenance charge"], note: "bank/NBFC charges come from mandated registered dealers — others, never exempt or unregistered" },
-  { id: "electricity", kind: "evidence", treatment: "exempt", scope: "revenue", keywords: ["electricity", "eb charge", "eb bill"], note: "electricity/EB charges are exempt supplies (expense ledgers only — a fixed-asset 'Petrol Vibrator'/'Diesel Generator' is equipment, not an exempt supply)" },
   { id: "fuel", kind: "evidence", treatment: "exempt", scope: "revenue", keywords: ["fuel", "diesel", "petrol", "hsd"], note: "fuel expenses are always exempt (registered dealers)" },
   { id: "insurance", kind: "evidence", treatment: "others", keywords: ["insurance"], note: "insurance ledgers are registered purchases — including Ineligible ITC ones, which are NOT exempt" },
   { id: "loan-interest", kind: "evidence", treatment: "exempt", keywords: ["interest on bank", "interest on loan", "interest on non bank", "interest on od", "interest on cc", "bank interest", "nbfc interest", "loan interest", "vehicle loan", "equipment loan", "finance charge", "finance cost"], note: "interest on bank/NBFC loans is an exempt financial service" },

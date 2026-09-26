@@ -18,6 +18,7 @@ const groupOf: Record<string, string> = {
   "Bank Charges A/c": "Bank Charges",
   "Interest on GST A/c": "Interest Expenses",
   "Interest on Bank Loan A/c": "Interest Expenses",
+  "Electricity Charges Paid": "Electricity Charges",
   "JCB Purchased": "Fixed Assets",
   "Petrol Vibrator - Greaves": "Fixed Assets",
   "Input IGST A/c": "Input GST",
@@ -31,6 +32,7 @@ const roots: Record<string, string> = {
   "Indirect Expenses": "Indirect Expenses",
   "Bank Charges": "Indirect Expenses",
   "Interest Expenses": "Indirect Expenses",
+  "Electricity Charges": "Indirect Expenses",
   "Fixed Assets": "Fixed Assets",
   "Input GST": "Duties & Taxes",
   "Sundry Creditors": "Sundry Creditors",
@@ -341,5 +343,39 @@ describe("gst44Worksheet rule scope", () => {
     expect(re.capital.find((x) => x.ledger === "Petrol Vibrator - Greaves")!.seed).toMatchObject({
       treatment: "others",
     });
+  });
+});
+
+describe("gst44Worksheet policy beats prior year (addendum 2026-09-26e)", () => {
+  it("an electricity ledger seeds by the policy rule even when the prior year named it first", () => {
+    const prior = {
+      revenue: new Map([["electricity charges paid", { label: "Electricity Charges Paid", treatment: "unregistered" as const, split: false, profile: "unregistered (H) 3,00,000.00" }]]),
+      capital: new Map(),
+    };
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Electricity Charges Paid", 300000], ["Prime Haulage", -300000]])],
+      ctxOf({}),
+      { ...base, masterNames: masters(["Electricity Charges Paid", "Prime Haulage"]), prior },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Electricity Charges Paid")!;
+    expect(row.seed).toMatchObject({ treatment: "exempt", kind: "policy keyword" });
+    expect(row.seed!.reason).toContain("electricity");
+    expect(r.findings.some((f) => f.check === "gst44_ws_prior_year_changed")).toBe(true);
+  });
+
+  it("a prior-year agreement is noted as secondary in the reason", () => {
+    const prior = {
+      revenue: new Map([["electricity charges paid", { label: "Electricity Charges Paid", treatment: "exempt" as const, split: false, profile: "exempt (D) 3,00,000.00" }]]),
+      capital: new Map(),
+    };
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Electricity Charges Paid", 300000], ["Prime Haulage", -300000]])],
+      ctxOf({}),
+      { ...base, masterNames: masters(["Electricity Charges Paid", "Prime Haulage"]), prior },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Electricity Charges Paid")!;
+    expect(row.seed!.kind).toBe("policy keyword");
+    expect(row.seed!.reason).toContain("FY 24-25 agreed");
+    expect(r.findings.some((f) => f.check === "gst44_ws_prior_year_changed")).toBe(false);
   });
 });
