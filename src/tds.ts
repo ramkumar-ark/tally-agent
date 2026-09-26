@@ -1060,6 +1060,14 @@ export function analyzeTds(
     monthCredit.set(mk, (monthCredit.get(mk) ?? 0) + d.tax);
   }
 
+  // The tax of a deduction the review treats as paid by the s.139(1) due date:
+  // a 1:1 joined deposit wins, else the month pool's cover or the return's
+  // subsequent-year challan. 21(b) rows carry this figure as `deposited`
+  // (2026-09-26 009) so a covered credit's deducted tax is never shown as owed.
+  const depositedByDue = (ded: TdsDeduction): number =>
+    events.deposits.find((e) => e.deduction === ded)?.tax ??
+    (ded.depositCovered || ded.subsequentDeposit ? ded.tax : 0);
+
   for (const agg of aggs.values()) {
     const section = agg.section;
     const law = lawOf(section)!;
@@ -1173,9 +1181,7 @@ export function analyzeTds(
             voucherNumber: b.voucherNumber,
             gross: b.gross,
             tdsDone: ded.tax,
-            tdsDeposited:
-              dep?.tax ??
-              (ded.depositCovered || ded.subsequentDeposit ? ded.tax : 0),
+            tdsDeposited: depositedByDue(ded),
             depositDate: dep?.date ?? ded.subsequentDeposit ?? null,
             liability,
           },
@@ -1350,6 +1356,16 @@ export function analyzeTds(
             section, reason: "not_deducted", liability: liab, findingId: qId,
           });
         } else {
+          // The month's deducted credits are one pool; the deposited column
+          // counts whatever the review's own coverage sees paid by the s.139(1)
+          // due date (a joined deposit, a month-pool cover or a subsequent-year
+          // challan). 194Q raises no tds_not_deposited, so a covered month
+          // reports deposited = done.
+          const monthDeposited = round2(
+            events.deductions
+              .filter((d) => d.section === section && `${deducteeKeyOf(ctx, d.party)}|${section}|${d.date.slice(0, 6)}` === mk)
+              .reduce((sum, d) => sum + depositedByDue(d), 0),
+          );
           stageShort(
             m.party,
             section,
@@ -1360,7 +1376,7 @@ export function analyzeTds(
               voucherNumber: "",
               gross: m.gross,
               tdsDone: round2(cred),
-              tdsDeposited: 0,
+              tdsDeposited: monthDeposited,
               depositDate: null,
               liability: liab,
             },
@@ -1453,7 +1469,17 @@ export function analyzeTds(
     );
     clause21b.push({
       party: d.party, date: d.date, voucherNumber: d.voucherNumber,
-      gross: d.drawGross ?? 0,
+      // The disallowed expenditure is this deduction's proportional share of
+      // the section's whole booking base (2026-09-26o item 041 logic, split
+      // per draw for 21(b)): section gross × (this credit's tax / the
+      // section's total tax). A section with no booking base keeps the draw.
+      gross: (() => {
+        const sectionGross = timingSectionGross.get(section) ?? 0;
+        const totalTax = timingSectionTax.get(section) ?? 0;
+        return sectionGross > ZERO && totalTax > ZERO
+          ? round2(sectionGross * (d.tax / totalTax))
+          : (d.drawGross ?? 0);
+      })(),
       tdsDone: d.tax, tdsDeposited: 0, depositDate: null,
       section, reason: "not_deposited", liability: d.tax, findingId: timingId,
     });

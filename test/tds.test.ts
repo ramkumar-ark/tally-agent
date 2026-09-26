@@ -1573,13 +1573,23 @@ describe("2026-09-26m 194-I aggregate threshold + 194Q month matching", () => {
   });
 
   it("194Q: partial month credits raise one short finding for the shortfall", () => {
-    const duty = [{ ledger: "TDS Purchase 194Q", rows: [row("20260131", "J/9", -600, partyA)] }];
+    const duty = [{ ledger: "TDS Purchase 194Q", rows: [row("20260131", "J/9", -600, partyA), row("20260210", "J/10", 600, partyA)] }];
     const out = run(tdsCtx(qOp), duty, qExpense);
     expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
     const sh = ofCheck(out, "tds_short_deducted");
     expect(sh).toHaveLength(1);
     expect(sh[0].amount).toBe(500);
     expect(sh[0].detail).toContain("fall short");
+    // The month's deducted 600 is covered by the 600 deposit debit, so the
+    // 21(b) short row reports it as deposited: the review raises no 194Q
+    // not_deposited, and the deducted tax was paid (2026-09-26 009).
+    expect(out.clause21b).toHaveLength(1);
+    expect(out.clause21b[0]).toMatchObject({
+      section: "194Q",
+      reason: "short_deducted",
+      tdsDone: 600,
+      tdsDeposited: 600,
+    });
   });
 });
 

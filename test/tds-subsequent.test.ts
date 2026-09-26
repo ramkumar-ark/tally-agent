@@ -346,4 +346,38 @@ describe("clause 21(b) engine rows (2026-09-26 005)", () => {
       { party: "Partner Beta", gross: 2000000, done: 200000, reason: "not_deposited" },
     ]);
   });
+
+  it("names each 194T partner's expense as the section's proportional base, not the draw (2026-09-26 009)", () => {
+    // A 40,00,000 partner-remuneration booking carries one lump 4,00,000 duty
+    // credit split across two partner draws (1,00,000 / 3,00,000 → tax
+    // 1,00,000 / 3,00,000). Nothing is deposited. The clause 21(b) expense is
+    // the expenditure whose tax went unpaid — 40,00,000 × each partner's share
+    // of the section's tax = 10,00,000 / 30,00,000 — not the draw itself.
+    const duty194T: TdsLedgerRows = {
+      ledger: DUTY,
+      rows: [
+        {
+          ...row("20250910", "J/1", -400000, "Partners Current"),
+          draws: [
+            { ledger: "Partner Alpha", amount: 100000 },
+            { ledger: "Partner Beta", amount: 300000 },
+          ],
+        },
+      ],
+    };
+    const expense194T: TdsLedgerRows = {
+      ledger: "Partner Remuneration",
+      rows: [row("20250910", "J/1", 4000000, "Partners Current")],
+    };
+    const ctx194T: TdsCtx & { operator: OperatorFile } = {
+      ...ctxWith([]),
+      resolveSection: (l: string) => ({ section: "194T", candidates: [] }),
+      dutySectionOf: () => "194T",
+    };
+    const { clause21b } = analyzeTds([duty194T], [expense194T], [], ctx194T);
+    expect(clause21b.map((r) => ({ party: r.party, gross: r.gross, done: r.tdsDone, deposited: r.tdsDeposited }))).toEqual([
+      { party: "Partner Alpha", gross: 1000000, done: 100000, deposited: 0 },
+      { party: "Partner Beta", gross: 3000000, done: 300000, deposited: 0 },
+    ]);
+  });
 });
