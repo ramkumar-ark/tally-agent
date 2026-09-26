@@ -64,4 +64,9 @@ describe("dep3cd disposals", () => {
     const r = buildDisposals(classifyMovements(withPl, ctx), withPl, ctx);
     expect(r.findings.filter((f) => /disposal_/.test(f.check))).toEqual([]);
   });
+  it("a 'Deduct from 2nd half' adjustment matching no deletion throws citing its row", () => {
+    const c = fixtureCtx({ operator: { groupBlocks: new Map(), ledgerBlocks: new Map(), adjustments: [
+      { ledger: "Old Tractor", date: "20251215", voucherNumber: "Nope", action: "Deduct from 2nd half", amount: null, row: 4 }] } });
+    expect(() => buildDisposals(classifyMovements(D3_VOUCHERS, c), D3_VOUCHERS, c)).toThrow(/row 4/);
+  });
 });

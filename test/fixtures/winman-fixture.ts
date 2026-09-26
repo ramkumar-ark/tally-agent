@@ -460,7 +460,7 @@ const depRow1 = (formId: string) =>
   `<row r="1" hidden="1">${depIstr("A1", formId)}${depIstr("B1", "Depreciation")}${depIstr("C1", "7")}${depIstr("D1", "18.05.01.*.00")}</row>`;
 
 /** Prototype rows: additions A..G = 92/93/94/95/96/94/92, deletions F = 96. */
-const depPrototype = (styles = ["92", "92", "93", "94", "95", "96", "92"]) =>
+const depPrototype = (styles = ["92", "93", "94", "95", "96", "94", "92"]) =>
   `<row r="6" hidden="1">${["A", "B", "C", "D", "E", "F", "G"].map((c, i) => `<c r="${c}6" s="${styles[i]}" t="inlineStr"><is><t>-</t></is></c>`).join("")}</row>`;
 
 const depAdditionsSheet = (formId: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -469,7 +469,7 @@ ${depRow1(formId)}
 <row r="2" hidden="1">${depIstr("A2", "FISTCOL")}${depIstr("C2", "DATE")}${depIstr("D2", "AMOUNT")}${depIstr("E2", "DEPRECIATION")}${depIstr("F2", "TOUSE")}${depIstr("G2", "APPLICABLE")}</row>
 <row r="4"><c r="A4" t="inlineStr"><is><t>Depreciation additions</t></is></c></row>
 <row r="5"><c r="A5" t="inlineStr"><is><t>1.05.01</t></is></c></row>
-${depPrototype(["92", "92", "93", "94", "95", "96", "92"])}
+${depPrototype(["92", "93", "94", "95", "96", "94", "92"])}
 </sheetData><dataValidations count="3">
 <dataValidation type="list" sqref="A7:A1000" allowBlank="1" errorStyle="warning"><formula1>Sheet_1_ListCol_1</formula1></dataValidation>
 <dataValidation type="list" sqref="E7:E1000" allowBlank="1" errorStyle="warning"><formula1>"N/A,No,Yes"</formula1></dataValidation>
@@ -482,7 +482,7 @@ ${depRow1(formId)}
 <row r="2" hidden="1">${depIstr("A2", "DELETIONDTLS")}${depIstr("C2", "DATE")}${depIstr("D2", "AMOUNT")}${depIstr("E2", "HALFADD")}${depIstr("F2", "DEPN")}${depIstr("G2", "APPLICABLE")}</row>
 <row r="4"><c r="A4" t="inlineStr"><is><t>Depreciation deletions</t></is></c></row>
 <row r="5"><c r="A5" t="inlineStr"><is><t>1.06.01</t></is></c></row>
-${depPrototype(["92", "92", "93", "94", "95", "96", "92"])}
+${depPrototype(["92", "93", "94", "95", "96", "96", "92"])}
 </sheetData><dataValidations count="3">
 <dataValidation type="list" sqref="A7:A1000" allowBlank="1" errorStyle="warning"><formula1>Sheet_2_ListCol_1</formula1></dataValidation>
 <dataValidation type="list" sqref="E7:E1000" allowBlank="1" errorStyle="warning"><formula1>"No,Yes"</formula1></dataValidation>

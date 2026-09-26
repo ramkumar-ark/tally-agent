@@ -1359,7 +1359,7 @@ let lastGst44: Gst44ReviewResult | undefined;
         const pkg = readXlsm(await readFile(args.sourcePath));
         const additions = readListValues(pkg, "Depreciation additions", "FISTCOL");
         const deletions = readListValues(pkg, "Depreciation deletions", "DELETIONDTLS");
-        if (additions.length > 0 && deletions.length > 0) blockLists = { additions, deletions };
+        if (additions.length > 0 || deletions.length > 0) blockLists = { additions, deletions };
       }
       const buf = buildDep3cdTemplate({
         company: args.company,

@@ -376,8 +376,9 @@ overrode a plan default, the shipped code and this document follow the answer.
   `4. Furnitures/ fittings 10%:` (Q2's mapping, applied at generation).
 - **R5** A `Consideration` adjustment may match no movement: it then creates the deletion
   (closing D3CD-006). Every other Action still throws when unmatched.
-- **R6** The write test pins the DATE cell's real twin style (`s="81"`) and the fixture's
-  five pre-data rows; the brief's guessed style and row count were corrected.
+- **R6** The write test pins the DATE cell's real twin style (`s="86"`, per §1.2's
+  prototype 94 → twin 86) and the fixture's five pre-data rows; the brief's guessed
+  style and row count were corrected.
 
 Findings 10 (`d3cd_charge_capitalised_for_tax`) is retained in the ordinal table for
 forward compatibility but is unreachable while R1 holds.

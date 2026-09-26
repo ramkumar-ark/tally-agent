@@ -31,7 +31,7 @@ describe("write3cdDepreciation", () => {
     const add = partText(pkg, readSchema(pkg, "Depreciation additions").partName);
     expect(add).toContain("5. Plant/ Machinery 15%:");
     expect(add).toContain("N/A");
-    expect(add).toContain(`<c r="C7" s="81"><v>${serial("20250408")}</v></c>`);
+    expect(add).toContain(`<c r="C7" s="86"><v>${serial("20250408")}</v></c>`);
     for (const real of ["Mixer Unit", "Site Van", "Store Box"]) expect(add).not.toContain(real);
     const del = partText(pkg, readSchema(pkg, "Depreciation deletions").partName);
     expect(del).toContain("<v>300000</v>");

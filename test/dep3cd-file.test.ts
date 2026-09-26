@@ -16,13 +16,13 @@ describe("dep3cd template", () => {
     const g = sheets.find((s) => s.name === "Groups")!;
     const cell = (r: number, c: number) => g.rows.find((x) => x.row === r)?.cells.get(c)?.value ?? null;
     expect(cell(2, 2)).toBe("5. Plant/ Machinery 15%:");
-    expect(cell(3, 2)).toBeNull();
+    expect(cell(3, 2)).toBe("7. Plant/ Machinery 40%:");
     expect(cell(3, 3)).toBe("3. Buildings 40%: / 7. Plant/ Machinery 40%:");
     expect(sheets.find((s) => s.name === "Blocks")!.state).toBe("hidden");
   });
   it("the untouched template parses to the pre-filled group map and empty overrides", () => {
     const p = parseDep3cdTemplate(buildDep3cdTemplate(input));
-    expect([...p.operator.groupBlocks]).toEqual([["block 15%", "5. Plant/ Machinery 15%:"]]);
+    expect([...p.operator.groupBlocks]).toEqual([["block 15%", "5. Plant/ Machinery 15%:"], ["block 40%", "7. Plant/ Machinery 40%:"]]);
     expect(p.operator.ledgerBlocks.size).toBe(0);
     expect(p.operator.adjustments).toEqual([]);
     expect(p.blockLists?.deletions).toHaveLength(10);

@@ -105,9 +105,26 @@ function candidatesFor(list: readonly string[], rate: number | null): string[] {
 }
 
 /**
- * Build the operator template. The Winman block column is pre-filled only
- * where the additions list gives one unambiguous inference; the ambiguous
- * rows carry their candidates instead. Both block columns are backed by a
+ * Two rates are ambiguous in the real list (40 is Buildings or Plant/Machinery,
+ * 10 is Buildings or Furniture). The captain fixed the default: 40 -> item 7,
+ * 10 -> item 4, so the template pre-fills them rather than leaving them blank.
+ */
+const RATE_DEFAULT_ITEM: Record<number, RegExp> = {
+  40: /^7\.\s/,
+  10: /^4\.\s/,
+};
+
+function defaultBlockFor(list: readonly string[], rate: number | null): string | null {
+  const re = rate === null ? undefined : RATE_DEFAULT_ITEM[rate];
+  if (!re) return null;
+  return list.find((b) => rateOfBlock(b) === rate && re.test(b.trim())) ?? null;
+}
+
+/**
+ * Build the operator template. The Winman block column is pre-filled where the
+ * additions list gives one unambiguous inference, and for the two ambiguous
+ * rates the captain fixed (40 and 10); the remaining ambiguous rows carry their
+ * candidates. Both block columns are backed by a
  * cross-sheet range on the hidden `Blocks` sheet (never an inline list — the
  * block strings carry "/" and ":" and a real company's list can grow).
  */
@@ -121,7 +138,7 @@ export function buildDep3cdTemplate(input: Dep3cdTemplateInput): Buffer {
 
   const groupRows: Array<Array<string | number | null>> = input.groups.map((g) => {
     const cands = candidatesFor(additions, g.rate);
-    const prefill = cands.length === 1 ? cands[0] : null;
+    const prefill = cands.length === 1 ? cands[0] : defaultBlockFor(additions, g.rate);
     return [g.name, g.rate, prefill, cands.length > 1 ? cands.join(" / ") : null];
   });
 

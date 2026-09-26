@@ -47,6 +47,14 @@ describe("dep3cd acquisitions", () => {
       { ledger: "Store Box", date: "20250702", voucherNumber: "P-9", action: "Exclude", amount: null, row: 7 }] } });
     expect(() => buildAcquisitions(classifyMovements(D3_VOUCHERS, c3), c3)).toThrow(/row 7/);
   });
+  it("a depreciation reversal (asset debit) is not an addition", () => {
+    const rev = [...D3_VOUCHERS, { date: "20260331", voucherType: "Journal", voucherNumber: "J-9", partyLedgerName: "",
+      cancelled: false, entries: [{ ledger: "Mixer Unit", amount: 5000 }, { ledger: "Depreciation", amount: -5000 }] }];
+    const m = classifyMovements(rev, ctx).find((x) => x.voucherNumber === "J-9");
+    expect(m?.kind).toBe("depreciation");
+    const adds = buildAcquisitions(classifyMovements(rev, ctx), ctx).additions;
+    expect(adds.some((a) => a.parts.some((p) => p.voucherNumber === "J-9"))).toBe(false);
+  });
   it("finding details never carry a bare 6+ digit run", () => {
     for (const f of findings) expect(f.detail).not.toMatch(/\d{6,}/);
   });

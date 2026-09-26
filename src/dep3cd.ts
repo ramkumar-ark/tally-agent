@@ -104,6 +104,7 @@ export function classifyMovements(vouchers: VoucherRow[], ctx: Dep3cdCtx): Asset
       let basis: "transfer" | "receipt" | undefined;
       if (entry.amount > 0) {
         if (SALE_PL_NAME.test(counter) || inIncome) kind = "sale_pl";
+        else if (inExpense && DEPRECIATION_NAME.test(counter)) kind = "depreciation";
         else if (counterIsAsset) kind = "transfer";
         else if (PURCHASE_VOUCHER.test(String(v.voucherType ?? ""))) kind = "purchase";
         else kind = "capitalised";
@@ -475,7 +476,12 @@ export function buildDisposals(
         };
         deletions.push(makeDeletion(a.ledger, stub, a.amount, "operator", 0));
       }
-    } else if (a.action === "Deduct from 2nd half" && existing) {
+    } else if (a.action === "Deduct from 2nd half") {
+      if (!existing) {
+        throw new Error(
+          `Adjustments row ${a.row} says "Deduct from 2nd half" but matches no deletion in the books; correct or remove the row`,
+        );
+      }
       existing.halfAdd = "Yes";
     }
   }
