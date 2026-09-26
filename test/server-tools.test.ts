@@ -30,6 +30,7 @@ describe("tool surface", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",
+      "tb_dep3cd_review",
       "tb_depreciation_review",
       "tb_fixed_asset_register",
       "tb_gst44_review",
@@ -44,10 +45,13 @@ describe("tool surface", () => {
       "tb_tds_review",
       "tb_write_26as_report",
       "tb_write_26as_template",
+"tb_write_3cd_depreciation",
       "tb_write_3cd_gst44",
       "tb_write_3cd_loans",
       "tb_write_3cd_pf_esi",
       "tb_write_3cd_tds_tcs",
+      "tb_write_dep3cd_report",
+      "tb_write_dep3cd_template",
       "tb_write_depreciation_report",
       "tb_write_fixed_asset_report",
       "tb_write_gst44_report",

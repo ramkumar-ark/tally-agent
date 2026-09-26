@@ -12,7 +12,9 @@ import type {
   As26ReviewResult,
   Gst44MaskedFinding,
   Gst44MaskedParty,
+  Dep3cdReviewResult,
 } from "./review.js";
+import type { Dep3cdAddition, Dep3cdDeletion } from "./dep3cd.js";
 import type { Clause20bRow } from "./pf-esi.js";
 import type { Gst44Row } from "./gst44.js";
 import { GST44_BUCKETS } from "./gst44-law.js";
@@ -1491,4 +1493,108 @@ export async function writeAs26Report(opts: {
     vault: opts.vault,
   });
   return { markdownPath, workbookPath };
+}
+
+/** A date cell is display-formatted when it is a bare YYYYMMDD run, so no
+ *  workbook cell can ever be an 8-digit string (scrubDigits food). */
+const dep3cdDateCell = (d: string | undefined): string =>
+  d && /^\d{8}$/.test(d) ? displayDate(d) : (d ?? "");
+
+/**
+ * The clause 18 working paper (R-R-4), de-masked on the way to disk by
+ * writeWorkbook. The raw cached rows carry real names, so they pass through
+ * unaliased; the findings are masked and de-mask through the vault. Both
+ * channels arrive correct by construction.
+ */
+export async function writeDep3cdReport(opts: {
+  reportDir: string;
+  result: Pick<Dep3cdReviewResult, "company" | "fromDate" | "toDate" | "findings">;
+  rows: { additions: Dep3cdAddition[]; deletions: Dep3cdDeletion[] };
+  vault: Vault;
+}): Promise<{ workbookPath: string }> {
+  const stem = opts.result.fromDate && opts.result.toDate
+    ? `${slug(opts.result.company ?? "dep3cd")}-${opts.result.fromDate}-${opts.result.toDate}`
+    : slug(opts.result.company ?? "dep3cd");
+  const workbookPath = join(opts.reportDir, `dep3cd-review-${stem}.xlsx`);
+
+  const additionsSheet: Sheet = {
+    name: "Additions",
+    columns: [
+      textCol("Asset ledger", 28),
+      textCol("Winman block", 26),
+      textCol("Purchase date", 14),
+      textCol("Put to use", 14),
+      moneyCol("Amount"),
+      textCol("Parts", 7),
+      textCol("Second half", 11),
+      textCol("Orphan", 8),
+    ],
+    rows: opts.rows.additions.map((a) => [
+      a.ledger,
+      a.block ?? "",
+      dep3cdDateCell(a.purchaseDate),
+      dep3cdDateCell(a.putToUse),
+      a.amount,
+      String(a.parts.length),
+      a.secondHalf ? "Yes" : "No",
+      a.orphan ? "Yes" : "No",
+    ]),
+  };
+
+  const partsSheet: Sheet = {
+    name: "Parts",
+    columns: [
+      textCol("Asset ledger", 28),
+      textCol("Date", 14),
+      textCol("Voucher", 16),
+      textCol("Kind", 14),
+      moneyCol("Amount"),
+    ],
+    rows: opts.rows.additions.flatMap((a) =>
+      a.parts.map((p) => [a.ledger, dep3cdDateCell(p.date), p.voucherNumber, p.kind, p.amount] as CellValue[]),
+    ),
+  };
+
+  const deletionsSheet: Sheet = {
+    name: "Deletions",
+    columns: [
+      textCol("Asset ledger", 28),
+      textCol("Winman block", 26),
+      textCol("Date", 14),
+      moneyCol("Consideration"),
+      textCol("Basis", 12),
+      moneyCol("Book credit"),
+      textCol("HALFADD", 9),
+    ],
+    rows: opts.rows.deletions.map((d) => [
+      d.ledger,
+      d.block ?? "",
+      dep3cdDateCell(d.date),
+      d.amount,
+      d.basis,
+      d.bookCredit,
+      d.halfAdd,
+    ]),
+  };
+
+  const depFindingsSheet: Sheet = {
+    name: "Findings",
+    columns: [
+      { header: "id", width: 16, format: "text" },
+      { header: "check", width: 36, format: "text" },
+      { header: "severity", width: 10, format: "text" },
+      { header: "ledger", width: 28, format: "text" },
+      moneyCol("Amount"),
+      { header: "detail", width: 70, format: "text" },
+    ],
+    rows: opts.result.findings.map((f) => [f.id, f.check, f.severity, f.ledger, f.amount, f.detail]),
+  };
+
+  await writeWorkbook({
+    reportDir: opts.reportDir,
+    fileName: `dep3cd-review-${stem}.xlsx`,
+    sheets: [additionsSheet, partsSheet, deletionsSheet, depFindingsSheet],
+    vault: opts.vault,
+  });
+  return { workbookPath };
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -13,6 +13,11 @@ import {
   buildLoansTemplateWorkbook,
   loansTemplateFileName,
 } from "./loans-file.js";
+import { buildDep3cdTemplate, dep3cdTemplateFileName } from "./dep3cd-file.js";
+import { DEFAULT_BLOCK_LISTS } from "./dep3cd-law.js";
+import { parseRateFromGroup } from "./depreciation.js";
+import { readXlsm } from "./xlsm.js";
+import { readListValues } from "./winman3cd.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
 import { buildGst44Template, gst44TemplateFileName } from "./gst44-template.js";
@@ -39,6 +44,7 @@ import {
   writeAs26Report,
   writePfEsiReport,
   writeLoansReport,
+  writeDep3cdReport,
   writeTdsReport,
   writeVaultDump,
 } from "./report.js";
@@ -46,6 +52,7 @@ import {
   createSession,
   type As26ReviewResult,
   type DepReviewResult,
+  type Dep3cdReviewResult,
   type FaReviewResult,
   type Gst44ReviewResult,
   type GstMismatchResult,
@@ -141,7 +148,8 @@ export function registerTools(
   let lastFa: FaReviewResult | undefined;
   let lastPfEsi: PfEsiReviewResult | undefined;
   let lastLoans: LoansReviewResult | undefined;
-  let lastGst44: Gst44ReviewResult | undefined;
+let lastGst44: Gst44ReviewResult | undefined;
+  let lastDep3cd: Dep3cdReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
 
@@ -1312,6 +1320,192 @@ export function registerTools(
         { company: company ?? null, outDir: args.outDir ?? null },
         lastLoans.findings.length,
         maskedCount(lastLoans.findings),
+      );
+      if (cfg.dumpVault) {
+        await writeVaultDump(cfg.reportDir, sessionId, session.vault);
+      }
+      return JSON.stringify(paths, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_dep3cd_template",
+    "Generate the fillable Excel clause-18 depreciation operator template " +
+      "(dep3cd-operator-template-<company>-<date>.xlsx) into the report directory and return its path. " +
+      "It pre-fills the fixed-asset groups and asset ledgers from the day-book masters (pass dayBookPath - " +
+      "a PATH, never pasted contents) and back-fills the Winman-block dropdowns from its hidden Blocks " +
+      "sheet (from sourcePath's workbook lists when given, else the built-in AY 2026-27 list). Fill the " +
+      "group/ledger block choices and any Adjustment rows in Excel, then pass its path to tb_dep3cd_review " +
+      "as templatePath - never paste its rows into chat.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+      dayBookPath: z.string().describe(
+        "PATH to the operator day-book JSON export; its groups and ledgers fill the template. Required.",
+      ),
+      sourcePath: z.string().optional().describe(
+        "Optional PATH to the Winman depreciation workbook whose block lists the dropdowns should carry; " +
+          "read only, never written.",
+      ),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+    },
+    async (args) => {
+      if (!args.dayBookPath) {
+        throw new Error("pass dayBookPath: the fixed-asset ledgers come from the day-book masters");
+      }
+      const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+      const mp = readDayBookMasterPairs(text, args.company ?? cfg.defaultCompany);
+      let blockLists: { additions: readonly string[]; deletions: readonly string[] } = DEFAULT_BLOCK_LISTS;
+      if (args.sourcePath) {
+        const pkg = readXlsm(await readFile(args.sourcePath));
+        const additions = readListValues(pkg, "Depreciation additions", "FISTCOL");
+        const deletions = readListValues(pkg, "Depreciation deletions", "DELETIONDTLS");
+        if (additions.length > 0 && deletions.length > 0) blockLists = { additions, deletions };
+      }
+      const buf = buildDep3cdTemplate({
+        company: args.company,
+        groups: mp.groups.map((g) => ({ name: g.name, rate: parseRateFromGroup(g.name) })),
+        ledgers: mp.ledgers.map((l) => ({ name: l.name, group: l.parent })),
+        blockLists: { additions: [...blockLists.additions], deletions: [...blockLists.deletions] },
+      });
+      const outDir = args.outDir ?? cfg.reportDir;
+      await mkdir(outDir, { recursive: true });
+      const templatePath = join(outDir, dep3cdTemplateFileName(args.company, new Date().toISOString().slice(0, 10)));
+      await writeFile(templatePath, buf);
+      await audit(
+        "tb_write_dep3cd_template",
+        {
+          company: args.company ?? null,
+          dayBookPath: args.dayBookPath,
+          ...(args.sourcePath ? { sourcePath: args.sourcePath } : {}),
+          ...(args.outDir ? { outDir: args.outDir } : {}),
+        },
+        mp.ledgers.length,
+        0,
+      );
+      return JSON.stringify({ templatePath, groups: mp.groups.length, ledgers: mp.ledgers.length }, null, 2);
+    },
+  );
+
+  register(
+    "tb_dep3cd_review",
+    "Winman Form 3CD clause 18 depreciation as per the Income-tax Act: the additions and deletions " +
+      "sheets, one row per asset acquisition or sale. Additional depreciation is always N/A; deletions " +
+      "are recorded at the ACTUAL CONSIDERATION received (never the book value or the profit/loss on " +
+      "sale). A ledger with no resolvable Winman block is critical and its row is not written. " +
+      "Asset ledgers appear as pseudonyms such as 'Ledger 2'. Books come from an operator day-book export " +
+      "by dayBookPath (a PATH, never pasted contents). Optionally pass the filled operator template from " +
+      "tb_write_dep3cd_template as templatePath (block choices and Adjustment rows are read inside the " +
+      "gateway, never pasted into chat), and the Winman workbook as sourcePath so its actual block lists " +
+      "are used. Run tb_write_3cd_depreciation afterwards to write the Winman sheets.",
+    {
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      dayBookPath: z.string().describe(
+        "PATH to the operator day-book JSON export for the whole period; the books are read from that file.",
+      ),
+      templatePath: z.string().optional()
+        .describe("Path to the filled dep3cd-operator-template-*.xlsx; read inside the gateway, only the path is audited"),
+      sourcePath: z.string().optional()
+        .describe("Path to the Winman depreciation workbook, read only, so its real block lists drive block resolution"),
+      company: z.string().optional(),
+    },
+    async (args) => {
+      const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+      readDayBook(text, {
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+      });
+      const dayBookDigest = createHash("sha256").update(text).digest("hex");
+      const result = await session.dep3cdReview({
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        dayBookPath: args.dayBookPath,
+        templatePath: args.templatePath,
+        sourcePath: args.sourcePath,
+      });
+      lastDep3cd = result;
+      await audit(
+        "tb_dep3cd_review",
+        {
+          company: args.company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          dayBookPath: args.dayBookPath,
+          ...(args.templatePath ? { templatePath: args.templatePath } : {}),
+          ...(args.sourcePath ? { sourcePath: args.sourcePath } : {}),
+          dayBookDigest,
+        },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_3cd_depreciation",
+    "Write the clause 18 additions and deletions of the last tb_dep3cd_review into a COPY of the " +
+      "operator's Winman depreciation workbook and return the copy's path. The copy goes to the report " +
+      "directory (or outPath) as '<source stem> - filled - <date>.xlsm'; the source workbook is read only " +
+      "and is never modified, so never pass the Winman folder as outPath. Compose nothing by hand: the " +
+      "sheets carry the review's blocks, dates and amounts.",
+    {
+      sourcePath: z.string().describe("Path to the operator's Winman depreciation workbook (.xlsm); read only, never written"),
+      outPath: z.string().optional().describe("Directory for the filled copy; defaults to the report directory"),
+    },
+    async (args) => {
+      const r = await session.write3cdDepreciation({
+        sourcePath: args.sourcePath,
+        outPath: args.outPath ?? cfg.reportDir,
+      });
+      await audit("tb_write_3cd_depreciation", { sourcePath: args.sourcePath, outPath: args.outPath ?? null }, 0, 0);
+      return JSON.stringify(
+        {
+          outPath: r.written,
+          additions: r.additions,
+          deletions: r.deletions,
+          skipped: r.skipped,
+          notes: r.notes,
+        },
+        null,
+        2,
+      );
+    },
+  );
+
+  register(
+    "tb_write_dep3cd_report",
+    "Write the clause 18 depreciation review workbook to disk from the last tb_dep3cd_review: Additions, " +
+      "Parts, Deletions and Findings sheets so the auditor sees each acquired asset's cost, block and " +
+      "dates, every part of an acquisition, and each disposal's actual consideration against its book " +
+      "credit. Real names are restored on write; compose nothing by hand - it is generated from the cache.",
+    {
+      company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+    },
+    async (args) => {
+      if (!lastDep3cd || !session.dep3cdRows()) {
+        throw new Error("run tb_dep3cd_review first: there are no clause-18 rows to write");
+      }
+      const cached = session.dep3cdRows()!;
+      const paths = await writeDep3cdReport({
+        reportDir: args.outDir ?? cfg.reportDir,
+        result: {
+          company: args.company ?? lastDep3cd.company,
+          fromDate: lastDep3cd.fromDate,
+          toDate: lastDep3cd.toDate,
+          findings: lastDep3cd.findings,
+        },
+        rows: { additions: cached.additions, deletions: cached.deletions },
+        vault: session.vault,
+      });
+      await audit(
+        "tb_write_dep3cd_report",
+        { company: args.company ?? lastDep3cd.company ?? null, outDir: args.outDir ?? null },
+        lastDep3cd.findings.length,
+        maskedCount(lastDep3cd.findings),
       );
       if (cfg.dumpVault) {
         await writeVaultDump(cfg.reportDir, sessionId, session.vault);
