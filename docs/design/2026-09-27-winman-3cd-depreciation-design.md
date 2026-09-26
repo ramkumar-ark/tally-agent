@@ -399,4 +399,26 @@ and 3 deletion rows. Results are recorded below once run.
 
 ### 10.1 Live run
 
-_Pending: counts and per-block totals only, no names._
+Ran 2026-09-26 over the client day-book export (FY 2025-26) with the workbook as
+`sourcePath` (block lists read from it) and a template mapping `Block 40%` and
+`Block 10%` (both ambiguous by rate) plus `Block 15%`. Counts and per-block totals
+only; no names.
+
+| Side | Block | Rows | Amount |
+|---|---|---|---|
+| Additions | `5. Plant/ Machinery 15%:` | 15 | 1,40,66,502.37 |
+| Additions | `7. Plant/ Machinery 40%:` | 1 | 54,618.66 |
+| **Additions total** | | **16** | **1,41,21,121.03** |
+| Deletions | `5. Plant/ Machinery 15%:` | 3 | 20,14,000.00 |
+| **Deletions total** | | **3** | **20,14,000.00** |
+
+Row counts match the expectation above. Findings after the fix: one review
+(`d3cd_multiple_purchases_in_ledger`, two purchases on one date in one ledger);
+no critical. The first run raised a false critical `d3cd_disposal_unmatched`
+because a real company parks its `Profit on Sale of Fixed Asset A/c` **under
+Sales Accounts**; the disposal-credit scan now also excludes any ledger matching
+`SALE_PL_NAME` (the P/L line beside the asset), while the genuine `Sale of Fixed
+Asset A/c` — which does not match that pattern — still reconciles.
+
+Output: a new dated copy `<source> - filled - 20260926.xlsm` in the operator's
+Winman folder; the source workbook is never written.
