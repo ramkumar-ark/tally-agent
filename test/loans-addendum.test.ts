@@ -436,7 +436,7 @@ describe("template pre-fills the Exempt column", () => {
 describe("day-book reader carries pan/gstin/address/openingBalance additively", () => {
   const bundle = (ledgers: object[]): string =>
     JSON.stringify({
-      company: "RVS Constructions",
+      company: "Acme Builders",
       from: "20250401",
       to: "20260331",
       groups: [{ name: "Unsecured Loans", parent: "Loans (Liability)" }],
@@ -450,7 +450,7 @@ describe("day-book reader carries pan/gstin/address/openingBalance additively", 
         { name: "Nirosha - Loan A/c", parent: "Unsecured Loans", pan: "aaapl1234a", gstin: "33aaapl1234a1z5", address: "4 Nanda St", openingBalance: -300 },
         { name: "Plain A/c", parent: "Unsecured Loans" },
       ]),
-      "RVS Constructions",
+      "Acme Builders",
     );
     expect(env.ledgers).toEqual([
       { name: "Nirosha - Loan A/c", parent: "Unsecured Loans", pan: "AAAPL1234A", gstin: "33AAAPL1234A1Z5", address: "4 Nanda St", openingBalance: -300 },
@@ -461,19 +461,19 @@ describe("day-book reader carries pan/gstin/address/openingBalance additively", 
   it("strips un-decoded XML escapes from pan/gstin (4d)", () => {
     const env = readDayBookMasterPairs(
       bundle([
-        { name: "Khicha Lender", parent: "Loans (Liability)", pan: "AMCPK6481D&#13;&#10;", gstin: "33AMCPK6481D1Z5&#10;" },
+        { name: "Khicha Lender", parent: "Loans (Liability)", pan: "ABCDE1234F&#13;&#10;", gstin: "33ABCDE1234F1Z5&#10;" },
       ]),
-      "RVS Constructions",
+      "Acme Builders",
     );
     expect(env.ledgers).toEqual([
-      { name: "Khicha Lender", parent: "Loans (Liability)", pan: "AMCPK6481D", gstin: "33AMCPK6481D1Z5", address: null, openingBalance: null },
+      { name: "Khicha Lender", parent: "Loans (Liability)", pan: "ABCDE1234F", gstin: "33ABCDE1234F1Z5", address: null, openingBalance: null },
     ]);
   });
 
   it("an old bundle without the fields still loads", () => {
     const env = readDayBookMasterPairs(
       bundle([{ name: "Nirosha - Loan A/c", parent: "Unsecured Loans" }]),
-      "RVS Constructions",
+      "Acme Builders",
     );
     expect(env.ledgers).toEqual([
       { name: "Nirosha - Loan A/c", parent: "Unsecured Loans", pan: null, gstin: null, address: null, openingBalance: null },
@@ -483,7 +483,7 @@ describe("day-book reader carries pan/gstin/address/openingBalance additively", 
   it("a non-zero openingBalance round-trips through readDayBook (addendum 4a)", () => {
     const bundleText = JSON.stringify({
       tallyAgentExport: 1,
-      company: "RVS Constructions",
+      company: "Acme Builders",
       fromDate: "20250401",
       toDate: "20260331",
       groups: [{ name: "Unsecured Loans", parent: "Loans (Liability)" }],
@@ -496,7 +496,7 @@ describe("day-book reader carries pan/gstin/address/openingBalance additively", 
       ],
     });
     const out = readDayBook(bundleText, {
-      company: "rvs constructions",
+      company: "acme builders",
       fromDate: "20250401",
       toDate: "20260331",
     });

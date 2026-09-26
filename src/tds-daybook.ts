@@ -321,7 +321,7 @@ export function readDayBookLedgerNames(text: string, company?: string): string[]
  * Mirrors readDayBookLedgerNames' envelope checks; not a bundle ⇒ nulls.
  */
 /** 4d (2026-09-26): PAN/GSTIN arrive from Tally with un-decoded XML escapes
- * ("AMCPK6481D&#13;&#10;" in a real export); strip literal entity runs and
+ * ("ABCDE1234F&#13;&#10;" in a real export); strip literal entity runs and
  * control characters, then trim/uppercase — or PAN_SHAPE rejects the value
  * and the party's PAN cell renders blank. */
 export function normTaxId(v: unknown): string | null {
