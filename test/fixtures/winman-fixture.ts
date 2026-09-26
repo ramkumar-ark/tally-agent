@@ -421,3 +421,102 @@ function zipOf(files: ReadonlyArray<readonly [string, Buffer, 0 | 8]>): Buffer {
   eocd.writeUInt32LE(off, 16);
   return Buffer.concat([...locals, cd, eocd]);
 }
+
+/**
+ * Block lists as they appear in the real AY 2026-27 depreciation workbook's
+ * INTER dropdown lists. Deliberately duplicated here (not imported from
+ * src/dep3cd-law.ts) so the test compares the module against an independent
+ * copy of the workbook's data.
+ */
+const DEP_ADDITIONS_LIST = [
+  "1. Buildings 5%:", "2. Buildings 10%:", "3. Buildings 40%:", "4. Furnitures/ fittings 10%:",
+  "5. Plant/ Machinery 15%:", "6. Plant/ Machinery 30%:", "7. Plant/ Machinery 40%:",
+  "9. Ships/ vessels 20%:", "10. Intangible assets 25%:",
+];
+const DEP_DELETIONS_LIST = [
+  "1. Buildings 5%:", "2. Buildings 10%:", "3. Buildings 40%:", "4. Furnitures/ fittings 10%:",
+  "5. Plant/ Machinery 15%:", "6. Plant/ Machinery 30%:", "7. Plant/ Machinery 40%:",
+  "8. Plant/ Machinery 45%:", "9. Ships/ vessels 20%:", "10. Intangible assets 25%:",
+];
+
+const depStyles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="100">${Array.from({ length: 100 }, (_, i) => {
+  if (i === 77) return `<xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`;
+  if (i === 81) return `<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`;
+  if (i === 86) return `<xf numFmtId="49" fontId="0" fillId="4" borderId="0" xfId="0"/>`;
+  if (i === 89) return `<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`;
+  if (i === 92) return `<xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`;
+  if (i === 93) return `<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`;
+  if (i === 94) return `<xf numFmtId="49" fontId="0" fillId="4" borderId="0" xfId="0" quotePrefix="1"/>`;
+  if (i === 95) return `<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" quotePrefix="1"/>`;
+  if (i === 96) return `<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0"/>`;
+  return `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>`;
+}).join("")}</cellXfs></styleSheet>`;
+
+const depIstr = (ref: string, text: string) =>
+  `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
+
+const depRow1 = (formId: string) =>
+  `<row r="1" hidden="1">${depIstr("A1", formId)}${depIstr("B1", "Depreciation")}${depIstr("C1", "7")}${depIstr("D1", "18.05.01.*.00")}</row>`;
+
+/** Prototype rows: additions A..G = 92/93/94/95/96/94/92, deletions F = 96. */
+const depPrototype = (styles = ["92", "92", "93", "94", "95", "96", "92"]) =>
+  `<row r="6" hidden="1">${["A", "B", "C", "D", "E", "F", "G"].map((c, i) => `<c r="${c}6" s="${styles[i]}" t="inlineStr"><is><t>-</t></is></c>`).join("")}</row>`;
+
+const depAdditionsSheet = (formId: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G7"/><sheetData>
+${depRow1(formId)}
+<row r="2" hidden="1">${depIstr("A2", "FISTCOL")}${depIstr("C2", "DATE")}${depIstr("D2", "AMOUNT")}${depIstr("E2", "DEPRECIATION")}${depIstr("F2", "TOUSE")}${depIstr("G2", "APPLICABLE")}</row>
+<row r="4"><c r="A4" t="inlineStr"><is><t>Depreciation additions</t></is></c></row>
+<row r="5"><c r="A5" t="inlineStr"><is><t>1.05.01</t></is></c></row>
+${depPrototype(["92", "92", "93", "94", "95", "96", "92"])}
+</sheetData><dataValidations count="3">
+<dataValidation type="list" sqref="A7:A1000" allowBlank="1" errorStyle="warning"><formula1>Sheet_1_ListCol_1</formula1></dataValidation>
+<dataValidation type="list" sqref="E7:E1000" allowBlank="1" errorStyle="warning"><formula1>"N/A,No,Yes"</formula1></dataValidation>
+<dataValidation type="list" sqref="G7:G1000" allowBlank="1" errorStyle="warning"><formula1>"Yes,No"</formula1></dataValidation>
+</dataValidations></worksheet>`;
+
+const depDeletionsSheet = (formId: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G7"/><sheetData>
+${depRow1(formId)}
+<row r="2" hidden="1">${depIstr("A2", "DELETIONDTLS")}${depIstr("C2", "DATE")}${depIstr("D2", "AMOUNT")}${depIstr("E2", "HALFADD")}${depIstr("F2", "DEPN")}${depIstr("G2", "APPLICABLE")}</row>
+<row r="4"><c r="A4" t="inlineStr"><is><t>Depreciation deletions</t></is></c></row>
+<row r="5"><c r="A5" t="inlineStr"><is><t>1.06.01</t></is></c></row>
+${depPrototype(["92", "92", "93", "94", "95", "96", "92"])}
+</sheetData><dataValidations count="3">
+<dataValidation type="list" sqref="A7:A1000" allowBlank="1" errorStyle="warning"><formula1>Sheet_2_ListCol_1</formula1></dataValidation>
+<dataValidation type="list" sqref="E7:E1000" allowBlank="1" errorStyle="warning"><formula1>"No,Yes"</formula1></dataValidation>
+<dataValidation type="list" sqref="G7:G1000" allowBlank="1" errorStyle="warning"><formula1>"Yes,No"</formula1></dataValidation>
+</dataValidations></worksheet>`;
+
+const depInterSheet = (additions: string[], deletions: string[]) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:G36"/><sheetData>
+<row r="1">${depIstr("A1", "$WiNsArAlXlImPoRt2$")}${depIstr("B1", "9.6.1")}${depIstr("C1", "1623")}${depIstr("D1", "2026-2027")}${depIstr("E1", "F")}${depIstr("F1", "#DepreciationNew$1214|")}<c r="G1"><v>1</v></c></row>
+${additions.map((s, i) => `<row r="${8 + i}">${depIstr(`A${8 + i}`, s)}</row>`).join("")}
+${deletions.map((s, i) => `<row r="${27 + i}">${depIstr(`A${27 + i}`, s)}</row>`).join("")}
+</sheetData></worksheet>`;
+
+/**
+ * A synthetic Winman clause-18 depreciation workbook with both data sheets
+ * ("Depreciation additions", "Depreciation deletions"), the INTER handshake and
+ * its block-list cells, and the two defined names the dropdowns resolve
+ * through. Every value is invented; no client data.
+ */
+export function makeDepWinmanFixture(opts: { formId?: string; additionsList?: string[] } = {}): Buffer {
+  const formId = opts.formId ?? "DepreciationNew";
+  const additions = opts.additionsList ?? DEP_ADDITIONS_LIST;
+  const parts = [
+    part("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>`),
+    part("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
+    part("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Depreciation additions" sheetId="2" state="hidden" r:id="rId1"/><sheet name="Depreciation deletions" sheetId="3" state="hidden" r:id="rId2"/><sheet name="INTER" sheetId="9" state="hidden" r:id="rId3"/></sheets><definedNames><definedName name="Sheet_1_ListCol_1">INTER!$A$8:$A$16</definedName><definedName name="Sheet_2_ListCol_1">INTER!$A$27:$A$36</definedName></definedNames></workbook>`),
+    part("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>`),
+    part("xl/worksheets/sheet1.xml", depAdditionsSheet(formId)),
+    part("xl/worksheets/sheet2.xml", depDeletionsSheet(formId)),
+    part("xl/worksheets/sheet3.xml", depInterSheet(additions, DEP_DELETIONS_LIST)),
+    part("xl/styles.xml", depStyles),
+  ];
+  const bins: Array<readonly [string, Buffer, 0 | 8]> = [
+    ["xl/vbaProject.bin", Buffer.from("MACRO\u0000\u0001BYTES", "binary"), 8],
+  ];
+  return zipOf([...parts.map(([n, b]) => [n, b, 8] as const), ...bins]);
+}

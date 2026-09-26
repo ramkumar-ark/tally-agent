@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { partText, readXlsm, replacePart, writeXlsm } from "../src/xlsm.js";
-import { readSchema, readHandshake, resolveStyleTwins, writeSheetRows } from "../src/winman3cd.js";
-import { makeWinmanFixture, PF_PART } from "./fixtures/winman-fixture.js";
+import { readSchema, readHandshake, readListValues, resolveStyleTwins, writeSheetRows } from "../src/winman3cd.js";
+import { makeWinmanFixture, makeDepWinmanFixture, PF_PART } from "./fixtures/winman-fixture.js";
+import { DEFAULT_BLOCK_LISTS } from "../src/dep3cd-law.js";
 
 describe("winman schema", () => {
   const pkg = readXlsm(makeWinmanFixture());
@@ -119,5 +120,29 @@ describe("winman data rows", () => {
     const { twins, stylesXml } = resolveStyleTwins(partText(readXlsm(makeWinmanFixture()), "xl/styles.xml"), [93]);
     expect(twins.get(93)).toBe(94);
     expect(stylesXml).toContain('count="95"');
+  });
+});
+
+describe("readListValues", () => {
+  const pkg = readXlsm(makeDepWinmanFixture());
+  it("resolves the additions block dropdown through its defined name", () => {
+    expect(readListValues(pkg, "Depreciation additions", "FISTCOL")).toEqual([...DEFAULT_BLOCK_LISTS.additions]);
+  });
+  it("resolves the deletions block dropdown including the 45% item", () => {
+    expect(readListValues(pkg, "Depreciation deletions", "DELETIONDTLS")).toEqual([...DEFAULT_BLOCK_LISTS.deletions]);
+  });
+  it("reads the Yes/No/N-A lists", () => {
+    expect(readListValues(pkg, "Depreciation additions", "DEPRECIATION")).toEqual(["N/A", "No", "Yes"]);
+    expect(readListValues(pkg, "Depreciation deletions", "HALFADD")).toEqual(["No", "Yes"]);
+  });
+  it("returns [] for a column with no validation", () => {
+    expect(readListValues(pkg, "Depreciation additions", "AMOUNT")).toEqual([]);
+  });
+  it("the fixture's schema matches the real workbook's", () => {
+    readHandshake(pkg);
+    const s = readSchema(pkg, "Depreciation additions");
+    expect(s.formId).toBe("DepreciationNew");
+    expect(s.firstDataRow).toBe(7);
+    expect([...s.keys]).toEqual([["FISTCOL", 0], ["DATE", 2], ["AMOUNT", 3], ["DEPRECIATION", 4], ["TOUSE", 5], ["APPLICABLE", 6]]);
   });
 });

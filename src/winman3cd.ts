@@ -568,3 +568,80 @@ export function writeSheetRows(pkg: XlsmPackage, sheetName: string, rows: Winman
   if (stylesPart && nextStyles !== stylesXml) out = replacePart(out, stylesPart, nextStyles);
   return out;
 }
+
+// ------------------------------------------------- validation dropdown lists
+
+/** The letters of a range like `A6:A1000` (or `A6`) — both ends must match. */
+function coversColumn(range: string, letter: string): boolean {
+  return range.split(":").some((end) => {
+    const m = /^\$?([A-Za-z]+)/.exec(end.trim());
+    return m ? m[1].toUpperCase() === letter.toUpperCase() : false;
+  });
+}
+
+function definedNameText(pkg: XlsmPackage, name: string): string | null {
+  const xml = partText(pkg, "xl/workbook.xml");
+  for (const m of xml.matchAll(/<definedName\b[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/definedName>/g)) {
+    if (m[1] === name) return decodeXml(m[2].trim());
+  }
+  return null;
+}
+
+function readRangeCells(pkg: XlsmPackage, sheet: string, letters: string, startRow: number, endRow: number): string[] {
+  const partName = findSheetPart(pkg, sheet);
+  if (!partName) return [];
+  const col = columnOf(`${letters}1`);
+  const strings = sharedStringsOf(pkg);
+  const wanted = new Set<number>();
+  for (let r = startRow; r <= endRow; r += 1) wanted.add(r);
+  const cellsByRow = readRows(partText(pkg, partName), wanted, strings);
+  const out: string[] = [];
+  for (let r = startRow; r <= endRow; r += 1) {
+    const v = valueAt(cellsByRow.get(r), col);
+    if (v !== "") out.push(v);
+  }
+  return out;
+}
+
+function listFromFormula(pkg: XlsmPackage, formula: string): string[] {
+  const f = formula.trim();
+  if (f === "") return [];
+  if (f.startsWith('"')) {
+    const inner = f.endsWith('"') ? f.slice(1, -1) : f.slice(1);
+    return inner.split(",").map((s) => s.trim()).filter((s) => s !== "");
+  }
+  const bang = f.indexOf("!");
+  if (bang >= 0) {
+    const sheet = f.slice(0, bang).replace(/^'|'$/g, "").replace(/''/g, "'");
+    const m = /\$?([A-Za-z]+)\$?(\d+)(?::\$?([A-Za-z]+)\$?(\d+))?/.exec(f.slice(bang + 1));
+    if (!m) return [];
+    const startRow = Number(m[2]);
+    const endRow = m[4] ? Number(m[4]) : startRow;
+    return readRangeCells(pkg, sheet, m[1], startRow, endRow);
+  }
+  const named = definedNameText(pkg, f);
+  return named ? listFromFormula(pkg, named) : [];
+}
+
+/**
+ * The value list behind a data-validation dropdown on `key`'s column. The
+ * depreciation sheets' first column must carry one of the workbook's own
+ * block strings verbatim, and Winman's validation is only a warning, so the
+ * writer checks against this list itself (depreciation design §1.6).
+ */
+export function readListValues(pkg: XlsmPackage, sheetName: string, key: string): string[] {
+  const schema = readSchema(pkg, sheetName);
+  const col = schema.keys.get(key);
+  if (col === undefined) throw new Error(`${sheetName} has no column keyed ${key}`);
+  const xml = partText(pkg, schema.partName);
+  const letter = columnName(col);
+  for (const m of xml.matchAll(/<dataValidation\b([^>]*)>([\s\S]*?)<\/dataValidation>/g)) {
+    const attrs = m[1];
+    if (!/type="list"/.test(attrs)) continue;
+    const sqref = /sqref="([^"]+)"/.exec(attrs)?.[1] ?? "";
+    if (!sqref.split(/\s+/).some((r) => coversColumn(r, letter))) continue;
+    const f = /<formula1>([\s\S]*?)<\/formula1>/.exec(m[2])?.[1]?.trim() ?? "";
+    return listFromFormula(pkg, decodeXml(f));
+  }
+  return [];
+}
