@@ -233,6 +233,40 @@ describe("buildBillRows (A2)", () => {
     const rows = buildBillRows(res, facts, f, opts);
     expect(rows.filter((r) => r.kind === "booksded")).toHaveLength(1);
   });
+  it("a booksded row whose approximate invoice is fully claimed by a strong link stays unlinked (addendum 7)", () => {
+    // invoice BILL-2 (taxable 350000, 2% = 7000) is exactly claimed by a
+    // journal with a taxable-rate link; another journal exceeding the
+    // residual capacity must not approximately anchor to it
+    const facts2: BooksFacts = {
+      deductions: [
+        ...facts.deductions,
+        { ledgerKey: canonicalKey("Alpha Traders"), kind: "tds" as const, date: "20250501",
+          tax: 7000, voucherType: "Journal", voucherNumber: "JV 8", reference: null },
+        { ledgerKey: canonicalKey("Alpha Traders"), kind: "tds" as const, date: "20250501",
+          tax: 6500, voucherType: "Journal", voucherNumber: "JV 9", reference: null },
+      ],
+      sales: facts.sales,
+    };
+    const res2 = analyzeAs26(f, facts2, map, ["Alpha Traders"], opts);
+    const rows = buildBillRows(res2, facts2, f, opts);
+    const jv9 = rows.find((r) => r.kind === "booksded" && r.ref === "JV 9")!;
+    expect(jv9.linkBasis).toBe("none"); // BILL-2's capacity is spent and BILL-7 is too small
+    expect(jv9.linked).toBeNull();
+    // a smaller journal within BILL-3's unclaimed capacity still anchors approximately
+    const facts3: BooksFacts = {
+      deductions: [
+        ...facts.deductions,
+        { ledgerKey: canonicalKey("Alpha Traders"), kind: "tds" as const, date: "20250501",
+          tax: 3000, voucherType: "Journal", voucherNumber: "JV 10", reference: null },
+      ],
+      sales: [...facts.sales, { ledgerKey: canonicalKey("Alpha Traders"), date: "20250301", ref: "BILL-3", taxable: 500000, gross: 590000 }],
+    };
+    const res3 = analyzeAs26(f, facts3, map, ["Alpha Traders"], opts);
+    const rows3 = buildBillRows(res3, facts3, f, opts);
+    const jv10 = rows3.find((r) => r.kind === "booksded" && r.ref === "JV 10")!;
+    expect(jv10.linkBasis).toBe("approximate");
+    expect(jv10.linked?.ref).toBe("BILL-3");
+  });
   it("partyTxsOf filters by (kind, nameKey)", () => {
     expect(partyTxsOf(file([
       tx({}), { ...tx({}), kind: "tcs" as const, nameKey: canonicalKey("Beta Ltd") }, tx({ tax: 1000 }),

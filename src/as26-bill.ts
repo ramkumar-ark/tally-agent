@@ -30,8 +30,8 @@ export function partyTxsOf(file: As26File, kind: As26Kind, nameKey: string): As2
   return file.transactions.filter((t) => t.kind === kind && t.nameKey === nameKey);
 }
 
-import { linkInvoice, normalizeAs26Section } from "./as26.js";
-export { linkInvoice, normalizeAs26Section };
+import { claimedTdsCapacity, linkInvoice, linkInvoiceWithCapacity, normalizeAs26Section } from "./as26.js";
+export { linkInvoice, linkInvoiceWithCapacity, normalizeAs26Section };
 
 const inWindow = (d: string, o: { fromDate: string; toDate: string }): boolean =>
   d >= o.fromDate && d <= o.toDate;
@@ -64,19 +64,28 @@ export function buildBillRows(
     // entries stay off "Books not in 26AS" / "26AS unmatched" / value rows.
     if (r.totalsOnly) continue;
     const pool = poolOf(r.match.ledgerKeys);
+    const keySet = new Set(r.match.ledgerKeys);
+    const secs = new Set(
+      file.summaries
+        .filter((s) => s.kind === r.match.kind && s.nameKey === r.match.as26NameKey)
+        .map((s) => s.section),
+    );
+    const section = secs.size === 1 ? [...secs][0] : null;
+    // Capacity claimed by strong links (addendum 7), from ALL party entries.
+    const claimed = claimedTdsCapacity(
+      pool,
+      facts.deductions
+        .filter((d) => keySet.has(d.ledgerKey) && d.kind === r.match.kind)
+        .map((d) => ({ date: d.date, tax: d.tax, reference: d.reference })),
+      section,
+    );
+    const linkOf = (tax: number, date: string, reference: string | null) =>
+      linkInvoiceWithCapacity(pool, { date, tax, reference, section }, claimed);
 
     for (const i of r.unmatchedBooks) {
       const d: BooksDeduction | undefined = i.dedIdx !== undefined ? facts.deductions[i.dedIdx] : undefined;
       if (!d) continue;
-      const secs = new Set(
-        file.summaries
-          .filter((s) => s.kind === r.match.kind && s.nameKey === r.match.as26NameKey)
-          .map((s) => s.section),
-      );
-      const section = secs.size === 1 ? [...secs][0] : null;
-      const link = linkInvoice(pool, {
-        date: d.date, tax: d.tax, reference: d.reference, section,
-      });
+      const link = linkOf(d.tax, d.date, d.reference);
       rows.push({
         kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey,
         date: d.date, tax: d.tax, voucherType: d.voucherType || null, ref: d.voucherNumber,
@@ -95,7 +104,7 @@ export function buildBillRows(
       const tx = i.txIdx !== undefined
         ? partyTxsOf(file, r.match.kind, r.match.as26NameKey)[i.txIdx]
         : undefined;
-      const link = linkInvoice(pool, { date, tax: i.tax, reference: null, section: tx?.section ?? null });
+      const link = linkOf(i.tax, date, null);
       rows.push({
         kind: "as26", ledgerKey: led, nameKey: r.match.as26NameKey,
         date, tax: i.tax, voucherType: null, ref: null,
@@ -111,9 +120,24 @@ export function buildBillRows(
   for (const r of result.recon) {
     if (r.totalsOnly) continue;
     const pool = poolOf(r.match.ledgerKeys);
+    const keySet = new Set(r.match.ledgerKeys);
+    const claimed = claimedTdsCapacity(
+      pool,
+      facts.deductions
+        .filter((d) => keySet.has(d.ledgerKey) && d.kind === r.match.kind)
+        .map((d) => ({ date: d.date, tax: d.tax, reference: d.reference })),
+      (() => {
+        const secs = new Set(
+          file.summaries
+            .filter((s) => s.kind === r.match.kind && s.nameKey === r.match.as26NameKey)
+            .map((s) => s.section),
+        );
+        return secs.size === 1 ? [...secs][0] : null;
+      })(),
+    );
     for (const t of partyTxsOf(file, r.match.kind, r.match.as26NameKey)) {
       const date = t.bookingDate || t.date;
-      const link = linkInvoice(pool, { date, tax: t.tax, reference: null, section: t.section });
+      const link = linkInvoiceWithCapacity(pool, { date, tax: t.tax, reference: null, section: t.section }, claimed);
       if (!link || link.basis === "approximate") continue;
       const delta = round2(t.amount - link.sale.taxable);
       if (Math.abs(delta) <= AS26_VALUE_TOLERANCE) continue;

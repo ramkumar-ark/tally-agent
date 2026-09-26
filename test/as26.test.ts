@@ -212,6 +212,18 @@ describe("receivableLedgers", () => {
   it("none found ⇒ empty array", () => {
     expect(receivableLedgers([{ name: "Cash", parent: "Current Assets" }], isAssetRoot)).toEqual([]);
   });
+  it("a tcs-only ledger name needs no 'receivable' (addendum 8), mixed tds/tcs names stay tds", () => {
+    const led = receivableLedgers([
+      { name: "TCS FY 25-26", parent: "Loans & Advances (Asset)" },
+      { name: "TDS/TCS Receivable", parent: "Current Assets" },
+      { name: "TCS Collected", parent: "Duties & Taxes" },
+      { name: "Loans & Advances (Asset)", parent: "" },
+    ], (g) => g.includes("Current Assets") || g.includes("Loans & Advances"));
+    expect(led).toEqual([
+      { name: "TCS FY 25-26", kind: "tcs" },
+      { name: "TDS/TCS Receivable", kind: "tds" },
+    ]);
+  });
 });
 
 // --- Task 7: stage-2 reconciliation core ---
@@ -513,6 +525,16 @@ describe("analyzeAs26 — findings 001–008", () => {
     expect(f.amount).toBe(18000);
     expect(f.detail).toMatch(/no sale entry/);
   });
+  it("008 stays silent for a tcs-kind party with no sale (addendum 8: TCS rides purchases)", () => {
+    const file = txFile([{ ...txn(18000), kind: "tcs", section: "206CL" }], 18000);
+    file.summaries[0].kind = "tcs";
+    const tcsFacts: BooksFacts = {
+      deductions: bookFacts([["20250612", 18000]]).deductions.map((d) => ({ ...d, kind: "tcs" as const })),
+      sales: [],
+    };
+    const r = analyzeAs26(file, tcsFacts, mapper, ledgers, { fromDate: "20250401", toDate: "20251231" });
+    expect(r.findings.some((x) => x.check === "deduction_without_sale")).toBe(false);
+  });
   it("every id matches the AS26 ordinal-pad shape", () => {
     const r = result([["20250612", 18000]], [txn(18000)], 18000);
     for (const f of r.findings) expect(f.id).toMatch(/^AS26-\d{3}-\d+$/);
@@ -647,6 +669,63 @@ describe("reconcileParty — invoice-anchored tiers (addendum 6)", () => {
     expect(r.combinations).toHaveLength(0);
     expect(r.ambiguous).toBeGreaterThanOrEqual(1);
     expect(r.unmatchedBooks).toHaveLength(4);
+  });
+
+  it("capacity rule (addendum 7): a fully-claimed invoice is never an approximate anchor, and the rate-exact later invoice takes its journals", () => {
+    // one invoice whose whole TDS is claimed by an exact journal, and the
+    // true (later) invoice rate-exact for the deposit; the four journals
+    // pre-date their invoice, so approximate must refuse to guess
+    const facts: BooksFacts = {
+      deductions: [
+        { ledgerKey: NK, kind: "tds" as const, date: "20250702", tax: 295589, voucherType: "Journal" },
+        ...[4840, 22725, 14870, 17527].map((tax) => ({
+          ledgerKey: NK, kind: "tds" as const, date: "20250702", tax, voucherType: "Journal" as const,
+        })),
+      ],
+      sales: [
+        saleOf("20250702", "INV 10", 14779427), // 2% = 295588.54, claimed by 295589
+        saleOf("20250721", "INV 12", 2998069), // 2% = 59961.38 ~ 59962
+      ],
+    };
+    const file = txFile([txGross(59962, 2998100, "20251101")], 59962);
+    const r = reconcileParty(file, facts, matchOf(file, facts), "20260331");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].parts.map((p) => p.tax).sort((a, b) => a - b)).toEqual([4840, 14870, 17527, 22725]);
+    expect(r.unmatchedBooks.map((b) => b.tax)).toEqual([295589]);
+    expect(r.unmatchedAs26).toHaveLength(0);
+  });
+
+  it("capacity fallback stays ambiguous when two rate-exact invoices each hold a fitting subset", () => {
+    const facts: BooksFacts = {
+      deductions: [6000, 12000, 17500, 500].map((tax) => ({
+        ledgerKey: NK, kind: "tds" as const,
+        date: tax === 17500 || tax === 500 ? "20251025" : "20251015", tax, voucherType: "Journal" as const,
+      })),
+      sales: [
+        saleOf("20251001", "INV A", 800000), // 2% = 16000
+        saleOf("20251020", "INV B", 950000), // 2% = 19000
+      ],
+    };
+    // target tax 18000 = neither invoice's exact rate TDS -> no fallback fires
+    const noFit = txFile([txGross(18000, 1234567, "20260212")], 18000);
+    const r1 = reconcileParty(noFit, facts, matchOf(noFit, facts), "20260331");
+    expect(r1.combinations).toHaveLength(0);
+    // now two invoices BOTH rate-exact for 18000 (taxable 900000 each),
+    // each anchoring one fitting subset -> ambiguous, nothing consumed
+    const facts2: BooksFacts = {
+      deductions: [
+        { ledgerKey: NK, kind: "tds" as const, date: "20251015", tax: 10000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20251015", tax: 8000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20251025", tax: 12000, voucherType: "Journal" },
+        { ledgerKey: NK, kind: "tds" as const, date: "20251025", tax: 6000, voucherType: "Journal" },
+      ],
+      sales: [saleOf("20251001", "INV C", 900000), saleOf("20251020", "INV D", 900000)],
+    };
+    const twoFit = txFile([txGross(18000, 1100000, "20260212")], 18000);
+    const r2 = reconcileParty(twoFit, facts2, matchOf(twoFit, facts2), "20260331");
+    expect(r2.combinations).toHaveLength(0);
+    expect(r2.ambiguous).toBeGreaterThanOrEqual(1);
+    expect(r2.unmatchedBooks).toHaveLength(4);
   });
 });
 

@@ -269,9 +269,13 @@ export function receivableLedgers(
   for (const l of ledgers) {
     const n = canonicalKey(l.name);
     if (!/(tds|tcs)/.test(n)) continue;
-    if (!/receivable/i.test(n)) continue;
+    // A tcs-only ledger name carries no "receivable" word (real books name
+    // them "TCS FY 25-26"), so the receivable requirement applies only to
+    // tds or mixed names. A liability-side TCS ledger never qualifies.
+    const isTcsOnly = n.includes("tcs") && !n.includes("tds");
+    if (!isTcsOnly && !/receivable/i.test(n)) continue;
     if (!underAssetRoot(l.name)) continue;
-    out.push({ name: l.name, kind: n.includes("tcs") ? "tcs" : "tds" });
+    out.push({ name: l.name, kind: isTcsOnly ? "tcs" : "tds" });
   }
   return out;
 }
@@ -585,6 +589,7 @@ const latestUpdate = (best: BooksSale | null, s: BooksSale): BooksSale =>
 export function linkInvoice(
   sales: BooksSale[],
   item: { date: string; tax: number; reference: string | null; section: string | null },
+  claimed?: Map<string, number>,
 ): { sale: BooksSale; basis: LinkBasis } | null {
   const cands = sales.filter((s) => s.date <= item.date);
   const ref = item.reference ? normRef(item.reference) : "";
@@ -612,13 +617,70 @@ export function linkInvoice(
   // pool). Without a law rate there is nothing to compare and the gate is off.
   const plausible = (s: BooksSale): boolean =>
     !law || item.tax <= round2(law.rates.standard * s.taxable) + AS26_TAX_TOLERANCE;
+  // Capacity rule (addendum 7): among the LATEST-DATE plausible candidates,
+  // an invoice whose whole section-rate TDS is already claimed by stronger
+  // links has no residual capacity and is passed over for a same-date
+  // sibling with room. The rule never reaches an earlier date and never
+  // re-routes the entry to a different day — no capacity anywhere at the
+  // latest date means UNLINKED, not a guess.
+  let latest = "";
+  for (const s of cands) {
+    if (plausible(s) && s.date > latest) latest = s.date;
+  }
   let ap: BooksSale | null = null;
   for (const s of cands) {
-    if (!plausible(s)) continue;
+    if (!plausible(s) || (claimed && law && s.date !== latest)) continue;
+    if (claimed && law) {
+      const residual = round2(round2(law.rates.standard * s.taxable) - (claimed.get(capacityKey(s)) ?? 0));
+      if (item.tax > residual + AS26_TAX_TOLERANCE) continue;
+    }
     ap = latestUpdate(ap, s);
   }
   return ap ? { sale: ap, basis: "approximate" } : null;
 }
+
+/** Identity of a sale for capacity accounting: ledger plus normalized ref. */
+function capacityKey(s: BooksSale): string {
+  return `${canonicalKey(s.ledgerKey)}|${s.ref ? normRef(s.ref) : ""}`;
+}
+
+/**
+ * TDS capacity already claimed per sale (addendum 7): the sum of taxes of
+ * `items` whose link to a sale is a STRONG basis (reference, taxable-rate,
+ * invoice-rate). Approximate claims never count — they are exactly the
+ * guesses this map polices. Empty when the section has no law rate.
+ */
+export function claimedTdsCapacity(
+  sales: BooksSale[],
+  items: Array<{ date: string; tax: number; reference: string | null }>,
+  section: string | null,
+): Map<string, number> {
+  const claimed = new Map<string, number>();
+  const law = section ? lawOf(normalizeAs26Section(section)) : null;
+  if (!law) return claimed;
+  for (const it of items) {
+    const link = linkInvoice(sales, { ...it, section });
+    if (!link || link.basis === "approximate") continue;
+    const key = capacityKey(link.sale);
+    claimed.set(key, round2((claimed.get(key) ?? 0) + it.tax));
+  }
+  return claimed;
+}
+
+/**
+ * linkInvoice plus the capacity rule (addendum 7): an invoice whose whole
+ * section-rate TDS is already claimed by stronger links has no residual
+ * capacity, so an APPROXIMATE link to it is refused and the entry stays
+ * unlinked rather than guessed. Strong links are never refused.
+ */
+export function linkInvoiceWithCapacity(
+  sales: BooksSale[],
+  item: { date: string; tax: number; reference: string | null; section: string | null },
+  claimed: Map<string, number>,
+): { sale: BooksSale; basis: LinkBasis } | null {
+  return linkInvoice(sales, item, claimed);
+}
+
 
 export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
   const keySet = new Set(match.ledgerKeys);
@@ -699,12 +761,20 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     const rate = law?.rates.standard ?? null;
     const salesPool = facts.sales.filter((s) => keySet.has(s.ledgerKey) && s.ref != null);
     const saleByRef = new Map(salesPool.map((s) => [normRef(s.ref), s]));
+    // Capacity claimed by strong links (addendum 7), from ALL party entries —
+    // not just the unmatched ones: an invoice's TDS is claimed whether or not
+    // the claiming journal was itself consumed by an earlier stage.
+    const partyInputs = booksItems.flatMap((b) => {
+      const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
+      return d ? [{ date: d.date, tax: d.tax, reference: d.reference }] : [];
+    });
+    const claimed = claimedTdsCapacity(salesPool, partyInputs, section);
     // ref -> unmatched book entries anchored to that invoice
     const anchored = new Map<string, ReconItem[]>();
     for (const b of unmatchedBooks) {
       const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
       if (!d) continue;
-      const link = linkInvoice(salesPool, { date: d.date, tax: d.tax, reference: d.reference, section });
+      const link = linkInvoiceWithCapacity(salesPool, { date: d.date, tax: d.tax, reference: d.reference, section }, claimed);
       if (!link || !link.sale.ref) continue;
       const key = normRef(link.sale.ref);
       if (!saleByRef.has(key)) continue;
@@ -792,6 +862,36 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
         whole.push(pool);
       }
       if (whole.length > 0) fitsByTarget.set(j, whole);
+    });
+    // Rate-exact capacity fallback (addendum 7): a 26AS row whose tax is the
+    // exact section-rate TDS of one invoice may be explained by a unique
+    // subset of the party's journals within that invoice's capacity dated
+    // before the deposit — journals can legitimately pre-date their invoice
+    // (TDS booked on accounting, bill raised later), and the approximate
+    // anchor correctly refuses to guess them onto an earlier invoice.
+    unmatchedAs26.forEach((a, j) => {
+      if (fitsByTarget.has(j) || !rate) return;
+      const found: ReconItem[][] = [];
+      const seenFit = new Set<string>();
+      for (const s of saleByRef.values()) {
+        const capacity = round2(s.taxable * rate);
+        if (Math.abs(capacity - a.tax) > AS26_TAX_TOLERANCE) continue;
+        const cap = capacity + AS26_TAX_TOLERANCE;
+        const pool: ReconItem[] = [];
+        for (const b of unmatchedBooks) {
+          const d: BooksDeduction | undefined = b.dedIdx !== undefined ? facts.deductions[b.dedIdx] : undefined;
+          if (!d || d.date > a.date || d.tax > cap) continue;
+          pool.push(b);
+        }
+        const fit = fitInPool(pool, a);
+        if (!fit) continue;
+        const key = fit.map((x) => x.dedIdx).sort().join("|");
+        if (seenFit.has(key)) continue;
+        seenFit.add(key);
+        found.push(fit);
+      }
+      if (found.length === 1) fitsByTarget.set(j, found);
+      else if (found.length > 1) ambiguous += 1;
     });
     const contended = new Set<string>();
     for (const cands of fitsByTarget.values()) {
@@ -1100,9 +1200,11 @@ export function analyzeAs26(
       );
     }
 
-    // 008 — deductions without any sale entry for the customer
+    // 008 — deductions without any sale entry for the customer. A tcs-kind
+    // party never needs one: TCS rides purchases (the seller collects it),
+    // so "no sale entry" is the normal shape, not an anomaly (addendum 8).
     if (!totalsOnly) {
-    if (r.booksTax > 0 && partySales.length === 0) {
+    if (r.booksTax > 0 && partySales.length === 0 && match.kind === "tds") {
       push(
         "deduction_without_sale", "review", match.as26Name, match.kind, summary?.section ?? null, r.booksTax,
         "Books carry the deduction but no sale entry exists for this customer in the period — the deduction may sit against a prior-period sale or a receipt (not asserted).",
