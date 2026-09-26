@@ -40,6 +40,8 @@ describe("policy keyword rules", () => {
     "Interest on Capital A/c",
     "Donations A/c",
     "Penalty on GST",
+    "Late Fees on GST A/c",
+    "Late Fee Charges",
     "Penalties A/c",
     "EOT Fine",
     "Rounded Off",
@@ -141,10 +143,12 @@ describe("addendum 2026-09-26d generic rules", () => {
       "Late Fee on Tax",
     ]) {
       expect(policyMatch(name, GST44_TREATMENT_RULES)?.treatment, name).toBe("not_supply");
-      // names carrying a bare "tax" word fire the older 'taxes' rule first —
-      // same treatment; the interest-tax id asserts only where it can win
+      // names carrying a bare "tax" word fire the older 'taxes' rule first;
+      // other late-fee names fire 'penalty' — same treatment either way
       if (!/tax/i.test(name)) {
-        expect(policyMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe("interest-tax");
+        expect(policyMatch(name, GST44_TREATMENT_RULES)?.rule.id, name).toBe(
+          /late fee/i.test(name) ? "penalty" : "interest-tax",
+        );
       }
     }
   });

@@ -48,7 +48,7 @@ export const GST44_TREATMENT_RULES: readonly TreatmentRule[] = [
   { id: "provident", kind: "policy", treatment: "not_supply", keywords: ["epf", "provident fund", "esi", "employees state insurance", "gratuity", "gratuities"], note: "statutory social-security contributions" },
   { id: "interest-capital", kind: "policy", treatment: "not_supply", keywords: ["interest on capital"], note: "interest on partners' capital" },
   { id: "donation", kind: "policy", treatment: "not_supply", keywords: ["donation"], note: "donations are not a supply" },
-  { id: "penalty", kind: "policy", treatment: "not_supply", keywords: ["penalty", "penalties", "fine", "fines"], note: "penalties and fines are not a supply" },
+  { id: "penalty", kind: "policy", treatment: "not_supply", keywords: ["penalty", "penalties", "fine", "fines", "late fee"], note: "penalties, fines and late fees are not a supply" },
   { id: "round-off", kind: "policy", treatment: "not_supply", keywords: ["round off", "rounded off"], note: "rounding differences" },
   { id: "loss-sale", kind: "policy", treatment: "not_supply", keywords: ["loss on sale"], note: "loss on sale of assets is not a supply" },
   { id: "bad-debts", kind: "policy", treatment: "not_supply", keywords: ["bad debt", "bad debts"], note: "bad debts written off are not expenditure on any supply" },
