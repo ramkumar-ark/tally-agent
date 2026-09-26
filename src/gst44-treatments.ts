@@ -26,6 +26,13 @@ export interface TreatmentRule {
   keywords?: string[];
   /** A raw regex source tested against the ledger name (case-insensitive). */
   pattern?: string;
+  /**
+   * Restrict the rule to one sheet: a fixed-asset acquisition whose NAME
+   * carries a fuel/electricity word ("Petrol Vibrator", "Diesel Generator")
+   * is equipment bought from a registered dealer, not an exempt supply — the
+   * fuel/electricity exempt rules therefore scope to the revenue sheet.
+   */
+  scope?: "revenue" | "capital";
   note: string;
 }
 
@@ -45,7 +52,21 @@ export const GST44_TREATMENT_RULES: readonly TreatmentRule[] = [
   { id: "round-off", kind: "policy", treatment: "not_supply", keywords: ["round off", "rounded off"], note: "rounding differences" },
   { id: "loss-sale", kind: "policy", treatment: "not_supply", keywords: ["loss on sale"], note: "loss on sale of assets is not a supply" },
   { id: "bad-debts", kind: "policy", treatment: "not_supply", keywords: ["bad debt", "bad debts"], note: "bad debts written off are not expenditure on any supply" },
+  // Interest/late fee ON taxes or duties is a statutory outflow, not a supply
+  // (captain's addendum 2026-09-26d). It must precede the bank/NBFC
+  // loan-interest rule, so "Interest on GST A/c" reads not_supply while
+  // "Interest on Bank Loan A/c" reads exempt. Registered first in the chain.
+  { id: "interest-tax", kind: "policy", treatment: "not_supply", keywords: ["interest on tax", "interest on duty", "late fee on tax", "late fee on duty", "interest on gst", "interest on tds", "interest on income tax", "interest on professional tax", "late fee on gst", "late fee on tds"], note: "interest or late fee on taxes/duties is not a supply" },
   { id: "urd", kind: "evidence", treatment: "unregistered", keywords: ["urd", "unregistered"], note: "the name itself declares an unregistered dealer" },
+  // Banks and NBFCs are mandated to register, so their charges are always
+  // registered purchases (others) — never exempt, never unregistered. As
+  // evidence rules these override party-GSTIN pots that would park any part
+  // in H (evidence beats party in the seed chain).
+  { id: "bank-charges", kind: "evidence", treatment: "others", keywords: ["bank charge", "loan charge", "loan processing charge", "processing charge", "bank commission", "forex charge", "exchange charge", "cheque charge", "collection charge", "annual maintenance charge"], note: "bank/NBFC charges come from mandated registered dealers — others, never exempt or unregistered" },
+  { id: "electricity", kind: "evidence", treatment: "exempt", scope: "revenue", keywords: ["electricity", "eb charge", "eb bill"], note: "electricity/EB charges are exempt supplies (expense ledgers only — a fixed-asset 'Petrol Vibrator'/'Diesel Generator' is equipment, not an exempt supply)" },
+  { id: "fuel", kind: "evidence", treatment: "exempt", scope: "revenue", keywords: ["fuel", "diesel", "petrol", "hsd"], note: "fuel expenses are always exempt (registered dealers)" },
+  { id: "insurance", kind: "evidence", treatment: "others", keywords: ["insurance"], note: "insurance ledgers are registered purchases — including Ineligible ITC ones, which are NOT exempt" },
+  { id: "loan-interest", kind: "evidence", treatment: "exempt", keywords: ["interest on bank", "interest on loan", "interest on non bank", "interest on od", "interest on cc", "bank interest", "nbfc interest", "loan interest", "vehicle loan", "equipment loan", "finance charge", "finance cost"], note: "interest on bank/NBFC loans is an exempt financial service" },
   { id: "rate-zero", kind: "evidence", treatment: "exempt", pattern: String.raw`(?:^|[\s\-@])0+(?:\.0+)?\s*%`, note: "explicit 0% rate suffix: zero-rated supply" },
   { id: "rate-gst", kind: "evidence", treatment: "others", pattern: String.raw`(?:^|[\s\-@])\d+(?:\.\d+)?\s*%`, note: "explicit GST rate suffix: registered purchase with tax" },
 ];
@@ -151,12 +172,14 @@ export async function loadGst44TreatmentRules(
     if (keywords?.length && pattern) {
       throw new Error(`treatment rules file: ${at} carries both keywords and a pattern; give one`);
     }
+    const scope = rec.scope === "revenue" || rec.scope === "capital" ? rec.scope : undefined;
     out.push({
       id,
       kind,
       treatment,
       ...(keywords?.length ? { keywords } : {}),
       ...(pattern ? { pattern } : {}),
+      ...(scope ? { scope } : {}),
       note: typeof rec.note === "string" && rec.note.trim() ? rec.note.trim() : `operator rule ${id}`,
     });
   });

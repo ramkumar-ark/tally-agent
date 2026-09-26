@@ -14,7 +14,12 @@ const groupOf: Record<string, string> = {
   "Repair & Maintenance": "Indirect Expenses",
   "Penalty on GST - 18%": "Indirect Expenses",
   "Mystery Ledger": "Indirect Expenses",
+  "Printing Charges - 18%": "Indirect Expenses",
+  "Bank Charges A/c": "Bank Charges",
+  "Interest on GST A/c": "Interest Expenses",
+  "Interest on Bank Loan A/c": "Interest Expenses",
   "JCB Purchased": "Fixed Assets",
+  "Petrol Vibrator - Greaves": "Fixed Assets",
   "Input IGST A/c": "Input GST",
   "Nova Traders": "Sundry Creditors",
   "Prime Haulage": "Sundry Creditors",
@@ -24,6 +29,8 @@ const groupOf: Record<string, string> = {
 const roots: Record<string, string> = {
   "Purchase Accounts": "Purchase Accounts",
   "Indirect Expenses": "Indirect Expenses",
+  "Bank Charges": "Indirect Expenses",
+  "Interest Expenses": "Indirect Expenses",
   "Fixed Assets": "Fixed Assets",
   "Input GST": "Duties & Taxes",
   "Sundry Creditors": "Sundry Creditors",
@@ -201,11 +208,11 @@ describe("gst44Worksheet seed precedence", () => {
 describe("gst44Worksheet gaps", () => {
   it("unknown GSTIN party falls back to the pattern rule with a verify note", () => {
     const r = gst44Worksheet(
-      [v("Ghost Supplier", [["Fuel Expenses - 18%", 5000], ["Ghost Supplier", -5000]])],
+      [v("Ghost Supplier", [["Printing Charges - 18%", 5000], ["Ghost Supplier", -5000]])],
       ctxOf({}),
       base,
     );
-    const row = r.revenue.find((x) => x.ledger === "Fuel Expenses - 18%")!;
+    const row = r.revenue.find((x) => x.ledger === "Printing Charges - 18%")!;
     expect(row.seed).toMatchObject({ treatment: "others", kind: "pattern rule" });
     expect(row.seed!.reason).toContain("party GSTIN unknown");
     expect(r.findings).toHaveLength(0);
@@ -276,5 +283,63 @@ describe("gst44Worksheet debit-total semantics", () => {
     expect(row.amount).toBe(0);
     expect(row.seed).toMatchObject({ kind: "zero balance" });
     expect(r.findings.filter((f) => f.check === "gst44_ws_unclassified")).toHaveLength(0);
+  });
+});
+
+describe("gst44Worksheet addendum 2026-09-26d", () => {
+  it("a bank-charges ledger seeds others wholly, overriding party unregistered pots", () => {
+    const r = gst44Worksheet(
+      [
+        v("Prime Haulage", [["Bank Charges A/c", 30000], ["Prime Haulage", -30000]]),
+        v("Nova Traders", [["Bank Charges A/c", 20000], ["Input IGST A/c", 3600], ["Nova Traders", -23600]]),
+      ],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Bank Charges A/c", "Prime Haulage", "Nova Traders", "Cash A/c"]) },
+    );
+    const row = r.revenue.find((x) => x.ledger === "Bank Charges A/c")!;
+    expect(row.amount).toBe(50000);
+    expect(row.seed).toMatchObject({ treatment: "others", kind: "evidence keyword" });
+    expect(row.seed!.reason).toContain("bank-charges");
+    expect(r.findings).toHaveLength(0);
+  });
+
+  it("interest on gst reads not supply while interest on bank loan reads exempt", () => {
+    const r = gst44Worksheet(
+      [
+        v("Nova Traders", [["Interest on GST A/c", 5104], ["Nova Traders", -5104]]),
+        v("Prime Haulage", [["Interest on Bank Loan A/c", 100000], ["Prime Haulage", -100000]]),
+      ],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Interest on GST A/c", "Interest on Bank Loan A/c", "Prime Haulage", "Nova Traders"]) },
+    );
+    expect(r.revenue.find((x) => x.ledger === "Interest on GST A/c")!.seed).toMatchObject({
+      j: 5104,
+      treatment: "not_supply",
+      kind: "policy keyword",
+    });
+    expect(r.revenue.find((x) => x.ledger === "Interest on Bank Loan A/c")!.seed).toMatchObject({
+      treatment: "exempt",
+      kind: "evidence keyword",
+    });
+  });
+});
+
+describe("gst44Worksheet rule scope", () => {
+  it("a capital asset whose name carries a fuel word is NOT exempt — party evidence applies", () => {
+    const r = gst44Worksheet(
+      [v("Prime Haulage", [["Petrol Vibrator - Greaves", 81750], ["Prime Haulage", -81750]])],
+      ctxOf({}),
+      { ...base, masterNames: masters(["Petrol Vibrator - Greaves", "Prime Haulage", "Cash A/c"]) },
+    );
+    const row = r.capital.find((x) => x.ledger === "Petrol Vibrator - Greaves")!;
+    expect(row.seed).toMatchObject({ treatment: "unregistered", kind: "party evidence" });
+    const re = gst44Worksheet(
+      [v("Nova Traders", [["Petrol Vibrator - Greaves", 81750], ["Input IGST A/c", 14715], ["Nova Traders", -96465]])],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      { ...base, masterNames: masters(["Petrol Vibrator - Greaves", "Nova Traders", "Cash A/c"]) },
+    );
+    expect(re.capital.find((x) => x.ledger === "Petrol Vibrator - Greaves")!.seed).toMatchObject({
+      treatment: "others",
+    });
   });
 });

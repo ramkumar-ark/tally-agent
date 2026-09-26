@@ -218,7 +218,7 @@ export function gst44Worksheet(
   for (const acc of sorted) {
     const prior = opts.prior?.[acc.rowKey]?.get(canonicalKey(acc.ledger));
     const policy = policyMatch(acc.ledger, opts.rules);
-    const evidence = evidenceMatch(acc.ledger, opts.rules);
+    const evidence = evidenceMatch(acc.ledger, opts.rules.filter((r) => r.scope !== (acc.rowKey === "capital" ? "revenue" : "capital")));
     const pattern = patternMatch(acc.ledger, opts.rules);
 
     if (policy) {
