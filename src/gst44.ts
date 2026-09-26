@@ -68,8 +68,8 @@ export interface Gst44Books {
 }
 
 /** C3/C4 root sets: revenue = P&L expenditure roots, capital = Fixed Assets only. */
-const REVENUE_ROOTS = new Set(["Purchase Accounts", "Direct Expenses", "Indirect Expenses", "Misc. Expenses (ASSET)"]);
-const CAPITAL_ROOTS = new Set(["Fixed Assets"]);
+export const REVENUE_ROOTS = new Set(["Purchase Accounts", "Direct Expenses", "Indirect Expenses", "Misc. Expenses (ASSET)"]);
+export const CAPITAL_ROOTS = new Set(["Fixed Assets"]);
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 const zeroBuckets = (): Record<Gst44Bucket, number> => ({ exempt: 0, composition: 0, others: 0, unregistered: 0 });

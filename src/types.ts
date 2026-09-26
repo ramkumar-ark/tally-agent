@@ -27,7 +27,10 @@ export type CheckId =
   | "loans_splitting_suspect"
   | "loans_max_amount_estimated"
   | "loans_party_unmastered"
-  | "loans_auto_exempt";
+  | "loans_auto_exempt"
+  | "gst44_ws_unclassified"
+  | "gst44_ws_prior_year_changed"
+  | "gst44_ws_rule_conflict";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const CHECK_ORDINAL: Record<CheckId, number> = {
@@ -62,6 +65,10 @@ export const CHECK_ORDINAL: Record<CheckId, number> = {
   loans_party_unmastered: 26,
   // Addendum 2 (2026-09-26): auto-exempt advisory (bank name / OD ancestry).
   loans_auto_exempt: 27,
+  // gst44 working-sheet checks (additive; 19-27 are the concurrent loans lane).
+  gst44_ws_unclassified: 28,
+  gst44_ws_prior_year_changed: 29,
+  gst44_ws_rule_conflict: 30,
 };
 
 export type GstCheckId =

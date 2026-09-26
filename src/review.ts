@@ -13,6 +13,10 @@ import {
 import { gstBooks, gstMismatch, gstSummary, RETURN_GROUP, type GstBooks, type GstCtx, type GstSummaryView } from "./gst.js";
 import { gst44, partySpend, type Gst44Row, type OperatorGst44 } from "./gst44.js";
 import { GST44_CONFIRMS, GST44_FORM_ID, GST44_SHEET, type Gst44Bucket } from "./gst44-law.js";
+import { gst44Worksheet, type WsLedgerRow, WS_TREATMENT_LABELS } from "./gst44-worksheet.js";
+import { buildGstWorksheet, fyLabel } from "./gst44-worksheet-template.js";
+import { readPriorWorksheet } from "./gst44-prior.js";
+import { loadGst44TreatmentRules } from "./gst44-treatments.js";
 import type { ReturnRow } from "./returns.js";
 import { parseReturns } from "./returns.js";
 import { count, dayBefore, displayDate, displayMonth } from "./format.js";
@@ -318,6 +322,42 @@ export interface Gst44ReviewResult {
     rejected: number;
     mastersSource: "live" | "bundle" | "absent";
   };
+}
+
+/** Per-sheet totals of the GST working sheet: the books total plus the seeded rows' columns. */
+export interface GstWorksheetColumnTotals {
+  /** Signed net over every ledger row (classified or not) — the books' figure. */
+  books: number;
+  /** Seeded rows only below; an unclassified row contributes to none of them. */
+  exempt: number;
+  composition: number;
+  others: number;
+  unregistered: number;
+  notSupply: number;
+  unclassified: { count: number; amount: number };
+}
+
+/**
+ * tb_write_gst_working_sheet's result: the written path and the masked
+ * totals-by-column, seed-reason counts and findings. The workbook itself
+ * carries real ledger names on the operator's disk; nothing masked leaves
+ * here except pseudonyms.
+ */
+export interface GstWorksheetWriteResult {
+  writePath: string;
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  rows: { revenue: number; capital: number };
+  revenue: GstWorksheetColumnTotals;
+  capital: GstWorksheetColumnTotals;
+  seedReasons: Record<string, number>;
+  unclassified: Array<{ ledger: string; group: string; amount: number }>;
+  findings: Gst44MaskedFinding[];
+  priorYearUsed: boolean;
+  gstinSource: "bundle" | "live" | "none";
+  rulesSource: "built-in" | "operator";
+  warnings: string[];
 }
 
 /** One masked 26AS finding: the engine shape with the party pseudonymed. */
@@ -668,6 +708,24 @@ export interface Session {
    * source is never written to.
    */
   write3cdGst44(opts: { sourcePath: string; outPath?: string }): Promise<string>;
+  /**
+   * The GST nature-wise break-up WORKING SHEET (captain's addendum
+   * 2026-09-26, Phase B): per-ledger REVENUE/CAPITAL rows seeded from the
+   * treatment vocabulary, the prior-year working sheet and party GSTIN
+   * evidence, written as a new workbook the operator reviews and edits
+   * before any Winman write. The day book is required (file channel);
+   * GSTINs come from the bundle's masters, live ledgersTax filling gaps.
+   */
+  writeGstWorksheet(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    dayBook: DayBookInput;
+    /** Raw bytes of the prior-year break-up workbook, when the operator supplied one. */
+    priorYear?: Buffer;
+    rulesPath?: string;
+    outPath: string;
+  }): Promise<GstWorksheetWriteResult>;
   vault: Vault;
 }
 
@@ -3090,6 +3148,169 @@ export function createSession(
     return target;
   }
 
+  /**
+   * The GST nature-wise break-up WORKING SHEET (captain's addendum
+   * 2026-09-26, Phase B). Vouchers and masters come from the operator day
+   * book (required: a bundle whose ledgers[] carry the groups the
+   * classification and masking walk); GSTINs come from the bundle's masters
+   * first, live ledgersTax filling gaps — either source may be absent, which
+   * degrades party evidence rather than aborting, because the operator
+   * reviews and corrects every seeded row before approval. The workbook on
+   * disk carries real ledger names; everything returned here is masked by
+   * the gst44Review recipe.
+   */
+  async function writeGstWorksheet(opts: {
+    company?: string;
+    fromDate: string;
+    toDate: string;
+    dayBook: DayBookInput;
+    priorYear?: Buffer;
+    rulesPath?: string;
+    outPath: string;
+  }): Promise<GstWorksheetWriteResult> {
+    const { company, fromDate, toDate } = opts;
+    if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
+      throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
+    }
+    lastCompany = company;
+    if (extname(opts.outPath).toLowerCase() === ".json") {
+      throw new Error("the outPath must name the .xlsx working sheet to write, not a data file");
+    }
+
+    const groups = opts.dayBook.groups ?? [];
+    const masterPairs = opts.dayBook.ledgers ?? [];
+    if (masterPairs.length === 0) {
+      throw new Error(
+        "the day-book file carries no ledger masters; the working sheet needs a bundle export whose ledgers[] name each ledger's group (scripts/export-daybook.mjs writes one)",
+      );
+    }
+    const c = buildClassifier(groups, overrides);
+    classifier = c;
+    for (const l of masterPairs) groupOfLedger.set(canonicalKey(l.name), l.parent);
+    const groupOf = (ledger: string): string => groupOfLedger.get(canonicalKey(ledger)) ?? "";
+
+    const gstins = new Map(opts.dayBook.ledgerGstins ?? []);
+    const bundleGstins = gstins.size;
+    try {
+      const tax = await d.ledgersTax(company);
+      for (const l of tax) {
+        if (l.gstin && !gstins.has(canonicalKey(l.name))) gstins.set(canonicalKey(l.name), l.gstin);
+      }
+    } catch {
+      // Live GSTINs are optional evidence here; the bundle (or none) stands.
+    }
+    const gstinSource: "bundle" | "live" | "none" =
+      bundleGstins > 0 ? "bundle" : gstins.size > 0 ? "live" : "none";
+
+    const ctx: GstCtx = {
+      groupOf,
+      rootOf: (group) => c.rootOf(group),
+      roleOf: (group) => c.role(group),
+      inDutiesAndTaxes: (group) =>
+        c.ancestry(group).some((g) => canonicalKey(g) === "duties & taxes"),
+      gstinOf: (ledger) => gstins.get(canonicalKey(ledger)) ?? null,
+    };
+    const masterNames = new Map(masterPairs.map((l) => [canonicalKey(l.name), l.name]));
+
+    const prior = opts.priorYear ? readPriorWorksheet(opts.priorYear) : undefined;
+    const warnings: string[] = [];
+    const rules = await loadGst44TreatmentRules(opts.rulesPath, (m) => warnings.push(m));
+    const rulesSource: "built-in" | "operator" = opts.rulesPath && warnings.length === 0 ? "operator" : "built-in";
+
+    const result = gst44Worksheet(opts.dayBook.vouchers, ctx, { rules, prior, masterNames });
+
+    const totalsOf = (rows: WsLedgerRow[]): GstWorksheetColumnTotals => {
+      const t: GstWorksheetColumnTotals = {
+        books: 0, exempt: 0, composition: 0, others: 0, unregistered: 0, notSupply: 0,
+        unclassified: { count: 0, amount: 0 },
+      };
+      for (const r of rows) {
+        t.books += r.amount;
+        if (r.seed) {
+          t.exempt += r.seed.d;
+          t.composition += r.seed.e;
+          t.unregistered += r.seed.h;
+          t.notSupply += r.seed.j;
+          t.others += r.amount - r.seed.d - r.seed.e - r.seed.h - r.seed.j;
+        } else if (Math.abs(r.amount) > ZERO_TOLERANCE) {
+          t.unclassified.count += 1;
+          t.unclassified.amount += r.amount;
+        }
+      }
+      t.books = round2(t.books);
+      t.exempt = round2(t.exempt);
+      t.composition = round2(t.composition);
+      t.others = round2(t.others);
+      t.unregistered = round2(t.unregistered);
+      t.notSupply = round2(t.notSupply);
+      t.unclassified.amount = round2(t.unclassified.amount);
+      return t;
+    };
+
+    // Masking: the gst44Review recipe — pseudonym every named ledger first,
+    // register the real names for drill-down, then sweep every detail.
+    const named = new Set<string>();
+    for (const f of result.findings) if (f.ledger) named.add(f.ledger);
+    const unclassifiedRows = [...result.revenue, ...result.capital].filter(
+      (r) => !r.seed && Math.abs(r.amount) > ZERO_TOLERANCE,
+    );
+    for (const r of unclassifiedRows) named.add(r.ledger);
+    for (const name of named) vault.pseudonym(name, "other" satisfies GroupRole);
+    const findings = result.findings.map((f) => {
+      if (f.ledger) realLedgerByFinding.set(f.id, f.ledger);
+      return {
+        id: f.id,
+        check: f.check,
+        severity: f.severity,
+        ledger: f.ledger ? maskLedgerName(f.ledger, groupOf(f.ledger), c, vault) : "",
+        group: scrubSecrets(f.group),
+        amount: f.amount,
+        side: null,
+        expected: null,
+        detail: scrubSecrets(maskKnownNames(f.detail, vault)),
+      };
+    });
+    const unclassified = unclassifiedRows.map((r) => ({
+      ledger: maskLedgerName(r.ledger, r.group, c, vault),
+      group: scrubSecrets(r.group),
+      amount: round2(r.amount),
+    }));
+
+    const seedReasons: Record<string, number> = {};
+    for (const r of [...result.revenue, ...result.capital]) {
+      const key = r.seed ? r.seed.kind : "unclassified";
+      seedReasons[key] = (seedReasons[key] ?? 0) + 1;
+    }
+
+    const buf = buildGstWorksheet({
+      company,
+      period: fyLabel(fromDate),
+      revenueRows: result.revenue,
+      capitalRows: result.capital,
+      rules,
+      priorYearUsed: !!opts.priorYear,
+    });
+    await mkdir(dirname(opts.outPath), { recursive: true });
+    await writeFile(opts.outPath, buf);
+
+    return {
+      writePath: opts.outPath,
+      company,
+      fromDate,
+      toDate,
+      rows: { revenue: result.revenue.length, capital: result.capital.length },
+      revenue: totalsOf(result.revenue),
+      capital: totalsOf(result.capital),
+      seedReasons,
+      unclassified,
+      findings,
+      priorYearUsed: !!opts.priorYear,
+      gstinSource,
+      rulesSource,
+      warnings,
+    };
+  }
+
 /**
  * An identity for a possibly-not-yet-existing path: its realpath when the
  * entry is there, else its parent directory's realpath joined with its
@@ -3245,5 +3466,6 @@ async function realPathId(p: string): Promise<string> {
     gst44Review,
     write3cdGst44,
     gst44Rows: () => lastGst44,
+    writeGstWorksheet,
   };
 }

@@ -3,7 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { buildTemplateWorkbook, templateFileName } from "./tds-template.js";
@@ -17,6 +17,7 @@ import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./t
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
 import { buildGst44Template, gst44TemplateFileName } from "./gst44-template.js";
 import { EMPTY_GST44, parseGst44Template } from "./gst44-file.js";
+import { gstWorksheetFileName } from "./gst44-worksheet-template.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { connectDownstream } from "./downstream.js";
 import { loadOverrides, loadPfEsiLedgers, loadWrongGroup } from "./overrides.js";
@@ -940,6 +941,72 @@ export function registerTools(
           ...(args.templatePath ? { templatePath: args.templatePath } : {}),
           ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
           ...(digest ? { dayBookDigest: digest } : {}),
+        },
+        result.findings.length,
+        maskedCount(result.findings),
+      );
+      return JSON.stringify(result, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_gst_working_sheet",
+    "Generate the GST nature-wise break-up WORKING SHEET for the year: REVENUE and CAPITAL sheets in the " +
+      "prior-year hand-prepared layout (one row per expense / fixed-asset ledger; the operator fills only the " +
+      "exempt / composite / unregistered / not-supply columns and the rest derive), seeded per ledger from a " +
+      "generic treatment vocabulary, the prior-year sheet and the books' GSTIN evidence. Review and correct the " +
+      "seeded columns in Excel; nothing is written into any Winman workbook until the captain plainly approves " +
+      "the working-sheet totals. Pass the PATH of the day-book JSON export - never paste its rows into chat. " +
+      "Ledger names appear as pseudonyms in this result.",
+    {
+      dayBookPath: z.string().describe("PATH to the day-book JSON export for the whole period; read inside the gateway"),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+      priorSheetPath: z.string().optional().describe(
+        "PATH to the prior-year 'GST INWARD SUPPLY - NATURE WISE BREAK UP' .xlsx; read only, never written, seeds treatments for exact ledger-name matches",
+      ),
+      rulesPath: z.string().optional().describe("PATH to a treatment-rules JSON ({rules:[...]}) extending the built-in vocabulary"),
+      company: z.string().optional(),
+      outPath: z.string().optional().describe("File path for the working sheet; defaults to next to the day book"),
+    },
+    async (args) => {
+      const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+      const dayBook = readDayBook(text, {
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+      });
+      const digest = createHash("sha256").update(text).digest("hex");
+      const priorYear = args.priorSheetPath ? await readFile(args.priorSheetPath) : undefined;
+      const outPath =
+        args.outPath ??
+        join(
+          dirname(args.dayBookPath),
+          gstWorksheetFileName(
+            args.company ?? cfg.defaultCompany,
+            new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+          ),
+        );
+      const result = await session.writeGstWorksheet({
+        company: args.company ?? cfg.defaultCompany,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+        dayBook,
+        priorYear,
+        rulesPath: args.rulesPath,
+        outPath,
+      });
+      await audit(
+        "tb_write_gst_working_sheet",
+        {
+          company: args.company ?? null,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+          dayBookPath: args.dayBookPath,
+          dayBookDigest: digest,
+          ...(args.priorSheetPath ? { priorSheetPath: args.priorSheetPath } : {}),
+          ...(args.rulesPath ? { rulesPath: args.rulesPath } : {}),
+          outPath,
         },
         result.findings.length,
         maskedCount(result.findings),

@@ -17,14 +17,34 @@ export interface Column {
   validation?: { list: string[] } | { formula: string };
 }
 
+export interface SheetFormula {
+  /** A1 reference the formula occupies, e.g. "G5". */
+  ref: string;
+  /** The formula body WITHOUT the leading "=" (OOXML <f> carries no equals). */
+  f: string;
+}
+
 export interface Sheet {
   name: string;
   /** Lines above the header row, each bold in column A. */
   title?: string[];
+  /**
+   * Plain rows between the title lines and the header row (the reference
+   * break-up layout's row-2 band). Each row is one CellValue per column,
+   * left-aligned in its own cell — no merging, overflow reads fine.
+   */
+  leadRows?: CellValue[][];
   /** Sheet visibility, as OOXML spells it (fixture-only today; see winman fixture). */
   state?: string;
   columns: Column[];
   rows: CellValue[][];
+  /**
+   * Formula overlay by A1 reference: the named cell carries <f> instead of
+   * its row value (which should be null there). Excel recalculates on load —
+   * the workbook declares fullCalcOnLoad when any sheet carries formulas —
+   * so no cached value is written.
+   */
+  formulas?: SheetFormula[];
 }
 
 const esc = (s: string): string =>
@@ -86,17 +106,39 @@ function sheetXml(sheet: Sheet): string {
     r += 1;
     out.push(`<row r="${r}">${cellXml(`A${r}`, line, STYLE_BOLD)}</row>`);
   }
+  for (const lead of sheet.leadRows ?? []) {
+    r += 1;
+    out.push(`<row r="${r}">${lead.map((v, i) => cellXml(`${colName(i)}${r}`, v, STYLE_PLAIN)).join("")}</row>`);
+  }
   r += 1;
   out.push(
     `<row r="${r}">${sheet.columns.map((c, i) => cellXml(`${colName(i)}${r}`, c.header, STYLE_BOLD)).join("")}</row>`,
   );
+  // Formula overlay by A1 ref: the named cell emits <f> (column style kept)
+  // instead of its row value.
+  const formulaByRef = new Map((sheet.formulas ?? []).map((f) => [f.ref.toUpperCase(), f.f]));
+  const styleAt = (ref: string): number => {
+    const m = /^([A-Z]+)(\d+)$/.exec(ref);
+    if (!m) return STYLE_PLAIN;
+    let idx = 0;
+    for (const ch of m[1]) idx = idx * 26 + (ch.charCodeAt(0) - 64);
+    return STYLE_OF[sheet.columns[idx - 1]?.format ?? "text"];
+  };
+  const formulaCell = (ref: string, f: string): string => {
+    const s = styleAt(ref);
+    const sAttr = s === STYLE_PLAIN ? "" : ` s="${s}"`;
+    return `<c r="${ref}"${sAttr}><f>${esc(f)}</f></c>`;
+  };
   for (const dataRow of sheet.rows) {
     r += 1;
     const cells = sheet.columns.map((c, i) => {
+      const ref = `${colName(i)}${r}`;
+      const formula = formulaByRef.get(ref.toUpperCase());
+      if (formula !== undefined) return formulaCell(ref, formula);
       let v = dataRow[i] ?? null;
       const style = STYLE_OF[c.format ?? "text"];
       if (c.format === "date" && typeof v === "string" && /^\d{8}$/.test(v)) v = serial(v);
-      return cellXml(`${colName(i)}${r}`, v, style);
+      return cellXml(ref, v, style);
     });
     out.push(`<row r="${r}">${cells.join("")}</row>`);
   }
@@ -113,7 +155,7 @@ function sheetXml(sheet: Sheet): string {
     ? `<dataValidations count="${validations.length}">${validations
         .map((c) => {
           const idx = sheet.columns.indexOf(c);
-          const firstDataRow = (sheet.title?.length ?? 0) + 2;
+          const firstDataRow = (sheet.title?.length ?? 0) + (sheet.leadRows?.length ?? 0) + 2;
           const v = c.validation!;
           const body = "list" in v ? `"${v.list.join(",")}"` : v.formula;
           return (
@@ -192,6 +234,10 @@ function zip(files: Array<[string, string]>): Buffer {
 }
 
 export function buildWorkbook(sheets: Sheet[]): Buffer {
+  // Formulas are written without cached values, so Excel must recalculate on
+  // load; readers that want values (this project's own reader) see null until
+  // the file has been opened and saved once.
+  const hasFormulas = sheets.some((s) => (s.formulas?.length ?? 0) > 0);
   const parts: Array<[string, string]> = [
     ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -207,7 +253,7 @@ ${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" Co
 </Relationships>`],
     ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets>${sheets.map((s, i) => `<sheet name="${esc(s.name)}" sheetId="${i + 1}"${s.state ? ` state="${s.state}"` : ""} r:id="rId${i + 1}"/>`).join("")}</sheets></workbook>`],
+<sheets>${sheets.map((s, i) => `<sheet name="${esc(s.name)}" sheetId="${i + 1}"${s.state ? ` state="${s.state}"` : ""} r:id="rId${i + 1}"/>`).join("")}</sheets>${hasFormulas ? `<calcPr calcId="0" fullCalcOnLoad="1"/>` : ""}</workbook>`],
     ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 ${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("\n")}

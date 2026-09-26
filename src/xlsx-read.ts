@@ -39,7 +39,7 @@ interface ZipEntry {
 }
 
 /** EOCD → central-directory walk (robust to data descriptors), then per-entry inflate. */
-function zipEntries(buf: Buffer): Map<string, Buffer> {
+export function zipEntries(buf: Buffer): Map<string, Buffer> {
   // Find the EOCD signature scanning back: no zip64, no data descriptors in
   // anything this reader is fed.
   let eocd = -1;

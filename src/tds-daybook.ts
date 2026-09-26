@@ -88,6 +88,12 @@ export interface DayBookInput {
   rejected: number;
   /** "YYYY-MM" keys inside the review period with no voucher at all. */
   emptyMonths: string[];
+  /**
+   * canonical ledger name -> GSTIN, from a bundle's ledgers[] (the only shape
+   * that carries masters at all). Empty for every other shape: the working
+   * sheet's party-GSTIN evidence then degrades to live/prior-year sources.
+   */
+  ledgerGstins?: Map<string, string>;
 }
 
 const monthKey = (yyyymmdd: string): string =>
@@ -273,6 +279,17 @@ export function readDayBook(
       .filter((x) => x.name !== "");
   };
 
+  const gstins = new Map<string, string>();
+  if (Array.isArray(envelope.ledgers)) {
+    for (const x of envelope.ledgers) {
+      if (!x || typeof x !== "object") continue;
+      const rec = x as Record<string, unknown>;
+      const name = String(rec.name ?? "").trim();
+      const gstin = typeof rec.gstin === "string" ? rec.gstin.trim() : "";
+      if (name !== "" && gstin !== "") gstins.set(canonicalKey(name), gstin);
+    }
+  }
+
   return {
     shape,
     vouchers,
@@ -283,6 +300,7 @@ export function readDayBook(
     observedTo,
     rejected,
     emptyMonths,
+    ledgerGstins: gstins,
   };
 }
 

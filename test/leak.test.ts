@@ -297,6 +297,7 @@ describe("no secret leaves the gateway", () => {
       "tb_write_gst44_report",
       "tb_write_gst44_template",
       "tb_write_gst_report",
+      "tb_write_gst_working_sheet",
       "tb_write_ledger_report",
       "tb_write_loans_report",
       "tb_write_loans_template",

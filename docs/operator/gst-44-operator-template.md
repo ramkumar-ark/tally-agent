@@ -74,3 +74,24 @@ Fill a row **only** when you know better than the books:
 - A template status naming a ledger that is not in the masters produces a
   `gst44_status_override_unknown_ledger` warning (as "Ledger N") and that row
   is ignored — usually a typo; correct it and re-run.
+
+## The nature-wise working sheet (`tb_write_gst_working_sheet`)
+
+A separate, earlier step: the working sheet proposes, the operator confirms,
+and only then does the approved flow above write any Winman workbook.
+
+1. **Generate it.** Give the tool the day-book JSON export's path (and the
+   prior-year break-up workbook's path, when you have one). It writes a new
+   dated `.xlsx` next to the day book with four sheets: REVENUE, CAPITAL,
+   Instructions, Vocabulary.
+   - Column B is each ledger's FY debit total; the engine pre-fills columns
+     D/E/H/J per ledger from a keyword vocabulary (see the sheet's
+     **Vocabulary** tab), the prior-year sheet and the party-GSTIN evidence,
+     with column K showing what was seeded and why.
+   - UNCLASSIFIED rows are left blank on purpose — fill D/E/F/H/J for them
+     yourself. The Difference row must read zero when you are done.
+2. **Review and edit in Excel.** Change any seeded cell that is wrong; the
+   file is yours. Nothing here has been written to any Winman workbook.
+3. **Approval is a captain decision.** The engine writes nothing into the
+   Winman clause-44 workbook until the working-sheet totals are plainly
+   approved and the write step is invoked separately.
