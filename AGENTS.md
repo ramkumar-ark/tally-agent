@@ -705,3 +705,14 @@ When updating this file, preserve this bar for all agents and keep entries conci
   closest basis (taxable / GST-inclusive / interest) and names it.
 - The bounded search's skip bound is 40 unmatched items per side; the skip
   is stated in plain words on the party's findings (append after masking).
+
+## Sharp edges found restoring the bank 194A books tax (2026-09-26)
+
+- The bank 194A books-tax channel (`src/review.ts` bankEvents) must test the
+  receivable row as a **debit** (`amount > 0`); testing it as a credit zeroed
+  every real bank event and kept the 20% rule dormant on live data. Bank
+  `touched` is voucher-wide (entry order varies); the receivable debit counts
+  when the voucher carries a mapped interest/FD ledger OR the row's display
+  counterparty is one (`counterpartyOf`). A bank's FY interest total then
+  splits honestly into a regular stream plus a set of `fd_20pct_tds` events
+  whose tax is exactly 20% (excluded from the totals compare).
