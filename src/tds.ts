@@ -191,6 +191,13 @@ export interface Clause21bBookRow {
   reason: "not_deducted" | "short_deducted" | "not_deposited";
   /** The figure the producing finding carried (template/review prose only). */
   liability: number;
+  /**
+   * The id of the review finding that produced this row (`TDS-<nnn>-<n>`),
+   * captured at the same raise point (2026-09-26 007: the sheets declare a
+   * one-to-one mapping to the review). A 194Q party-month or timing-only
+   * section row carries the single finding raised for it.
+   */
+  findingId: string;
 }
 
 export interface TdsDeposit {
@@ -979,9 +986,10 @@ export function analyzeTds(
     amount: number,
     detail: string,
     schedule?: TdsScheduleRow[],
-  ): void => {
+  ): string => {
+    const id = tdsFindingId(check, nextOrd(check));
     findings.push({
-      id: tdsFindingId(check, nextOrd(check)),
+      id,
       check,
       severity,
       deductee,
@@ -991,6 +999,7 @@ export function analyzeTds(
       detail,
       ...(schedule ? { schedule } : {}),
     });
+    return id;
   };
 
   let notDeducted = 0;
@@ -1134,12 +1143,7 @@ export function analyzeTds(
         if (section === "194Q") continue;
         notDeducted += liability;
         notDeductedBase += b.gross;
-        clause21b.push({
-          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
-          gross: b.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
-          section, reason: "not_deducted", liability,
-        });
-        push(
+        const notDeductedId = push(
           "tds_not_deducted",
           "critical",
           b.party,
@@ -1147,6 +1151,11 @@ export function analyzeTds(
           liability,
           `booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}: tax of ${money(liability)} was payable, but no duty credit was found.`,
         );
+        clause21b.push({
+          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
+          gross: b.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
+          section, reason: "not_deducted", liability, findingId: notDeductedId,
+        });
         continue;
       }
       // Deposit checks: the joined deposit was matched in joinEvents. Read
@@ -1279,12 +1288,7 @@ export function analyzeTds(
         if (!timingOnlySection(section)) {
           notDepositedBase += liability > ZERO ? round2(b.gross * (ded.tax / liability)) : b.gross;
         }
-        clause21b.push({
-          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
-          gross: b.gross, tdsDone: ded.tax, tdsDeposited: 0, depositDate: null,
-          section, reason: "not_deposited", liability,
-        });
-        push(
+        const notDepositedId = push(
           "tds_not_deposited",
           "critical",
           b.party,
@@ -1292,6 +1296,11 @@ export function analyzeTds(
           ded.tax,
           `duty credit of ${money(ded.tax)} on ${displayDate(ded.date)} has no deposit debit by ${displayDate(ctx.asOnDate)} (the Rule 30 due date falls next month).`,
         );
+        clause21b.push({
+          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
+          gross: b.gross, tdsDone: ded.tax, tdsDeposited: 0, depositDate: null,
+          section, reason: "not_deposited", liability, findingId: notDepositedId,
+        });
       }
     }
 
@@ -1327,12 +1336,7 @@ export function analyzeTds(
         if (cred <= TDS_TOLERANCE) {
           notDeducted += liab;
           notDeductedBase += m.gross;
-          clause21b.push({
-            party: m.party, date: `${mk.slice(-6)}01`, voucherNumber: "",
-            gross: m.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
-            section, reason: "not_deducted", liability: liab,
-          });
-          push(
+          const qId = push(
             "tds_not_deducted",
             "critical",
             m.party,
@@ -1340,6 +1344,11 @@ export function analyzeTds(
             liab,
             `purchases of ${money(m.gross)} for ${label} under section ${section}${panNote}: tax of ${money(liab)} was payable, but no duty credit was found for the month.`,
           );
+          clause21b.push({
+            party: m.party, date: `${mk.slice(-6)}01`, voucherNumber: "",
+            gross: m.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
+            section, reason: "not_deducted", liability: liab, findingId: qId,
+          });
         } else {
           stageShort(
             m.party,
@@ -1434,13 +1443,7 @@ export function analyzeTds(
     timingUndepositedTax.set(section, round2((timingUndepositedTax.get(section) ?? 0) + d.tax));
     if (d.booking) continue; // its finding was raised by the per-booking pass
     notDepositedTax += d.tax;
-    clause21b.push({
-      party: d.party, date: d.date, voucherNumber: d.voucherNumber,
-      gross: d.drawGross ?? 0,
-      tdsDone: d.tax, tdsDeposited: 0, depositDate: null,
-      section, reason: "not_deposited", liability: d.tax,
-    });
-    push(
+    const timingId = push(
       "tds_not_deposited",
       "critical",
       d.party,
@@ -1448,6 +1451,12 @@ export function analyzeTds(
       d.tax,
       `duty credit of ${money(d.tax)} on ${displayDate(d.date)} has no deposit debit by ${displayDate(ctx.asOnDate)} (the Rule 30 due date falls next month).`,
     );
+    clause21b.push({
+      party: d.party, date: d.date, voucherNumber: d.voucherNumber,
+      gross: d.drawGross ?? 0,
+      tdsDone: d.tax, tdsDeposited: 0, depositDate: null,
+      section, reason: "not_deposited", liability: d.tax, findingId: timingId,
+    });
   }
   for (const [section, undep] of timingUndepositedTax) {
     const gross = timingSectionGross.get(section) ?? 0;
@@ -1466,16 +1475,16 @@ export function analyzeTds(
   for (const s of shortStage) {
     if ((shortTotalByDeductee.get(s.key) ?? 0) < SHORT_DEDUCTION_MIN) continue;
     shortDeducted += s.amount;
+    const shortId = push("tds_short_deducted", "critical", s.party, s.section, s.amount, s.detail);
     if (s.row) {
       clause21b.push({
         party: s.party, date: s.row.date, voucherNumber: s.row.voucherNumber,
         gross: s.row.gross, tdsDone: s.row.tdsDone, tdsDeposited: s.row.tdsDeposited,
         depositDate: s.row.depositDate,
         section: s.section, reason: "short_deducted",
-        liability: s.row.liability,
+        liability: s.row.liability, findingId: shortId,
       });
     }
-    push("tds_short_deducted", "critical", s.party, s.section, s.amount, s.detail);
   }
 
   // No-PAN master gaps (2026-09-26 addendum items 4+5): one finding per

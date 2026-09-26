@@ -119,6 +119,7 @@ export interface NoTdsCandidateRow {
   depositDate: string | null;
   section: string;          // law key
   liability: number;        // engine figure, review prose only
+  findingId: string;        // the review finding id this row maps to (`TDS-<nnn>-<n>`)
   pan: string | null;       // real PAN in-session; written to disk; NEVER outbound
   panFromGstin: boolean;
 }
@@ -127,19 +128,30 @@ export interface NoTdsCandidateRow {
  * The clause 21(b) books projection: the engine's own clause 21(b) row facts
  * (`Clause21bBookRow` — collected at exactly the raise points where the
  * review's not_deducted / short / not_deposited findings fire) projected to
- * the candidate rows the four sheets are filled from. There is no second scan
- * and no re-derived predicate: a booking is a candidate only because the
- * engine itself wrote one. A booking the engine raised both a
- * short-deducted and a not-deposited row for collapses to its not-deposited
- * row (same key; the stricter deposit facts, 0, win). Pure: no I/O, no vault,
- * no masking.
+ * the candidate rows the four sheets are filled from, one candidate per
+ * engine row and so one per review finding (2026-09-26 007: the sheets map
+ * 1:1 to the review). There is no second scan and no re-derived predicate: a
+ * booking is a candidate only because the engine itself wrote one.
+ *
+ * The one collapse left is within a single booking: the engine can raise a
+ * short-deducted row AND a not-deposited row for the same booking (a
+ * deduction taken, found short, and never deposited). They share a key, and
+ * the not-deposited row's facts (deposited 0) are the stricter, so the short
+ * arm is dropped. Two DISTINCT bookings that happen to share a key (same
+ * party, date, voucher and section — two expense lines on one voucher) are
+ * never merged: their finding ids (and so their rows) are distinct.
+ * Pure: no I/O, no vault, no masking.
  */
 export function booksCandidates(
   rows: readonly Clause21bBookRow[],
   panOf: (party: string) => string | null,
   panDerivedFromGstinOf: (party: string) => boolean,
 ): NoTdsCandidateRow[] {
-  const byKey = new Map<string, NoTdsCandidateRow>();
+  const out: NoTdsCandidateRow[] = [];
+  // Keys already represented by a not-deposited row, and the index of a
+  // pending short arm still removable if a not-deposited sibling arrives.
+  const notDepositedKeys = new Set<string>();
+  const shortIndexOfKey = new Map<string, number>();
   for (const r of rows) {
     const key = `${canonicalKey(r.party)}|${r.date}|${r.voucherNumber}|${r.section}`;
     const cand: NoTdsCandidateRow = {
@@ -153,18 +165,33 @@ export function booksCandidates(
       depositDate: r.depositDate,
       section: r.section,
       liability: r.liability,
+      findingId: r.findingId,
       pan: panOf(r.party),
       panFromGstin: panDerivedFromGstinOf(r.party),
     };
     if (r.reason === "not_deposited") {
-      // The not-deposited arm always wins over an earlier short arm of the
-      // same key (its deposit facts are the stricter, engine-verified ones).
-      byKey.set(key, cand);
-    } else if (!byKey.has(key)) {
-      byKey.set(key, cand);
+      // A not-deposited row supersedes the same booking's short arm.
+      const pending = shortIndexOfKey.get(key);
+      if (pending !== undefined && !notDepositedKeys.has(key)) {
+        out[pending] = cand;
+        shortIndexOfKey.delete(key);
+      } else {
+        out.push(cand);
+      }
+      notDepositedKeys.add(key);
+    } else if (r.reason === "short_deducted") {
+      // A short arm arriving after its booking's not-deposited sibling is
+      // dropped (the not-deposited facts win); otherwise it waits in case the
+      // sibling arrives later.
+      if (!notDepositedKeys.has(key)) {
+        shortIndexOfKey.set(key, out.length);
+        out.push(cand);
+      }
+    } else {
+      out.push(cand);
     }
   }
-  return [...byKey.values()];
+  return out;
 }
 
 /**

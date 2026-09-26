@@ -509,6 +509,7 @@ describe("booksCandidates — projection of the engine's clause 21(b) rows (2026
     section: "194-I(a)",
     reason: "not_deposited",
     liability: 50000,
+    findingId: "TDS-004-1",
     ...over,
   });
   const run = (rows: Clause21bBookRow[]): NoTdsCandidateRow[] => booksCandidates(rows, () => null, () => false);
@@ -527,6 +528,7 @@ describe("booksCandidates — projection of the engine's clause 21(b) rows (2026
         depositDate: null,
         section: "194-I(a)",
         liability: 50000,
+        findingId: "TDS-004-1",
         pan: null,
         panFromGstin: false,
       },
@@ -534,13 +536,23 @@ describe("booksCandidates — projection of the engine's clause 21(b) rows (2026
   });
 
   it("lets the not-deposited arm win over a short arm for the same key", () => {
-    const short = engRow({ reason: "short_deducted", tdsDone: 30000, tdsDeposited: 30000, depositDate: "20260710", liability: 50000 });
-    const notDep = engRow({ reason: "not_deposited", tdsDone: 30000, tdsDeposited: 0, depositDate: null, liability: 50000 });
+    const short = engRow({ reason: "short_deducted", tdsDone: 30000, tdsDeposited: 30000, depositDate: "20260710", liability: 50000, findingId: "TDS-002-1" });
+    const notDep = engRow({ reason: "not_deposited", tdsDone: 30000, tdsDeposited: 0, depositDate: null, liability: 50000, findingId: "TDS-004-1" });
     const rows = run([short, notDep]);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ tdsDone: 30000, tdsDeposited: 0, depositDate: null });
+    expect(rows[0]).toMatchObject({ tdsDone: 30000, tdsDeposited: 0, depositDate: null, findingId: "TDS-004-1" });
     // Order-independent: the not-deposited arm wins whichever side arrives first.
-    expect(run([notDep, short])[0]).toMatchObject({ tdsDeposited: 0, depositDate: null });
+    expect(run([notDep, short])[0]).toMatchObject({ tdsDeposited: 0, depositDate: null, findingId: "TDS-004-1" });
+  });
+
+  it("keeps two distinct bookings that share a key as two rows (finding-id 1:1)", () => {
+    // Two expense lines on one voucher, same party/date/voucher/section: two
+    // engine rows, two finding ids — never merged (2026-09-26 007).
+    const a = engRow({ reason: "not_deducted", gross: 100000, tdsDone: 0, tdsDeposited: 0, depositDate: null, liability: 2000, findingId: "TDS-001-1" });
+    const b = engRow({ reason: "not_deducted", gross: 50000, tdsDone: 0, tdsDeposited: 0, depositDate: null, liability: 1000, findingId: "TDS-001-2" });
+    const rows = run([a, b]);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.findingId)).toEqual(["TDS-001-1", "TDS-001-2"]);
   });
 
   it("carries the vault PAN and the GSTIN-derived flag (Focus #5)", () => {

@@ -276,6 +276,7 @@ describe("clause 21(b) engine rows (2026-09-26 005)", () => {
         section: "194C",
         reason: "not_deposited",
         liability: 4000,
+        findingId: "TDS-004-1",
       },
     ]);
   });
@@ -301,7 +302,7 @@ describe("clause 21(b) engine rows (2026-09-26 005)", () => {
 
   it("an undeducted booking yields one not_deducted row with tdsDone 0", () => {
     const L = ledgersOf([FEB_A]);
-    const { clause21b } = analyzeTds([], L.expense, L.party, ctxWith([]));
+    const { findings, clause21b } = analyzeTds([], L.expense, L.party, ctxWith([]));
     expect(clause21b).toEqual([
       expect.objectContaining({
         party: PARTY_A,
@@ -314,6 +315,10 @@ describe("clause 21(b) engine rows (2026-09-26 005)", () => {
         reason: "not_deducted",
       }),
     ]);
+    // The row declares its producing finding id: the 21(b) sheet maps 1:1 to
+    // the review (2026-09-26 007).
+    const raising = findings.find((f) => f.check === "tds_not_deducted" && f.deductee === PARTY_A);
+    expect(clause21b[0]!.findingId).toBe(raising!.id);
   });
 
   it("splits a lump 194T credit per partner and names each partner's expense share", () => {

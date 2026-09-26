@@ -218,6 +218,7 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
         depositDate: null,
         section: "194C",
         liability: 5000,
+        findingId: "TDS-001-1",
         pan: "TaxId 101",
         panFromGstin: false,
       },
