@@ -1,4 +1,5 @@
 import { canonicalKey } from "./key.js";
+import { displayDate } from "./format.js";
 import type { VoucherEntry, VoucherRow } from "./downstream.js";
 import type { GstAdjConfig } from "./gst-adj-config.js";
 import type { ThreeBSummary } from "./gst-adj-3b.js";
@@ -225,6 +226,96 @@ export function analyzeGstAdj(input: {
           detail: `tds ledger has no books movement${tdsSectionNote}`,
         });
       }
+    }
+
+    // Kinds 5/6/R: list-driven entries and residual routing
+    const listDiffs = input.listDiffs;
+    if (listDiffs) {
+      for (const h of HEAD_ORDER) {
+        const inputLedger = config.heads[h]?.input;
+        const unclaimedLedger = config.heads[h]?.unclaimed;
+        const toBeBooked = config.heads[h]?.toBeBooked;
+        const toBeReversed = config.heads[h]?.toBeReversed;
+        if (!inputLedger) continue;
+
+        const mv = movements.get(month);
+        const booksCredit = inputLedger ? -(mv?.get(inputLedger) ?? 0) : 0;
+
+        const newlyEntries = listDiffs[month]?.newly ?? [];
+        const droppedEntries = listDiffs[month]?.dropped ?? [];
+
+        let newlySum = 0;
+        for (const e of newlyEntries) newlySum += e.tax[h] ?? 0;
+        let droppedSum = 0;
+        for (const e of droppedEntries) droppedSum += e.tax[h] ?? 0;
+
+        const claimed = threeB.netItc[month]?.[h] ?? 0;
+        const reversed = threeB.itcReversed[month]?.[h] ?? 0;
+        const residual = booksCredit - claimed - reversed - newlySum + droppedSum;
+
+        if (newlySum > TOLERANCE) {
+          if (unclaimedLedger) {
+            pushEntry(result.entries, 5, month, date, `being input gst for the month ${monthName} ${yearStr}`, [
+              { dr: unclaimedLedger, cr: inputLedger, amount: newlySum },
+            ]);
+          }
+          result.tieout.push({ month, kind: 5, head: h, entry: newlySum, threeB: null, note: "newly listed in 2B" });
+        }
+
+        if (droppedSum > TOLERANCE) {
+          if (inputLedger && unclaimedLedger) {
+            pushEntry(result.entries, 6, month, date, `being input gst for the month ${monthName} ${yearStr}`, [
+              { dr: inputLedger, cr: unclaimedLedger, amount: droppedSum },
+            ]);
+          }
+          result.tieout.push({ month, kind: 6, head: h, entry: droppedSum, threeB: null, note: "reflected+claimed" });
+        }
+
+        if (residual > 1) {
+          const routeName = config.residualMarks[month]?.[h] === "reversed" ? "toBeReversed" : "toBeBooked";
+          const routeLedger = routeName === "toBeReversed" ? toBeReversed : toBeBooked;
+          if (routeLedger && inputLedger) {
+            pushEntry(result.entries, 8, month, date, `being input gst for the month ${monthName} ${yearStr}`, [
+              { dr: routeLedger, cr: inputLedger, amount: residual },
+            ]);
+          }
+          result.tieout.push({ month, kind: 8, head: h, entry: residual, threeB: null, note: `residual routed to ${routeName}` });
+        } else if (residual < -1) {
+          result.findings.push({
+            id: "gadj_claim_exceeds_books", severity: "warning",
+            detail: `claim exceeds books for ${h} at ${displayDate(date)}`,
+          });
+        }
+      }
+    }
+  }
+
+  // Reappearance check: dropped keys that appear in later months
+  const listDiffs = input.listDiffs;
+  if (listDiffs) {
+    const droppedByMonth: Record<string, Set<string>> = {};
+    for (const [month, diff] of Object.entries(listDiffs)) {
+      const keys = new Set<string>();
+      for (const e of diff.dropped) keys.add(e.key);
+      droppedByMonth[month] = keys;
+    }
+    const months = Object.keys(droppedByMonth).sort();
+    const reappeared = new Set<string>();
+    for (let i = 0; i < months.length; i++) {
+      for (const k of droppedByMonth[months[i]]) {
+        for (let j = i + 1; j < months.length; j++) {
+          if (droppedByMonth[months[j]].has(k)) {
+            reappeared.add(k);
+            break;
+          }
+        }
+      }
+    }
+    if (reappeared.size > 0) {
+      result.findings.push({
+        id: "gadj_list_reappearance", severity: "review",
+        detail: `reappearance: ${Array.from(reappeared).join(", ")}`,
+      });
     }
   }
 
