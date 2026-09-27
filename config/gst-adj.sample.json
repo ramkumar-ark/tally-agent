@@ -1,0 +1,44 @@
+{
+  "voucherType": "Journal",
+  "registration": "Tamil Nadu Registration",
+  "heads": {
+    "cgst": {
+      "input": "Input CGST A/c",
+      "output": "Output CGST A/c",
+      "payable": "CGST Payable A/c",
+      "unclaimed": "Unclaimed CGST A/c",
+      "tds": "GST TDS CGST A/c",
+      "toBeBooked": "Input CGST To Be Booked A/c",
+      "toBeReversed": "Input CGST To Be Reversed A/c"
+    },
+    "sgst": {
+      "input": "Input SGST A/c",
+      "output": "Output SGST A/c",
+      "payable": "SGST Payable A/c",
+      "unclaimed": "Unclaimed SGST A/c",
+      "tds": "GST TDS SGST A/c",
+      "toBeBooked": "Input SGST To Be Booked A/c",
+      "toBeReversed": "Input SGST To Be Reversed A/c"
+    },
+    "igst": {
+      "input": "Input IGST A/c",
+      "output": "Output IGST A/c",
+      "payable": "IGST Payable A/c",
+      "unclaimed": "Unclaimed IGST A/c",
+      "tds": "GST TDS IGST A/c",
+      "toBeBooked": "Input IGST To Be Booked A/c",
+      "toBeReversed": "Input IGST To Be Reversed A/c"
+    },
+    "cess": {
+      "input": "Input Cess A/c",
+      "output": "Output Cess A/c",
+      "payable": "Cess Payable A/c",
+      "unclaimed": "Unclaimed Cess A/c",
+      "tds": "GST TDS Cess A/c",
+      "toBeBooked": "Input Cess To Be Booked A/c",
+      "toBeReversed": "Input Cess To Be Reversed A/c"
+    }
+  },
+  "gstTdsCredit": {},
+  "residualMarks": {}
+}
