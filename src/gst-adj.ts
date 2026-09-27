@@ -12,7 +12,7 @@ export interface GadjEntry {
   kind: number; month: string; date: string; narration: string;
   legs: Array<{ dr: string; cr: string; amount: number }>;
 }
-export interface GadjFinding { id: string; severity: "warning" | "review"; detail: string; }
+export interface GadjFinding { id: string; severity: "critical" | "warning" | "review"; detail: string; }
 export interface GstAdjResidual { head: string; route: string; amount: number; months: string[]; }
 export interface GstAdjResult {
   entries: GadjEntry[];

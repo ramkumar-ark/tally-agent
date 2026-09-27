@@ -86,6 +86,11 @@ import {
 import { EMPTY_DEP3CD_OPERATOR, parseDep3cdTemplate } from "./dep3cd-file.js";
 import { ADDITIONAL_DEPRECIATION_TEXT, DEFAULT_BLOCK_LISTS, DEPN_TEXT } from "./dep3cd-law.js";
 import { parseNotdsTemplate, EMPTY_NOTDS_OPERATOR, type NotdsOperatorFile } from "./notds-file.js";
+import { analyzeGstAdj, booksMovements, roleResolver, type GadjFinding, type GstAdjResidual } from "./gst-adj.js";
+import { parseItc2bFolder, monthDiff, type Itc2bEntry } from "./gst-adj-2b.js";
+import { parseThreeB } from "./gst-adj-3b.js";
+import { loadGstAdjConfig } from "./gst-adj-config.js";
+import { writeGstAdjImportFile, writeGstAdjPaper, headOf, gstAdjEnvelope } from "./gst-adj-file.js";
 import {
   buildStatement,
   payableCandidates,
@@ -800,6 +805,15 @@ export interface Dep3cdReviewResult {
   }>;
 }
 
+export interface GstAdjSessionResult {
+  fy: string; months: string[];
+  summary: { month: string; kind: number; heads: { head: string; amount: number }[] }[];
+  findings: GadjFinding[]; residual: GstAdjResidual[];
+  paperPath: string; importPath: string;
+}
+export type GstAdjSummaryRow = { month: string; kind: number; heads: { head: string; amount: number }[] };
+export type GstAdjSummary = GstAdjSummaryRow[];
+
 export interface Session {
   review(company: string | undefined, asOnDate: string): Promise<ReviewResult>;
   ledgerActivity(findingId: string, fromDate: string, toDate: string): Promise<unknown[]>;
@@ -870,11 +884,6 @@ export interface Session {
     as26MapPath: string,
     dayBook?: DayBookInput,
   ): Promise<As26ReviewResult>;
-     /**
-   * The company's ledger master names, for the 26AS mapping template's
-   * dropdown/reference list. Degrades to [] (with a warning) when masters are
-   * unavailable — the template is still useful without a list.
-   */
   ledgerNames(company: string | undefined): Promise<string[]>;
   /**
    * Addendum 2 (2026-09-26): ledger master pairs + groups for the loans
@@ -1057,6 +1066,19 @@ export interface Session {
    */
   gst44Rows(): Gst44Row[] | undefined;
   /**
+   * GST Adjustments review (design of record: docs/design/2026-09-13-gst-summary-mismatch-design.md).
+   * The 3B workbook arrives at a path, the 2B folder optionally at another path,
+   * the config optionally at a third. The books come from the day book when given
+   * (the day-book path makes no downstream call) else live Tally via fromDate/toDate.
+   * A registration cross-check (config vs workbook GSTIN, and every 2B month's GSTIN)
+   * ABORTs before any file write with a critical finding when it fails.
+   */
+  gstAdjReview(opts: {
+    company?: string; threeBPath: string; itc2bPath?: string;
+    gstAdjConfigPath?: string; dayBook?: DayBookInput;
+    fromDate?: string; toDate?: string;
+  }): Promise<GstAdjSessionResult>;
+  /**
    * Rewrite the `Break-up of GST expenditure` sheet of a Winman 3CD workbook
    * COPY and return the written path. The source is never written to. With
    * `worksheetPath` the totals come from the operator's approved GST
@@ -1127,6 +1149,8 @@ export function createSession(
   let lastLoansVault: Array<{ real: string; alias: string }> | undefined;
   /** Unmasked clause 44 rows from the last gst44Review, for the Winman writer. */
   let lastGst44: Gst44Row[] | undefined;
+  /** The last gstAdjReview result: raw threeB, result, config, and the import envelope, for the Winman writer. */
+  let lastGstAdj: { threeB: ReturnType<typeof parseThreeB>; result: ReturnType<typeof analyzeGstAdj>; config: ReturnType<typeof loadGstAdjConfig>; envelope: unknown } | undefined;
   /** Clause-34 paperback: the raw Tds3cdResult the Winman writer consumes. */
   let lastTds3cd: Tds3cdResult | undefined;
   /**
@@ -4097,6 +4121,31 @@ export function createSession(
     return { written: target };
   }
 
+  function buildSummary(
+    entries: Array<{ month: string; kind: number; legs: Array<{ dr: string; cr: string; amount: number }> }>,
+    config: ReturnType<typeof loadGstAdjConfig>,
+  ): GstAdjSummary {
+    const grouped = new Map<string, { kind: number; heads: Map<string, number> }>();
+    for (const e of entries) {
+      const key = `${e.month}|${e.kind}`;
+      let g = grouped.get(key);
+      if (!g) { g = { kind: e.kind, heads: new Map() }; grouped.set(key, g); }
+      for (const leg of e.legs) {
+        const h = headOf(leg.dr, config);
+        g.heads.set(h, (g.heads.get(h) ?? 0) + Math.abs(leg.amount));
+      }
+    }
+    const result: GstAdjSummary = [];
+    for (const [key, g] of grouped) {
+      const [month] = key.split("|");
+      const heads = [...g.heads.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([head, amount]) => ({ head, amount }));
+      result.push({ month, kind: g.kind, heads });
+    }
+    return result;
+  }
+
   /**
    * Clause 44 run (design §4, Decision 2): vouchers come from the operator
    * day book when given, else live; the narrow ledgersTax GSTIN channel is
@@ -4105,6 +4154,118 @@ export function createSession(
    * name under a clear-rooted group still masks because the vault alias
    * exists), register real names for drill-down, then sweep every detail.
    */
+  async function gstAdjReview(opts: {
+    company?: string; threeBPath: string; itc2bPath?: string;
+    gstAdjConfigPath?: string; dayBook?: DayBookInput;
+    fromDate?: string; toDate?: string;
+  }): Promise<GstAdjSessionResult> {
+    const { threeBPath, itc2bPath, gstAdjConfigPath, dayBook } = opts;
+
+    const threeB = parseThreeB(await readFile(threeBPath));
+    const fy = threeB.months[0]?.slice(0, 4) ?? "";
+
+    const warnMsgs: string[] = [];
+    const warn = (msg: string) => { warnMsgs.push(msg); };
+    const config = loadGstAdjConfig(gstAdjConfigPath, warn);
+
+    let listDiffs: Record<string, { newly: Itc2bEntry[]; dropped: Itc2bEntry[] }> | undefined;
+    let gstinByMonth: Map<string, string> | undefined;
+    if (itc2bPath) {
+      const parsed = await parseItc2bFolder(itc2bPath, warn);
+      listDiffs = monthDiff(parsed.lists, threeB.months);
+      gstinByMonth = parsed.gstinByMonth;
+    }
+
+    const findings: GadjFinding[] = [];
+    for (const w of warnMsgs) {
+      findings.push({ id: "gadj_config_warn", severity: "warning", detail: w });
+    }
+
+    // Registration cross-check (ABORT before file writes)
+    let registrationMismatch = false;
+    if (config.registration && config.registration !== threeB.gstin) {
+      findings.push({
+        id: "gadj_registration_mismatch", severity: "critical",
+        detail: `config registration ${config.registration} ≠ workbook GSTIN ${threeB.gstin}`,
+      });
+      registrationMismatch = true;
+    }
+    if (gstinByMonth) {
+      for (const [month, gstin] of gstinByMonth) {
+        if (gstin && gstin !== threeB.gstin) {
+          findings.push({
+            id: "gadj_registration_mismatch", severity: "critical",
+            detail: `2B month ${month} GSTIN ${gstin} ≠ workbook GSTIN ${threeB.gstin}`,
+          });
+          registrationMismatch = true;
+        }
+      }
+    }
+    if (registrationMismatch) {
+      return {
+        fy, months: threeB.months, summary: [], findings, residual: [],
+        paperPath: "", importPath: "",
+      };
+    }
+
+    // Vouchers: day-book bundle or live fetch (no overlap, never both)
+    let vouchers: VoucherRow[];
+    if (dayBook) {
+      vouchers = dayBook.vouchers;
+    } else {
+      vouchers = await d.vouchers(
+        opts.company, opts.fromDate ?? "", opts.toDate ?? "",
+      );
+    }
+
+    const knownLedgers = new Set<string>();
+    try {
+      const [, m] = await Promise.all([d.groups(opts.company), d.ledgers(opts.company)]);
+      for (const l of m) knownLedgers.add(l.name);
+    } catch {
+      // ledger masters degrade; knownLedgers stays empty
+    }
+
+    const movements = booksMovements(vouchers, roleResolver(config));
+    const result = analyzeGstAdj({
+      threeB, movements, config, listDiffs, knownLedgers,
+    });
+
+    // Contributions: Input-ledger vouchers of residual months
+    const residualMonths = new Set<string>();
+    for (const r of result.residual) {
+      for (const m of r.months) residualMonths.add(m);
+    }
+    const inputLedgers = new Set<string>();
+    for (const [, roles] of Object.entries(config.heads)) {
+      if (roles.input) inputLedgers.add(canonicalKey(roles.input));
+    }
+    const contributions = new Map<string, VoucherRow[]>();
+    for (const v of vouchers) {
+      const month = `${String(v.date).slice(0, 4)}-${String(v.date).slice(4, 6)}`;
+      if (!residualMonths.has(month)) continue;
+      const hasInput = v.entries.some((e) => inputLedgers.has(canonicalKey(e.ledger)));
+      if (!hasInput) continue;
+      const existing = contributions.get(month);
+      if (existing) existing.push(v);
+      else contributions.set(month, [v]);
+    }
+
+    const outDir = dirname(threeBPath);
+    const paperPath = await writeGstAdjPaper({
+      reportDir: outDir, fy, threeB, result, config, contributions,
+    });
+    const importPath = await writeGstAdjImportFile({
+      reportDir: outDir, fy, entries: result.entries, threeB,
+      voucherType: config.voucherType,
+    });
+    const envelope = gstAdjEnvelope(result.entries, threeB, config.voucherType);
+
+    lastGstAdj = { threeB, result, config, envelope };
+
+    return { fy, months: threeB.months, summary: buildSummary(result.entries, config), findings, residual: result.residual, paperPath, importPath };
+  }
+
   async function gst44Review(opts: {
     company?: string;
     fromDate: string;
@@ -5211,6 +5372,7 @@ async function realPathId(p: string): Promise<string> {
     dep3cdRows: () => lastDep3cd,
     write3cdLoans,
     write3cdDepreciation,
+    gstAdjReview,
     gst44Review,
     write3cdGst44,
     gst44Rows: () => lastGst44,

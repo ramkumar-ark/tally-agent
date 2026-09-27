@@ -90,7 +90,7 @@ export async function writeGstAdjImportFile(
   return path;
 }
 
-function headOf(ledger: string, config: GstAdjConfig): string {
+export function headOf(ledger: string, config: GstAdjConfig): string {
   for (const [head, roles] of Object.entries(config.heads)) {
     if (Object.values(roles).includes(ledger)) return head;
   }
