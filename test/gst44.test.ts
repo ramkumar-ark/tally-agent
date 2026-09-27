@@ -96,7 +96,9 @@ describe("gst44 walk", () => {
   });
   it("expenditure without any party is unattributed and raises a finding, not a bucket", () => {
     const books = gst44([v(null, [["Rental A/c", 12000], ["Bank A/c", -12000]])], ctxOf({}), EMPTY_GST44);
-    expect(books.rows[1].total).toBe(0);
+    // The books total still carries it (C5); only the split columns are empty.
+    expect(books.rows[1].total).toBe(12000);
+    expect(books.rows[1].exempt + books.rows[1].composition + books.rows[1].others + books.rows[1].unregistered).toBe(0);
     expect(books.unattributed).toEqual({ capital: 0, revenue: 12000, events: 1 });
     expect(books.findings.filter((f) => f.check === "gst44_unattributed_expenditure")).toHaveLength(1);
   });

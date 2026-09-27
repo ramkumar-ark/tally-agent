@@ -51,6 +51,7 @@ export const partySpend = (p: Gst44Party): number =>
 export interface Gst44Row {
   key: Gst44RowKey;
   label: string;
+  /** The BOOKS total for the row (Winman's column B): attributed spend plus any unattributed spend (C5). */
   total: number;
   exempt: number;
   composition: number;
@@ -156,7 +157,10 @@ export function gst44(vouchers: VoucherRow[], ctx: GstCtx, operator: OperatorGst
     return {
       key,
       label,
-      total: round2(acc.exempt + acc.composition + acc.others + acc.unregistered),
+      // The books total (v1 brief): every expenditure line under this row's
+      // roots, attributed or not — so the split columns need not add across
+      // and the unattributed gap lands in the total alone (C5).
+      total: round2(acc.exempt + acc.composition + acc.others + acc.unregistered + unattributed[key]),
       exempt: round2(acc.exempt),
       composition: round2(acc.composition),
       others: round2(acc.others),
@@ -194,7 +198,8 @@ export function gst44(vouchers: VoucherRow[], ctx: GstCtx, operator: OperatorGst
       amount: round2(unattributed.capital + unattributed.revenue),
       detail:
         `${unattributed.events} expenditure lines (${money(unattributed.capital)} capital, ` +
-        `${money(unattributed.revenue)} revenue) have no party to attribute and are NOT in the Winman rows (C5)`,
+        `${money(unattributed.revenue)} revenue) have no party to attribute: they are in the ` +
+        `row totals (books total) but in no split column (C5)`,
     });
   }
   n = 0;

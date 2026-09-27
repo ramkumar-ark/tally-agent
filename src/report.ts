@@ -1160,7 +1160,7 @@ export function gst44Sheets(result: Gst44ReportResult): Sheet[] {
     name: "Clause 44",
     title: [
       `Break-up of total expenditure, ${displayDate(result.fromDate ?? "")} to ${displayDate(result.toDate ?? "")}`,
-      `What Winman will import (C5): totals are the attributed sums; unattributed expenditure is a finding, never spread.`,
+      `What Winman will import (C5): "Total expenditure" is the books total; the four split columns need not add across it (the gap is unattributed / not-supply expenditure, reported as a finding, never spread).`,
       `Rows: ${result.rows.length}; total expenditure: ${money(GST44_ROWS_TOTAL(result.rows))}.`,
     ],
     columns: [
@@ -1188,7 +1188,7 @@ export function gst44Sheets(result: Gst44ReportResult): Sheet[] {
   return [findings, clause, parties];
 }
 
-/** The attribute a total can only be: the attributed sum itself (C5). */
+/** The books totals both rows carry (C5) — not the attributed sum. */
 function GST44_ROWS_TOTAL(rows: Gst44Row[]): number {
   return round2(rows.reduce((s, r) => s + r.total, 0));
 }

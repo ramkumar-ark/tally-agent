@@ -153,10 +153,13 @@ table's columns are exactly the workbook's headers (§2):
   (they are P&L items in Tally). 
 - **C4:** `Investments` debits are **not** capital expenditure (application of
   funds, not expenditure); capital = `Fixed Assets` root only.
-- **C5 (column B):** `TOTALEXPENDITURE` is written as the sum of the four
-  attributed buckets (B = C+D+E+F per row, internally consistent for import);
-  any expenditure the walk could not attribute to a party is **not** silently
-  spread — it raises a finding so the operator resolves it and re-runs.
+- **C5 (column B) — revised by the captain's v1 brief, 2026-09-27:**
+  `TOTALEXPENDITURE` is the **books total** (B = I, the row's whole amount),
+  so the row no longer adds across: C+D+E+F = G+H falls short of B by exactly
+  column J (not supply / paid to govt), which has no clause-44 column. The four
+  bucket columns are unchanged. Any expenditure the walk could not attribute to
+  a party is **not** silently spread — it raises an informational finding
+  (`gst44_unattributed_expenditure`) and never fails or blocks the fill.
 - **C6 (default for registered-no-tax):** a party with a GSTIN on a voucher
   that charges no GST defaults to the *exempt* column (C) with an ambiguity
   finding, because books cannot distinguish exempt supplies from composition
@@ -230,7 +233,7 @@ carried from the plan (captain decisions, not blockers for the wiring):
 | Winman column | Source | Rule |
 |---|---|---|
 | A `PARTICULARS` | engine | the two pre-filled labels, re-written by the engine (rows ≥ 8 are replaced wholesale) |
-| B `TOTALEXPENDITURE` | engine | sum of the four buckets per row (C5) |
+| B `TOTALEXPENDITURE` | engine | the books total per row — column I = column B (C5, v1 brief); never the attributed sum |
 | C `TOWARDSSUPPLIES` (exempt) | books | party has GSTIN, voucher charges no GST (default; C6) or operator status "Exempt supplies" |
 | D `COMPOSITIONSUPPLIER` | operator only | template status "Composition supplier" (books cannot know) |
 | E `OTHERS` | books | party has GSTIN and voucher charges GST (incl. RCM), or operator status "Registered - others" |
@@ -248,9 +251,10 @@ Reading of the table:
   unreachable from books evidence; a template row is its only source.
 - An operator template row is authoritative for its ledger and wins over the
   books derivation for every bucket (Decision 1.2).
-- Expenditure that attributes to no party never lands in any column: it is
-  reported (`gst44_unattributed_expenditure`) and the row is left internally
-  consistent (B = C+D+E+F) without it (C5).
+- Expenditure that attributes to no party never lands in any of C/D/E/F: it
+  is reported (`gst44_unattributed_expenditure`, informational) while still
+  carrying in the books total B (C5) — so B = C+D+E+F no longer holds and the
+  shortfall is exactly the unattributed / not-supply gap.
 
 ---
 

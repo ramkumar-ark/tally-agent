@@ -662,8 +662,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   a `gst44_composition_unknown` ambiguity finding (C6).
 - The report's Clause 44 sheet title also echoes
   `Total expenditure: money(sum)` — numbers only, no names — so the C5
-  attributed-sum invariant is checkable on-sheet; findings ordinals are
+  books-total figure is checkable on-sheet; findings ordinals are
   TB-space 15–18 (`GST44-015..018-%d` ids).
+- **TOTALEXPENDITURE is the BOOKS total (captain's v1 brief, 2026-09-27)**
+  on every route to the Winman sheet: `readWorksheetTotals` uses the row's
+  column B/I (`amount`), and `gst44()`'s `mkRow` adds the row's unattributed
+  spend to its buckets. The four split columns (C/D/E/F = G+H) are unchanged,
+  so a row deliberately does NOT add across — the shortfall is column J (not
+  supply / paid to govt) plus anything unattributed. The unattributed finding
+  stays informational (`review`/`warning`) and must never fail or block the
+  fill. Never "restore" `total = amount - notSupply` or the attributed sum.
 
 ## Sharp edges found implementing the nature-wise working sheet (2026-09-26)
 
@@ -738,8 +746,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   (I=B, G=I−H−J, F=G−E−D) — never reading G/F/I, which are formulas with no
   cached value until Excel recalculates. Winman mapping: TOWARDSSUPPLIES=D,
   COMPOSITIONSUPPLIER=E, OTHERS=F, REGISTEREDUNDERGST=H (the unregistered
-  column), TOTALEXPENDITURE=G+H=C+D+E+F (C5); J (not supply / paid to govt)
-  has no clause-44 column and is excluded. Without `worksheetPath` the source
+  column), TOTALEXPENDITURE=I=B (the books total, C5); the split columns
+  C+D+E+F = G+H fall short of it by J (not supply / paid to govt), which has
+  no clause-44 column. Without `worksheetPath` the source
   is unchanged (cached review rows). The source .xlsm is never overwritten.
 
 ## Sharp edges found implementing No TDS Disallowance (clause 21(b))

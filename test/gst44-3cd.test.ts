@@ -11,6 +11,7 @@ import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { GST44_PART, makeWinmanGst44Fixture } from "./fixtures/winman-fixture.js";
 import { buildGstWorksheet } from "../src/gst44-worksheet-template.js";
 import { readWorksheetTotals } from "../src/gst44-worksheet-read.js";
+import { readWorkbook } from "../src/xlsx-read.js";
 import type { WsLedgerRow } from "../src/gst44-worksheet.js";
 import type { VoucherRow } from "../src/downstream.js";
 
@@ -201,16 +202,36 @@ describe("readWorksheetTotals", () => {
     expect(capital.label).toBe("Capital Expenditure");
     expect(capital).toMatchObject({ total: 40000, exempt: 0, composition: 0, others: 40000, unregistered: 0 });
     expect(revenue.label).toBe("Revenue Expenditure");
-    // D=30000 exempt, H=8000 unregistered, others = B - H - J - E - D = 100000
+    // D=30000 exempt, H=8000 unregistered, others = B - H - J - E - D = 100000;
+    // total is the BOOKS total (column I = B = 158000), not B - J.
     expect(revenue).toMatchObject({
-      total: 138000,
+      total: 158000,
       exempt: 30000,
       composition: 0,
       others: 100000,
       unregistered: 8000,
     });
-    // Winman C5 invariant: total = exempt + composition + others + unregistered.
-    expect(revenue.total).toBe(revenue.exempt + revenue.composition + revenue.others + revenue.unregistered);
+    // The row no longer adds across: the shortfall is exactly column J (20000).
+    expect(revenue.total - (revenue.exempt + revenue.composition + revenue.others + revenue.unregistered)).toBe(20000);
+  });
+
+  it("TOTALEXPENDITURE is the books total (column I) while C/D/E/F stay put", () => {
+    const rows = readWorksheetTotals(workingSheet());
+    const sheets = readWorkbook(workingSheet());
+    // Column I = B by the sheet's own identity; B's literal per-row sum is the
+    // books total, so both rows' Winman totals must equal it to the paisa.
+    const booksTotalOf = (name: string): number => {
+      const sheet = sheets.find((s) => s.name === name)!;
+      const totalRow = sheet.rows.find((r) => r.cells.get(0)?.value === "TOTAL")!.row;
+      return sheet.rows
+        .filter((r) => r.row >= 5 && r.row < totalRow && typeof r.cells.get(1)?.value === "number")
+        .reduce((s, r) => s + (r.cells.get(1)?.value as number), 0);
+    };
+    const [capital, revenue] = rows;
+    expect(revenue.total).toBe(booksTotalOf("REVENUE"));
+    expect(capital.total).toBe(booksTotalOf("CAPITAL"));
+    expect(capital).toMatchObject({ total: 40000, exempt: 0, composition: 0, others: 40000, unregistered: 0 });
+    expect(revenue).toMatchObject({ exempt: 30000, composition: 0, others: 100000, unregistered: 8000 });
   });
 
   it("errors clearly when the workbook is not a working sheet", () => {
@@ -230,7 +251,7 @@ describe("write3cdGst44 from the approved working sheet", () => {
     const out = await session.write3cdGst44({ sourcePath: src, outPath: dir, worksheetPath: sheetPath });
     expect(readFileSync(src).equals(makeWinmanGst44Fixture())).toBe(true);
     const xml = partText(readXlsm(readFileSync(out)), GST44_PART);
-    for (const v of [138000, 30000, 100000, 8000, 40000]) expect(xml).toMatch(new RegExp(`<v>${v}</v>`));
+    for (const v of [158000, 40000, 30000, 100000, 8000]) expect(xml).toMatch(new RegExp(`<v>${v}</v>`));
     expect(xml).toContain("Capital Expenditure");
     expect(xml).toContain("Revenue Expenditure");
     rmSync(dir, { recursive: true, force: true });

@@ -48,6 +48,6 @@ export const GST44_CONFIRMS: readonly string[] = [
   "C2: the Capital/Revenue two-row split is Winman's presentation of the clause 44 table",
   "C3: Misc. Expenses (ASSET) debits count as revenue expenditure",
   "C4: Investments are not capital expenditure; capital = Fixed Assets root only",
-  "C5: TOTALEXPENDITURE is the attributed sum; unattributed expenditure is a finding, never spread",
+  "C5: TOTALEXPENDITURE is the books total; the four split columns are unchanged and the unattributed gap is an informational finding, never spread",
   "C6: registered GSTIN with no tax charged defaults to the exempt bucket with an ambiguity finding; composition is an operator fact only",
 ];

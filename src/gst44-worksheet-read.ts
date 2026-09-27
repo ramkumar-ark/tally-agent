@@ -23,15 +23,17 @@ import { WS_CAPITAL_SHEET, WS_REVENUE_SHEET } from "./gst44-worksheet-template.j
  * and exactly what the sheet displays, and it means the Winman totals tie to
  * the sheet's TOTAL row to the paisa.
  *
- * Winman column mapping (design of record §5, captain Q-C):
- *   TOTALEXPENDITURE      = G + H   (the sheet's own "ROUNDED (for Winman)" definition)
+ * Winman column mapping (design of record §5, captain's v1 brief, 2026-09-27):
+ *   TOTALEXPENDITURE      = B (= I, the books total)
  *   TOWARDSSUPPLIES       = D       (supplies exempt from GST)
  *   COMPOSITIONSUPPLIER   = E       (entities under composite scheme)
  *   OTHERS                = F       (registered, GST charged)
  *   REGISTEREDUNDERGST    = H       (TRAP: this Winman key names the *unregistered* column)
- * TOTALEXPENDITURE is written as C+D+E+F = G+H so the import stays internally
- * consistent (C5), and the not-supply / paid-to-govt column J is excluded —
- * it has no clause-44 column.
+ * TOTALEXPENDITURE is the BOOKS total (column I = B), so the row no longer
+ * adds across: C+D+E+F = G+H falls short of the total by exactly column J
+ * (not supply on REVENUE, paid to govt on CAPITAL). The four split columns
+ * are unchanged (C5); the gap is column J, which has no clause-44 column and
+ * stays an informational finding rather than anything that fails the fill.
  */
 
 /** 0-based column indexes on both REVENUE and CAPITAL (see gst44-worksheet-template.ts). */
@@ -71,9 +73,10 @@ function sumSheet(rows: GridRow[], key: Gst44RowKey): Gst44Row {
   return {
     key,
     label,
-    // Winman's "Total expenditure" is the registered total plus unregistered,
-    // which is also the sum of the four attributed buckets (C5).
-    total: round2(amount - notSupply),
+    // Winman's "Total expenditure" is the BOOKS total (column I = B), the
+    // row's whole amount — not the attributed sum. The four split columns
+    // (C+D+E+F = G+H) therefore fall short of it by column J (C5).
+    total: round2(amount),
     exempt: round2(exempt),
     composition: round2(composition),
     others: round2(amount - unregistered - notSupply - composition - exempt),
