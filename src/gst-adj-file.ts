@@ -175,6 +175,24 @@ export async function writeGstAdjPaper(
   }
   lines.push("");
 
+  // Live validation checklist
+  lines.push("## Live validation");
+  lines.push("");
+  lines.push("- **Import acceptance**: JSON file written UTF-16 LE with BOM (0xFF 0xFE); vouchernumber omitted\n" +
+    "  from every tallymessage (Tally assigns on import); fbtpaymenttype absent from the envelope.\n" +
+    "  Import a sample voucher into a scratch company and confirm it posts without error.\n" +
+    "  On a fresh export check for duplicate-period files (two files claiming the same month) —\n" +
+    "  parseItc2bFolder warns and first-wins; confirm no period appears twice in gstinByMonth.");
+  lines.push("- **Narration wording**: kinds 4–7/R narration is pattern-extended from DSV/RVS examples —\n" +
+    "  validate against a live import; current templates are placeholders pending confirmation.");
+  lines.push("- **TDS-figure cross-check**: on any month where Table 12 appears in 3B, compare the 3B TDS\n" +
+    "  figure (tdsSectionPresent) against the books TDS credit (gstTdsCredit in config); reconcile\n" +
+    "  before treating the month's net ITC as final.");
+  lines.push("- **3B-GSTIN vs books-GSTIN vs 2B-list-GSTIN agreement**: confirm the GSTIN read from the 3B\n" +
+    "  summary sheet matches the books GSTIN and the 2B list GSTIN per month (gstinByMonth);\n" +
+    "  flag any mismatch as a finding.");
+  lines.push("");
+
   await mkdir(reportDir, { recursive: true });
   await writeFile(path, lines.join("\n"));
   return path;

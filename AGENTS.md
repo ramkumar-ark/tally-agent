@@ -1930,3 +1930,22 @@ When updating this file, preserve this bar for all agents and keep entries conci
   the report write must share one driver session, and a scratch `pause`/narrative file must already
   exist or the driver waits forever (run it detached; a shell timeout kills the driver and loses
   the write).
+
+## Sharp edges found implementing GST adjustment import (2026-09-28)
+
+- **The negative=debit flip lives only in `gstAdjEnvelope`** (`src/gst-adj-file.ts`): the envelope's
+  `allledgerentries` negates DR amounts and leaves CR positive (Tally import convention). Everywhere
+  else positive=debit downstream of the gateway (R-MCP-5). Never re-flip inside `gstAdjEnvelope` —
+  the negation is the *only* place.
+- The 3B parser (`src/gst-adj-3b.ts`) reads **input rows only** — no cached formulas. DSV and RVS
+  workbooks share an identical SPEQTA row map, so one parser serves both inputs.
+- The 2B list parser (`src/gst-adj-2b.ts`) maps five real reconciliation column layouts by **joined
+  header text** (row 6+7 compound), takes the month from the **in-sheet A3 period** (filenames lie —
+  jan=feb=mar copies are byte-identical), and treats a missing file or sheet as an empty list (no error).
+- Narration wording for kinds 3–7/R is pattern-extended pending live validation — the current
+  templates are placeholders derived from the DSV/RVS examples.
+- `vouchernumber` is **omitted from import envelopes** pending live import validation (Tally assigns
+  on import); the envelope uses `vouchernumberseries: "Default"` instead.
+- RVS 3B + reference JSON are **format examples from other registrations** — expected not to tie to
+  the target company's books; they validate shape only.
+- Target company is **DSV Infra**.
