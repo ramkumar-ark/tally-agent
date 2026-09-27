@@ -442,6 +442,32 @@ export function as26FindingId(check: As26CheckId, ordinal: number): string {
   return `AS26-${String(AS26_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
 }
 
+export type GadjCheckId =
+  | "gadj_books_missing"
+  | "gadj_claim_exceeds_books"
+  | "gadj_config_ledger_missing"
+  | "gadj_list_reappearance"
+  | "gadj_registration_mismatch"
+  | "gadj_residual_untraced"
+  | "gadj_tds_credit_unsupported"
+  | "gadj_3b_ledger_mismatch";
+
+/** GADJ ids live in their own ordinal space (GADJ-<ordinal>-<n>). */
+export const GADJ_CHECK_ORDINAL: Record<GadjCheckId, number> = {
+  gadj_books_missing: 1,
+  gadj_claim_exceeds_books: 2,
+  gadj_config_ledger_missing: 3,
+  gadj_list_reappearance: 4,
+  gadj_registration_mismatch: 5,
+  gadj_residual_untraced: 6,
+  gadj_tds_credit_unsupported: 7,
+  gadj_3b_ledger_mismatch: 8,
+};
+
+export function gadjFindingId(check: GadjCheckId, ordinal: number): string {
+  return `GADJ-${String(GADJ_CHECK_ORDINAL[check]).padStart(3, "0")}-${ordinal}`;
+}
+
 export interface As26ScheduleRow {
   label: string; // masked invoice ref or voucher-type + date
   amount: number;
