@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { make3bWorkbook } from "./helpers/gst-adj-3b.js";
+import { make3bWorkbook, SECTIONS } from "./helpers/gst-adj-3b.js";
 import { parseThreeB } from "../src/gst-adj-3b.js";
 
 describe("parseThreeB month binding", () => {
@@ -16,5 +16,53 @@ describe("parseThreeB month binding", () => {
   });
   it("throws citing the row when a header is not a month", () => {
     expect(() => parseThreeB(make3bWorkbook({ months: ["Foo", "May"] }))).toThrow(/row 4/i);
+  });
+});
+
+describe("parseThreeB section extraction", () => {
+  const s = parseThreeB(make3bWorkbook());
+  it("extracts outwardTaxable", () => {
+    expect(s.outwardTaxable["2025-05"]).toBe(1000);
+  });
+  it("extracts outwardTax by head", () => {
+    expect(s.outwardTax["2025-05"].igst).toBe(103.03);
+    expect(s.outwardTax["2025-05"].sgst).toBe(102.02);
+    expect(s.outwardTax["2025-05"].cess).toBe(104.04);
+    expect(s.outwardTax["2025-05"].cgst).toBe(101.01);
+  });
+  it("extracts rcmTax by head", () => {
+    expect(s.rcmTax["2025-05"].igst).toBe(11.12);
+    expect(s.rcmTax["2025-05"].cgst).toBe(11.11);
+  });
+  it("extracts itcRcm by head", () => {
+    expect(s.itcRcm["2025-05"].igst).toBe(21.22);
+    expect(s.itcRcm["2025-05"].sgst).toBe(21.21);
+  });
+  it("extracts itcOther by head", () => {
+    expect(s.itcOther["2025-05"].igst).toBe(31.32);
+    expect(s.itcOther["2025-05"].cgst).toBe(31.31);
+  });
+  it("adds itcReversed parts together", () => {
+    expect(s.itcReversed["2025-05"].igst).toBe(41.41 + 42.42);
+    expect(s.itcReversed["2025-05"].sgst).toBe(41.41 + 42.42);
+    expect(s.itcReversed["2025-05"].cess).toBe(41.41 + 43.43);
+    expect(s.itcReversed["2025-05"].cgst).toBe(41.41 + 43.43);
+  });
+  it("computes netItc as raw minus reclaimed", () => {
+    expect(s.netItc["2025-05"].igst).toBe(51.51 - 52.52);
+    expect(s.netItc["2025-05"].sgst).toBe(51.52 - 52.52);
+    expect(s.netItc["2025-05"].cess).toBe(51.53 - 52.55);
+    expect(s.netItc["2025-05"].cgst).toBe(51.51 - 53.53);
+  });
+  it("extracts itcReclaimed by head", () => {
+    expect(s.itcReclaimed["2025-05"].sgst).toBe(52.52);
+  });
+  it("flags tdsSectionPresent from Table 12", () => {
+    expect(s.tdsSectionPresent).toBe(true);
+  });
+  it("degrades to all-zero on a workbook without the TDS sheet", () => {
+    const s2 = parseThreeB(make3bWorkbook({ rows: SECTIONS.filter((r) => !r.label.includes("reclaimed") && !r.label.toLowerCase().includes("table 12")) }));
+    expect(s2.tdsSectionPresent).toBe(false);
+    expect(s2.itcReclaimed["2025-05"].sgst).toBe(0);
   });
 });

@@ -34,19 +34,21 @@ function isTaxLabel(label: string): boolean {
   return false;
 }
 
-const ANCHOR_TEXTS = [
-  "sales summary",
-  "tax on outward supply",
-  "tax payable under rcm",
-  "input tax (reverse charge)",
-  "all other itc",
-  "itc reversed",
-  "net itc available",
-  "(d)-1 itc reclaimed",
-  "(d)-2 ineligible",
-  "table 12",
-  "payment of tax",
-];
+const ANCHOR_SECTIONS: Record<string, string> = {
+  "sales summary": "sales summary",
+  "tax on outward supply": "outwardTax",
+  "tax payable under rcm": "rcmTax",
+  "input tax (reverse charge)": "itcRcm",
+  "all other itc": "itcOther",
+  "itc reversed": "itcReversed",
+  "net itc available": "netItc",
+  "(d)-1 itc reclaimed": "itcReclaimed",
+  "(d)-2 ineligible": "(d)-2 ineligible",
+  "table 12": "table 12",
+  "payment of tax": "payment of tax",
+};
+
+const ANCHOR_TEXTS = Object.keys(ANCHOR_SECTIONS);
 
 function fyFromTitle(title: string): string | null {
   const m = /f[\s.]*y[\s.]*(\d{4})\s*-\s*(\d{2,4})/.exec(title);
@@ -145,22 +147,10 @@ export function parseThreeB(buf: Buffer): ThreeBSummary {
     const colA = rowMap.get(0) ?? "";
     const cn = norm(colA);
 
-    let matchedAnchor = "";
-    for (const text of ANCHOR_TEXTS) {
-      if (cn.includes(text)) { matchedAnchor = text; break; }
-    }
-    if (matchedAnchor) {
-      currentSection = matchedAnchor;
-      taxPosInSection.set(currentSection, 0);
-      continue;
-    }
-
-    if (!currentSection) continue;
-
     if (isTaxLabel(cn)) {
       const pos = taxPosInSection.get(currentSection) ?? 0;
       taxPosInSection.set(currentSection, pos + 1);
-      const tk = TAX_LABELS[pos];
+      const tk = TAX_LABELS[pos % 4];
       if (tk) {
         for (const [m, c] of monthCol.entries()) {
           const raw = rowMap.get(c);
@@ -168,16 +158,31 @@ export function parseThreeB(buf: Buffer): ThreeBSummary {
           const val = parseFloat(raw);
           if (!isNaN(val)) {
             switch (currentSection) {
-              case "outwardTax": outwardTax[m][tk] = val; break;
-              case "rcmTax": rcmTax[m][tk] = val; break;
-              case "itcRcm": itcRcm[m][tk] = val; break;
-              case "itcOther": itcOther[m][tk] = val; break;
-              case "itcReversed": itcReversed[m][tk] = val; break;
-              case "netItc": netItc[m][tk] = val; break;
-              case "itcReclaimed": itcReclaimed[m][tk] = val; break;
+              case "outwardTax": outwardTax[m][tk] += val; break;
+              case "rcmTax": rcmTax[m][tk] += val; break;
+              case "itcRcm": itcRcm[m][tk] += val; break;
+              case "itcOther": itcOther[m][tk] += val; break;
+              case "itcReversed": itcReversed[m][tk] += val; break;
+              case "netItc": netItc[m][tk] += val; break;
+              case "itcReclaimed": itcReclaimed[m][tk] += val; break;
             }
           }
         }
+      }
+      continue;
+    }
+
+    let matchedAnchor = "";
+    for (const text of ANCHOR_TEXTS) {
+      if (cn.includes(text)) { matchedAnchor = text; break; }
+    }
+    if (matchedAnchor) {
+      const sec = ANCHOR_SECTIONS[matchedAnchor];
+      if (sec === currentSection) {
+        taxPosInSection.set(currentSection, (taxPosInSection.get(currentSection) ?? 0) + 4);
+      } else {
+        currentSection = sec;
+        taxPosInSection.set(currentSection, 0);
       }
       continue;
     }
