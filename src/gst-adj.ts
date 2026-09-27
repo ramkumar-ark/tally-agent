@@ -13,11 +13,12 @@ export interface GadjEntry {
   legs: Array<{ dr: string; cr: string; amount: number }>;
 }
 export interface GadjFinding { id: string; severity: "warning" | "review"; detail: string; }
+export interface GstAdjResidual { head: string; route: string; amount: number; months: string[]; }
 export interface GstAdjResult {
   entries: GadjEntry[];
   findings: GadjFinding[];
   tieout: Array<{ month: string; kind: number; head: string; entry: number; threeB: number | null; note?: string }>;
-  residual: [];
+  residual: GstAdjResidual[];
 }
 
 export function booksMovements(
@@ -280,6 +281,9 @@ export function analyzeGstAdj(input: {
             ]);
           }
           result.tieout.push({ month, kind: 8, head: h, entry: residual, threeB: null, note: `residual routed to ${routeName}` });
+          const existing = result.residual.find((r) => r.head === h && r.route === routeName);
+          if (existing) { existing.amount += residual; existing.months.push(month); }
+          else { result.residual.push({ head: h, route: routeName, amount: residual, months: [month] }); }
         } else if (residual < -1) {
           result.findings.push({
             id: "gadj_claim_exceeds_books", severity: "warning",
