@@ -26,7 +26,7 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the forty-six approved tools", () => {
+  it("exposes exactly the forty-eight approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",
@@ -38,6 +38,7 @@ describe("tool surface", () => {
       "tb_depreciation_review",
       "tb_fixed_asset_register",
       "tb_gst44_review",
+      "tb_gst_adj_review",
       "tb_gst_mismatch",
       "tb_gst_summary",
       "tb_ledger_activity",
@@ -63,6 +64,7 @@ describe("tool surface", () => {
       "tb_write_fixed_asset_report",
       "tb_write_gst44_report",
       "tb_write_gst44_template",
+      "tb_write_gst_adj_file",
       "tb_write_gst_report",
       "tb_write_gst_working_sheet",
       "tb_write_ledger_report",

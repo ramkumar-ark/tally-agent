@@ -62,6 +62,7 @@ import {
   type Dep3cdReviewResult,
   type FaReviewResult,
   type Gst44ReviewResult,
+  type GstAdjSessionResult,
   type GstMismatchResult,
   type LedgerScrutinyResult,
   type PfEsiReviewResult,
@@ -163,7 +164,8 @@ export function registerTools(
   let lastFa: FaReviewResult | undefined;
   let lastPfEsi: PfEsiReviewResult | undefined;
   let lastLoans: LoansReviewResult | undefined;
-let lastGst44: Gst44ReviewResult | undefined;
+  let lastGst44: Gst44ReviewResult | undefined;
+  let lastGstAdj: GstAdjSessionResult | undefined;
   let lastDep3cd: Dep3cdReviewResult | undefined;
   /** scrutinyId -> the latest scrutiny of that ledger; a re-run replaces it. */
   const scrutinies = new Map<string, LedgerScrutinyResult>();
@@ -320,6 +322,64 @@ let lastGst44: Gst44ReviewResult | undefined;
       const rows = summary.heads.filter((h) => h.output || h.input).length + summary.taxLedgers.length;
       await audit("tb_gst_summary", { company: args.company, fromDate: args.fromDate, toDate: args.toDate }, rows, 0);
       return JSON.stringify(summary, null, 2);
+    },
+  );
+
+  register(
+    "tb_gst_adj_review",
+    "Reconcile the GST Adjustment workbook (Three-B) against the books: ITC 2B list diffs, " +
+      "registration cross-check, and the monthly 2B reconciliation. Pass the PATH of the Three-B workbook " +
+      "(threeBPath) — its contents are read inside the gateway; never paste workbook rows into chat. " +
+      "Optionally pass the folder of monthly ITC-2B reconciliation workbooks (itc2bPath) as a path-only " +
+      "channel, the GST adjustment config file (gstAdjConfigPath), and/or a day-book JSON export (dayBookPath) " +
+      "to run the books from the operator's file instead of live Tally. Parties appear as pseudonyms; " +
+      "drill in with tb_ledger_activity using the finding id.",
+    {
+      threeBPath: z.string().describe("Path to the Three-B workbook; read inside the gateway"),
+      itc2bPath: z.string().optional()
+        .describe("Optional PATH to the folder of monthly ITC-2B reconciliation workbooks; read inside the gateway"),
+      gstAdjConfigPath: z.string().optional()
+        .describe("Optional PATH to the GST adjustment config JSON; read inside the gateway"),
+      dayBookPath: z.string().optional()
+        .describe(
+          "Optional PATH to a day-book JSON export; the books are read from that file instead of live Tally",
+        ),
+      company: z.string().optional(),
+      fromDate: z.string().describe("Period start, YYYYMMDD"),
+      toDate: z.string().describe("Period end, YYYYMMDD"),
+    },
+    async (args) => {
+      let dayBook: DayBookInput | undefined;
+      if (args.dayBookPath) {
+        const text = await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes);
+        dayBook = readDayBook(text, {
+          company: args.company ?? cfg.defaultCompany,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        });
+      }
+      const result = await session.gstAdjReview({
+        company: args.company,
+        threeBPath: args.threeBPath,
+        itc2bPath: args.itc2bPath,
+        gstAdjConfigPath: args.gstAdjConfigPath,
+        dayBook,
+        fromDate: args.fromDate,
+        toDate: args.toDate,
+      });
+      lastGstAdj = result;
+      await audit(
+        "tb_gst_adj_review",
+        {
+          threeBPath: args.threeBPath,
+          itc2bPath: args.itc2bPath,
+          gstAdjConfigPath: args.gstAdjConfigPath,
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+        },
+        result.findings.length,
+        0,
+      );
+      return JSON.stringify(result, null, 2);
     },
   );
 
@@ -865,6 +925,22 @@ let lastGst44: Gst44ReviewResult | undefined;
       await writeFile(outPath, buildGst44Template({ company: args.company, ledgers }));
       await audit("tb_write_gst44_template", { company: args.company, outDir, dayBookPath: args.dayBookPath ?? null }, 0, 0);
       return JSON.stringify({ templatePath: outPath }, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_gst_adj_file",
+    "Return the cached GST adjustment import envelope and its stats from the last " +
+      "tb_gst_adj_review run. The envelope was already written during review; this tool " +
+      "re-writes it and reports its path and envelope stats. Real names are restored on write.",
+    {},
+    async () => {
+      if (!lastGstAdj) throw new Error("run tb_gst_adj_review first: there are no gst adj findings to write");
+      const buf = await readFile(lastGstAdj.importPath);
+      const env = JSON.parse(buf.toString("utf16le").replace(/^\uFEFF/, ""));
+      const envelopeStats = { vouchers: env.tallymessage?.length ?? 0 };
+      await audit("tb_write_gst_adj_file", {}, envelopeStats.vouchers, 0);
+      return JSON.stringify({ importPath: lastGstAdj.importPath, envelopeStats }, null, 2);
     },
   );
 
