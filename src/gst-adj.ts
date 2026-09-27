@@ -12,7 +12,12 @@ export interface GadjEntry {
   legs: Array<{ dr: string; cr: string; amount: number }>;
 }
 export interface GadjFinding { id: string; severity: "warning" | "review"; detail: string; }
-export interface GstAdjResult { entries: GadjEntry[]; findings: GadjFinding[]; }
+export interface GstAdjResult {
+  entries: GadjEntry[];
+  findings: GadjFinding[];
+  tieout: Array<{ month: string; kind: number; head: string; entry: number; threeB: number | null; note?: string }>;
+  residual: [];
+}
 
 export function booksMovements(
   vouchers: VoucherRow[],
@@ -97,7 +102,8 @@ export function analyzeGstAdj(input: {
   knownLedgers?: Set<string>;
 }): GstAdjResult {
   const { threeB, movements, config } = input;
-  const result: GstAdjResult = { entries: [], findings: [] };
+  const knownLedgers = input.knownLedgers ?? new Set<string>();
+  const result: GstAdjResult = { entries: [], findings: [], tieout: [], residual: [] };
 
   for (const { month, date, monthName, yearStr } of monthIterator(threeB.months)) {
     const kind1Legs: Array<{ dr: string; cr: string; amount: number }> = [];
@@ -142,6 +148,83 @@ export function analyzeGstAdj(input: {
     }
     if (kind2Legs.length > 0) {
       pushEntry(result.entries, 2, month, date, `being input gst for the month ${monthName} ${yearStr}`, kind2Legs);
+    }
+
+    // Kind 3: RCM attribution (no voucher, tieout only)
+    for (const h of HEAD_ORDER) {
+      const rcmAmount = threeB.itcRcm[month]?.[h] ?? 0;
+      if (rcmAmount > TOLERANCE) {
+        const kind2Amount = threeB.netItc[month]?.[h] ?? 0;
+        result.tieout.push({ month, kind: 3, head: h, entry: kind2Amount, threeB: rcmAmount, note: "included in the 4C claim (kind 2)" });
+        if (rcmAmount > (threeB.rcmTax[month]?.[h] ?? 0) + TOLERANCE) {
+          result.findings.push({
+            id: "gadj_3b_ledger_mismatch", severity: "review",
+            detail: `RCM ITC without matching RCM liability for ${h}`,
+          });
+        }
+      }
+    }
+
+    // Kind 4: 4(B)(1) reversal (ledger reclassification)
+    for (const h of HEAD_ORDER) {
+      const reversedAmount = threeB.itcReversed[month]?.[h] ?? 0;
+      if (reversedAmount > TOLERANCE) {
+        const toBeReversed = config.heads[h]?.toBeReversed;
+        const inputLedger = config.heads[h]?.input;
+        if (toBeReversed && inputLedger) {
+          pushEntry(result.entries, 4, month, date, `being itc reversal 4(b)(1) for the month ${monthName} ${yearStr}`, [
+            { dr: toBeReversed, cr: inputLedger, amount: reversedAmount },
+          ]);
+        }
+        const kind2Amount = threeB.netItc[month]?.[h] ?? 0;
+        result.tieout.push({ month, kind: 4, head: h, entry: kind2Amount, threeB: reversedAmount, note: "reversal already inside 4C (kind 2); ledger reclassification only" });
+      }
+    }
+
+    // Kind 7: TDS credit from config
+    const anyGstTdsCredit = Object.values(config.gstTdsCredit).some((monthMap) =>
+      Object.values(monthMap).some((v) => v > 0),
+    );
+    const tdsSectionNote = !threeB.tdsSectionPresent && anyGstTdsCredit
+      ? "; the 3B workbook carries no TDS section; figure taken from config"
+      : "";
+    const suppressedRoles = new Set<string>();
+    for (const h of HEAD_ORDER) {
+      const tdsLedger = config.heads[h]?.tds;
+      if (!tdsLedger) {
+        suppressedRoles.add(h);
+        result.findings.push({
+          id: "gadj_config_ledger_missing", severity: "warning",
+          detail: `no tds ledger configured for ${h}`,
+        });
+      }
+    }
+    for (const h of HEAD_ORDER) {
+      const configFigure = config.gstTdsCredit[month]?.[h];
+      if (!configFigure || configFigure <= TOLERANCE) continue;
+      if (suppressedRoles.has(h)) continue;
+      const tdsLedger = config.heads[h]!.tds;
+      const payable = config.heads[h]?.payable;
+      if (payable) {
+        pushEntry(result.entries, 7, month, date, `being tds credit for the month ${monthName} ${yearStr}`, [
+          { dr: tdsLedger, cr: payable, amount: configFigure },
+        ]);
+      }
+      const mv = movements.get(month);
+      if (mv && mv.has(tdsLedger)) {
+        const booksMovement = mv.get(tdsLedger) ?? 0;
+        if (Math.abs(booksMovement) > TOLERANCE && Math.abs(booksMovement) !== Math.abs(configFigure)) {
+          result.findings.push({
+            id: "gadj_tds_credit_unsupported", severity: "warning",
+            detail: `tds credit ${configFigure} differs from books ${Math.abs(booksMovement)}${tdsSectionNote}`,
+          });
+        }
+      } else if (knownLedgers.has(tdsLedger)) {
+        result.findings.push({
+          id: "gadj_tds_credit_unsupported", severity: "review",
+          detail: `tds ledger has no books movement${tdsSectionNote}`,
+        });
+      }
     }
   }
 

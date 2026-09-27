@@ -1,11 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { booksMovements, roleResolver, analyzeGstAdj } from "../src/gst-adj.js";
 import type { VoucherEntry, VoucherRow } from "../src/downstream.js";
+import type { Head, ThreeBSummary } from "../src/gst-adj-3b.js";
 import { parseThreeB } from "../src/gst-adj-3b.js";
 import { loadGstAdjConfig } from "../src/gst-adj-config.js";
 import { make3bWorkbook } from "./helpers/gst-adj-3b.js";
 
 const cfg = loadGstAdjConfig(undefined, () => {});
+
+function makeAdjThreeB(overrides: Partial<ThreeBSummary>): ThreeBSummary {
+  return {
+    companyName: "Test Constructions",
+    gstin: "33AAAAA0000A0Z0",
+    state: "Tamil Nadu",
+    months: ["2025-05"],
+    outwardTaxable: {},
+    outwardTax: {},
+    rcmTax: {},
+    itcRcm: {},
+    itcOther: {},
+    itcReversed: {},
+    netItc: {},
+    itcReclaimed: {},
+    ...overrides,
+  };
+}
+
+const emptyHead: Head = { igst: 0, cgst: 0, sgst: 0, cess: 0 };
 
 function vr(date: string, entries: Array<[string, number]>, extra: Partial<VoucherRow> = {}): VoucherRow {
   return {
@@ -57,7 +78,7 @@ describe("analyzeGstAdj", () => {
     mayMv.set("Input CGST A/c", -100);
     movements.set("2025-05", mayMv);
 
-    const result = analyzeGstAdj({ threeB, movements, config: cfg });
+    const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
 
     const entries = result.entries;
     expect(entries).toHaveLength(2);
@@ -88,7 +109,7 @@ describe("analyzeGstAdj", () => {
     mayMv.set("Input CGST A/c", -100);
     movements.set("2025-05", mayMv);
 
-    const result = analyzeGstAdj({ threeB, movements, config: cfg });
+    const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
 
     const findings = result.findings;
     const cgstWarnings = findings.filter((f) => f.id === "gadj_3b_ledger_mismatch" && f.severity === "warning");
@@ -96,5 +117,106 @@ describe("analyzeGstAdj", () => {
 
     expect(cgstWarnings.length).toBeGreaterThanOrEqual(1);
     expect(cgstReviews.length).toBeGreaterThanOrEqual(1);
+  });
+
+  describe("kind 3 — RCM attribution", () => {
+    it("produces tieout + review finding when RCM ITC exceeds RCM liability", () => {
+      const threeB = makeAdjThreeB({
+        itcRcm: { "2025-05": { ...emptyHead, cgst: 200 } },
+        rcmTax: { "2025-05": { ...emptyHead, cgst: 100 } },
+      });
+      const movements = new Map<string, Map<string, number>>();
+      const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
+
+      const tieout = result.tieout.filter((t) => t.kind === 3);
+      expect(tieout).toHaveLength(1);
+      expect(tieout[0]).toEqual({ month: "2025-05", kind: 3, head: "cgst", entry: 0, threeB: 200, note: "included in the 4C claim (kind 2)" });
+
+      const findings = result.findings.filter((f) => f.id === "gadj_3b_ledger_mismatch");
+      expect(findings).toHaveLength(1);
+      expect(findings[0].severity).toBe("review");
+      expect(findings[0].detail).toBe("RCM ITC without matching RCM liability for cgst");
+    });
+
+    it("produces tieout only when RCM ITC equals RCM liability", () => {
+      const threeB = makeAdjThreeB({
+        itcRcm: { "2025-05": { ...emptyHead, cgst: 100 } },
+        rcmTax: { "2025-05": { ...emptyHead, cgst: 100 } },
+      });
+      const movements = new Map<string, Map<string, number>>();
+      const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
+
+      const tieout = result.tieout.filter((t) => t.kind === 3);
+      expect(tieout).toHaveLength(1);
+      expect(result.findings.filter((f) => f.id === "gadj_3b_ledger_mismatch")).toHaveLength(0);
+    });
+  });
+
+  describe("kind 4 — 4(B)(1) reversal", () => {
+    it("produces kind-4 entry with reversal narration and tieout", () => {
+      const threeB = makeAdjThreeB({
+        itcReversed: { "2025-05": { ...emptyHead, cgst: 50 } },
+      });
+      const movements = new Map<string, Map<string, number>>();
+      const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
+
+      const entries = result.entries;
+      const kind4 = entries.find((e) => e.kind === 4);
+      expect(kind4).toBeDefined();
+      expect(kind4!.month).toBe("2025-05");
+      expect(kind4!.date).toBe("20250531");
+      expect(kind4!.narration).toBe("being itc reversal 4(b)(1) for the month May 2025");
+      expect(kind4!.legs).toHaveLength(1);
+      expect(kind4!.legs[0]).toEqual({ dr: "Input CGST To Be Reversed A/c", cr: "Input CGST A/c", amount: 50 });
+
+      const tieout = result.tieout.filter((t) => t.kind === 4);
+      expect(tieout).toHaveLength(1);
+      expect(tieout[0]).toEqual({ month: "2025-05", kind: 4, head: "cgst", entry: 0, threeB: 50, note: "reversal already inside 4C (kind 2); ledger reclassification only" });
+    });
+  });
+
+  describe("kind 7 — TDS credit from config", () => {
+    it("reports warning when tds ledger movement differs from config figure", () => {
+      const cfg7 = { ...cfg, gstTdsCredit: { "2025-05": { cgst: 300 } } };
+      const threeB = makeAdjThreeB({ tdsSectionPresent: true });
+      const movements = new Map<string, Map<string, number>>();
+      const mayMv = new Map<string, number>();
+      mayMv.set("GST TDS CGST A/c", -350);
+      movements.set("2025-05", mayMv);
+      const result = analyzeGstAdj({ threeB, movements, config: cfg7, knownLedgers: new Set() });
+
+      const findings = result.findings.filter((f) => f.id === "gadj_tds_credit_unsupported");
+      expect(findings).toHaveLength(1);
+      expect(findings[0].severity).toBe("warning");
+      expect(findings[0].detail).toBe("tds credit 300 differs from books 350");
+    });
+
+    it("reports review when tds ledger has no books movement but exists in knownLedgers", () => {
+      const cfg7 = { ...cfg, gstTdsCredit: { "2025-05": { cgst: 300 } } };
+      const threeB = makeAdjThreeB({ tdsSectionPresent: true });
+      const movements = new Map<string, Map<string, number>>();
+      const knownLedgers = new Set<string>();
+      knownLedgers.add("GST TDS CGST A/c");
+      const result = analyzeGstAdj({ threeB, movements, config: cfg7, knownLedgers });
+
+      const findings = result.findings.filter((f) => f.id === "gadj_tds_credit_unsupported");
+      expect(findings).toHaveLength(1);
+      expect(findings[0].severity).toBe("review");
+      expect(findings[0].detail).toBe("tds ledger has no books movement");
+    });
+
+    it("appends 3B section note when tdsSectionPresent is false", () => {
+      const cfg7 = { ...cfg, gstTdsCredit: { "2025-05": { cgst: 300 } } };
+      const threeB = makeAdjThreeB({ tdsSectionPresent: false });
+      const movements = new Map<string, Map<string, number>>();
+      const knownLedgers = new Set<string>();
+      knownLedgers.add("GST TDS CGST A/c");
+      const result = analyzeGstAdj({ threeB, movements, config: cfg7, knownLedgers });
+
+      const findings = result.findings.filter((f) => f.id === "gadj_tds_credit_unsupported");
+      expect(findings).toHaveLength(1);
+      expect(findings[0].severity).toBe("review");
+      expect(findings[0].detail).toBe("tds ledger has no books movement; the 3B workbook carries no TDS section; figure taken from config");
+    });
   });
 });
