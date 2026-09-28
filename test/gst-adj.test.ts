@@ -84,10 +84,10 @@ describe("booksMovements", () => {
     vr("20250601" as unknown as string, [["Input CGST A/c", -50], ["P", 50]]),
   ];
   const mv = booksMovements(vouchers, roleResolver(cfg));
-  it("maps month → role → net signed amount", () => {
-    expect(mv.get("2025-05")!.get("input")).toBe(-100);
-    expect(mv.get("2025-05")!.get("output")).toBe(-400);
-    expect(mv.get("2025-06")!.get("input")).toBe(-50);
+  it("maps month → ledger → net signed amount", () => {
+    expect(mv.get("2025-05")!.get("Input CGST A/c")).toBe(-100);
+    expect(mv.get("2025-05")!.get("Output CGST A/c")).toBe(-400);
+    expect(mv.get("2025-06")!.get("Input CGST A/c")).toBe(-50);
   });
 });
 
@@ -127,7 +127,7 @@ describe("analyzeGstAdj", () => {
     const mayMv = new Map<string, number>();
     mayMv.set("Output CGST A/c", -400);
     mayMv.set("Output SGST A/c", -400);
-    mayMv.set("Input CGST A/c", -100);
+    mayMv.set("Input CGST A/c", 100);
     movements.set("2025-05", mayMv);
 
     const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
@@ -155,10 +155,10 @@ describe("analyzeGstAdj", () => {
 
   it("reports mismatch and review findings when books differ from 3B", () => {
     const movements = new Map<string, Map<string, number>>();
-    const mayMv = new Map<string, number>();
-    mayMv.set("Output CGST A/c", -350);
-    mayMv.set("Output SGST A/c", -400);
-    mayMv.set("Input CGST A/c", -100);
+const mayMv = new Map<string, number>();
+      mayMv.set("Output CGST A/c", 350);
+      mayMv.set("Output SGST A/c", -400);
+      mayMv.set("Input CGST A/c", 100);
     movements.set("2025-05", mayMv);
 
     const result = analyzeGstAdj({ threeB, movements, config: cfg, knownLedgers: new Set() });
@@ -280,10 +280,10 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const mayMv = new Map<string, number>();
-      mayMv.set("Input CGST A/c", -1000);
+      mayMv.set("Input CGST A/c", 1000);
       movements.set("2025-05", mayMv);
       const junMv = new Map<string, number>();
-      junMv.set("Input CGST A/c", -600);
+      junMv.set("Input CGST A/c", 600);
       movements.set("2025-06", junMv);
 
       const listDiffs = {
@@ -316,7 +316,7 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const mayMv = new Map<string, number>();
-      mayMv.set("Input CGST A/c", -1000);
+      mayMv.set("Input CGST A/c", 1000);
       movements.set("2025-05", mayMv);
 
       const listDiffs = {
@@ -340,7 +340,7 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const junMv = new Map<string, number>();
-      junMv.set("Input CGST A/c", -600);
+      junMv.set("Input CGST A/c", 600);
       movements.set("2025-06", junMv);
 
       const listDiffs = {
@@ -372,7 +372,7 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const julMv = new Map<string, number>();
-      julMv.set("Input CGST A/c", -300);
+      julMv.set("Input CGST A/c", 300);
       movements.set("2025-07", julMv);
 
       const listDiffs = {
@@ -405,7 +405,7 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const julMv = new Map<string, number>();
-      julMv.set("Input CGST A/c", -300);
+      julMv.set("Input CGST A/c", 300);
       movements.set("2025-07", julMv);
 
       const listDiffs = { "2025-07": { newly: [], dropped: [] } };
@@ -427,7 +427,7 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const julMv = new Map<string, number>();
-      julMv.set("Input CGST A/c", -50);
+      julMv.set("Input CGST A/c", 50);
       movements.set("2025-07", julMv);
 
       const listDiffs = { "2025-07": { newly: [], dropped: [] } };
@@ -451,7 +451,7 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const julMv = new Map<string, number>();
-      julMv.set("Input CGST A/c", -50);
+      julMv.set("Input CGST A/c", 50);
       movements.set("2025-07", julMv);
 
       const listDiffs = { "2025-07": { newly: [], dropped: [] } };
@@ -478,13 +478,13 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const mayMv = new Map<string, number>();
-      mayMv.set("Input CGST A/c", -1000);
+      mayMv.set("Input CGST A/c", 1000);
       movements.set("2025-05", mayMv);
       const junMv = new Map<string, number>();
-      junMv.set("Input CGST A/c", -600);
+      junMv.set("Input CGST A/c", 600);
       movements.set("2025-06", junMv);
       const julMv = new Map<string, number>();
-      julMv.set("Input CGST A/c", -300);
+      julMv.set("Input CGST A/c", 300);
       movements.set("2025-07", julMv);
 
       const listDiffs = {
@@ -517,10 +517,10 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const mayMv = new Map<string, number>();
-      mayMv.set("Input CGST A/c", -1000);
+      mayMv.set("Input CGST A/c", 1000);
       movements.set("2025-05", mayMv);
       const junMv = new Map<string, number>();
-      junMv.set("Input CGST A/c", -600);
+      junMv.set("Input CGST A/c", 600);
       movements.set("2025-06", junMv);
 
       const listDiffs = {
@@ -546,13 +546,13 @@ describe("analyzeGstAdj", () => {
       });
       const movements = new Map<string, Map<string, number>>();
       const mayMv = new Map<string, number>();
-      mayMv.set("Input CGST A/c", -1000);
+      mayMv.set("Input CGST A/c", 1000);
       movements.set("2025-05", mayMv);
       const junMv = new Map<string, number>();
-      junMv.set("Input CGST A/c", -600);
+      junMv.set("Input CGST A/c", 600);
       movements.set("2025-06", junMv);
       const julMv = new Map<string, number>();
-      julMv.set("Input CGST A/c", -300);
+      julMv.set("Input CGST A/c", 300);
       movements.set("2025-07", julMv);
 
       const listDiffs = {
@@ -570,9 +570,9 @@ describe("analyzeGstAdj", () => {
       const junInput = adjusted.get("2025-06")!.get("Input CGST A/c") ?? 0;
       const julInput = adjusted.get("2025-07")!.get("Input CGST A/c") ?? 0;
 
-      expect(mayInput).toBe(-1400);
-      expect(junInput).toBe(-200);
-      expect(julInput).toBe(-500);
+      expect(mayInput).toBe(600);
+      expect(junInput).toBe(1000);
+      expect(julInput).toBe(100);
 
       const kind5may = result.entries.find((e) => e.kind === 5);
       expect(kind5may).toBeDefined();

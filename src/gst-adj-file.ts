@@ -105,9 +105,10 @@ export async function writeGstAdjPaper(
     result: GstAdjResult;
     config: GstAdjConfig;
     contributions: Map<string, VoucherRow[]>;
+    alreadyPosted?: VoucherRow[];
   },
 ): Promise<string> {
-  const { reportDir, fy, result, config, contributions } = opts;
+  const { reportDir, fy, result, config, contributions, alreadyPosted } = opts;
   const path = join(reportDir, `gst-adjustments-${fy}-working-paper.md`);
 
   const lines: string[] = [];
@@ -133,6 +134,19 @@ export async function writeGstAdjPaper(
     lines.push(`| ${month} | ${kind} | ${head} | ${money(grouped.get(key) ?? 0)} |`);
   }
   lines.push("");
+
+  // Already-posted GST adjustment vouchers (plan §6.2)
+  if (alreadyPosted && alreadyPosted.length > 0) {
+    lines.push("## Already posted in books");
+    lines.push("");
+    lines.push("The following GST adjustment vouchers are already present in the books and were excluded\n" +
+      "from the movement; a re-run does not re-post them:");
+    lines.push("");
+    for (const row of alreadyPosted) {
+      lines.push(`- ${row.voucherType} ${row.voucherNumber} — ${displayDate(row.date)} — ${row.narration}`);
+    }
+    lines.push("");
+  }
 
   // Residual section
   lines.push("## Residual");

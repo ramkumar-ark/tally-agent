@@ -28,7 +28,7 @@ const normUpper = (s: string): string => s.replace(/\s+/g, " ").trim().toUpperCa
 const normAlpha = (s: string): string => norm(s).replace(/[^a-z0-9]/g, "");
 
 const SHEET_RE = /^not[ ]?reflected$/i;
-const GSTIN_RE = /\b(\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z]\d)\b/;
+const GSTIN_RE = /\b(\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9][A-Z][A-Z0-9])\b/;
 const PERIOD_RE = /(\d{1,2})-([A-Za-z]{3})-(\d{2,4})/;
 
 const MONTHS_BY_NAME: Record<string, string> = {

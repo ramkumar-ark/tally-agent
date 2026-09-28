@@ -4226,7 +4226,32 @@ export function createSession(
       // ledger masters degrade; knownLedgers stays empty
     }
 
-    const movements = booksMovements(vouchers, roleResolver(config));
+    // Plan §6.2: the tool's own prior-run GST adjustment vouchers are already in
+    // the books and must be excluded from the movement (a re-run is only
+    // self-correcting when its own earlier entries are not double-counted) and
+    // listed in the paper instead.
+    const alreadyPosted: VoucherRow[] = [];
+    const naturalVouchers: VoucherRow[] = [];
+    for (const v of vouchers) {
+      const n = v.narration ?? "";
+      const isAdjNarration = /^being (input|output|itc|tds|gst)/i.test(n);
+      const isToolNarration = /^being (input gst|output gst|itc reversal|tds credit)/i.test(n);
+      const isGstAdjType = v.voucherType === "GST Adj. Voucher";
+      if ((isGstAdjType && isAdjNarration) || (v.voucherType === config.voucherType && isToolNarration)) {
+        alreadyPosted.push(v);
+      } else {
+        naturalVouchers.push(v);
+      }
+    }
+
+    const movements = booksMovements(naturalVouchers, roleResolver(config));
+    if (process.env.TALLY_AGENT_GSTADJ_DEBUG) {
+      console.error("[gstadj-debug] vouchers:", vouchers.length, "months:", [...movements.keys()].join(","));
+      for (const m of ["2025-04", "2025-08", "2025-11"]) {
+        const mm = movements.get(m);
+        console.error(`[gstadj-debug] ${m} output:`, mm?.get("output"), "input:", mm?.get("input"), "payable:", mm?.get("payable"));
+      }
+    }
     const result = analyzeGstAdj({
       threeB, movements, config, listDiffs, knownLedgers,
     });
@@ -4241,7 +4266,7 @@ export function createSession(
       if (roles.input) inputLedgers.add(canonicalKey(roles.input));
     }
     const contributions = new Map<string, VoucherRow[]>();
-    for (const v of vouchers) {
+    for (const v of naturalVouchers) {
       const month = `${String(v.date).slice(0, 4)}-${String(v.date).slice(4, 6)}`;
       if (!residualMonths.has(month)) continue;
       const hasInput = v.entries.some((e) => inputLedgers.has(canonicalKey(e.ledger)));
@@ -4253,7 +4278,7 @@ export function createSession(
 
     const outDir = dirname(threeBPath);
     const paperPath = await writeGstAdjPaper({
-      reportDir: outDir, fy, threeB, result, config, contributions,
+      reportDir: outDir, fy, threeB, result, config, contributions, alreadyPosted,
     });
     const importPath = await writeGstAdjImportFile({
       reportDir: outDir, fy, entries: result.entries, threeB,

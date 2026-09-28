@@ -51,6 +51,20 @@ describe("parseItc2bFolder", () => {
     expect(feb[0].tax.igst).toBe(200);
     rmSync(dir, { recursive: true, force: true });
   });
+  it("reads a registration GSTIN whose check digit is a letter (DSV 33AAMFD4273C1ZP)", async () => {
+    const { warn } = makeWarn();
+    const dir = mkdtempSync(join(tmpdir(), "gadj-2b-"));
+    writeFileSync(join(dir, "apr.xlsx"), make2bWorkbook({
+      period: "1-Apr-25 to 30-Apr-25",
+      gstin: "33AAMFD4273C1ZP",
+      layout: "v2",
+      rows: [{ date: ser(2025, 4, 7), party: "Test Traders", gstin: "33AAMFD4273C1ZP", vchNo: "15", docNo: "8", cgst: 100 }],
+    }));
+    const { lists, gstinByMonth } = await parseItc2bFolder(dir, warn);
+    expect(gstinByMonth.get("2025-04")).toBe("33AAMFD4273C1ZP");
+    expect(lists.get("2025-04")![0]).toMatchObject({ key: "8|33AAMFD4273C1ZP" });
+    rmSync(dir, { recursive: true, force: true });
+  });
   it("is case-insensitive on the sheet name and treats a missing sheet as no list", async () => {
     const { warn } = makeWarn();
     const dir = mkdtempSync(join(tmpdir(), "gadj-2b-"));

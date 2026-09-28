@@ -6,7 +6,7 @@ import type { ThreeBSummary } from "./gst-adj-3b.js";
 import type { Itc2bEntry } from "./gst-adj-2b.js";
 
 export type Role = string;
-export type MonthMovements = Map<string, Map<Role, number>>;
+export type MonthMovements = Map<string, Map<string, number>>;
 
 export interface GadjEntry {
   kind: number; month: string; date: string; narration: string;
@@ -35,9 +35,8 @@ export function booksMovements(
     let monthMap = result.get(month);
     if (!monthMap) { monthMap = new Map(); result.set(month, monthMap); }
     for (const entry of v.entries) {
-      const role = roleOf(entry.ledger);
-      if (role !== undefined) {
-        monthMap.set(role, (monthMap.get(role) ?? 0) + entry.amount);
+      if (roleOf(entry.ledger) !== undefined) {
+        monthMap.set(entry.ledger, (monthMap.get(entry.ledger) ?? 0) + entry.amount);
       }
     }
   }
@@ -124,7 +123,7 @@ export function analyzeGstAdj(input: {
               detail: `${outputLedger}: books ${booksOut} vs 3B ${amount}`,
             });
           }
-          if (booksOut > TOLERANCE) {
+          if (booksOut < -TOLERANCE) {
             result.findings.push({
               id: "gadj_3b_ledger_mismatch", severity: "review",
               detail: `${outputLedger}: books ${booksOut}`,
@@ -240,7 +239,7 @@ export function analyzeGstAdj(input: {
         if (!inputLedger) continue;
 
         const mv = movements.get(month);
-        const booksCredit = inputLedger ? -(mv?.get(inputLedger) ?? 0) : 0;
+        const booksCredit = inputLedger ? (mv?.get(inputLedger) ?? 0) : 0;
 
         const newlyEntries = listDiffs[month]?.newly ?? [];
         const droppedEntries = listDiffs[month]?.dropped ?? [];
