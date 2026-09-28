@@ -48,11 +48,11 @@ describe("parseThreeB section extraction", () => {
     expect(s.itcReversed["2025-05"].cess).toBe(41.41 + 43.43);
     expect(s.itcReversed["2025-05"].cgst).toBe(41.41 + 43.43);
   });
-  it("computes netItc as raw minus reclaimed", () => {
-    expect(s.netItc["2025-05"].igst).toBe(51.51 - 52.52);
-    expect(s.netItc["2025-05"].sgst).toBe(51.52 - 52.52);
-    expect(s.netItc["2025-05"].cess).toBe(51.53 - 52.55);
-    expect(s.netItc["2025-05"].cgst).toBe(51.51 - 53.53);
+  it("derives netItc as 4C = 4A − 4B(1) (RCM + all-other − reversed), excluding reclaim", () => {
+    expect(s.netItc["2025-05"].igst).toBe(s.itcRcm["2025-05"].igst + s.itcOther["2025-05"].igst - s.itcReversed["2025-05"].igst);
+    expect(s.netItc["2025-05"].sgst).toBe(s.itcRcm["2025-05"].sgst + s.itcOther["2025-05"].sgst - s.itcReversed["2025-05"].sgst);
+    expect(s.netItc["2025-05"].cess).toBe(s.itcRcm["2025-05"].cess + s.itcOther["2025-05"].cess - s.itcReversed["2025-05"].cess);
+    expect(s.netItc["2025-05"].cgst).toBe(s.itcRcm["2025-05"].cgst + s.itcOther["2025-05"].cgst - s.itcReversed["2025-05"].cgst);
   });
   it("extracts itcReclaimed by head", () => {
     expect(s.itcReclaimed["2025-05"].sgst).toBe(52.52);

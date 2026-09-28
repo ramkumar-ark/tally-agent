@@ -248,4 +248,19 @@ describe("readWorkbook", () => {
     ]);
     expect(() => readWorkbook(buf)).toThrow(/sheet1\.xml/i);
   });
+
+  it("reads namespace-prefixed worksheet XML (SPEQTA/GST-portal style)", () => {
+    // The real 3B exports prefix every element with the OOXML namespace
+    // (<x:worksheet>, <x:sheetData>, <x:c r="A1"><x:v>…</x:v></x:c>).
+    const prefixedSheet = `<?xml version="1.0"?><x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t>hello</x:t></x:is></x:c><x:c r="B1"><x:v>42.5</x:v></x:c></x:row></x:sheetData></x:worksheet>`;
+    const buf = zip([
+      ["xl/workbook.xml", workbookXml(["Data"])],
+      ["xl/_rels/workbook.xml.rels", relsXml([["rId1", "worksheets/sheet1.xml"]])],
+      ["xl/styles.xml", STYLES],
+      ["xl/worksheets/sheet1.xml", prefixedSheet],
+    ]);
+    const cells = readWorkbook(buf)[0].rows[0].cells;
+    expect(cells.get(0)).toEqual({ value: "hello", isDate: false });
+    expect(cells.get(1)).toEqual({ value: 42.5, isDate: false });
+  });
 });

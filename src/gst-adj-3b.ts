@@ -75,8 +75,24 @@ export function parseThreeB(buf: Buffer): ThreeBSummary {
       const parts = raw.split(/\s+/);
       const gi = parts.findIndex((p) => norm(p) === "gstin");
       if (gi >= 0 && parts.length > gi + 1) gstin = parts[gi + 1];
+      if (!gstin) {
+        const alt = row.cells.get(1)?.value;
+        if (typeof alt === "string" && alt.trim()) gstin = alt.trim();
+      }
       const si = parts.findIndex((p) => norm(p) === "state");
       if (si >= 0 && parts.length > si + 1) state = parts.slice(si + 1).join(" ");
+      if (!state) {
+        let stateCol = -1;
+        for (let c = 0; c < 14; c++) {
+          if (norm(String(row.cells.get(c)?.value ?? "")) === "state") { stateCol = c; break; }
+        }
+        if (stateCol >= 0) {
+          for (let c = stateCol + 1; c < 14; c++) {
+            const v = row.cells.get(c)?.value;
+            if (typeof v === "string" && v.trim()) { state = v.trim(); break; }
+          }
+        }
+      }
     } else if (!companyName) {
       companyName = String(colA).trim();
     }
@@ -139,9 +155,11 @@ export function parseThreeB(buf: Buffer): ThreeBSummary {
 
   let currentSection = "";
   const taxPosInSection = new Map<string, number>();
+  let salesValueTaken = false;
 
   for (const row of sheet.rows) {
     if (row.row <= 4) continue;
+    if (currentSection === "payment of tax") break;
     const rowMap = rowMapByRow.get(row.row);
     if (!rowMap) continue;
     const colA = rowMap.get(0) ?? "";
@@ -188,18 +206,21 @@ export function parseThreeB(buf: Buffer): ThreeBSummary {
     }
 
     if (currentSection === "sales summary") {
-      for (const [m, c] of monthCol.entries()) {
-        const raw = rowMap.get(c);
-        if (raw === undefined) continue;
-        const val = parseFloat(raw);
-        if (!isNaN(val)) outwardTaxable[m] = val;
+      if (!salesValueTaken) {
+        salesValueTaken = true;
+        for (const [m, c] of monthCol.entries()) {
+          const raw = rowMap.get(c);
+          if (raw === undefined) continue;
+          const val = parseFloat(raw);
+          if (!isNaN(val)) outwardTaxable[m] += val;
+        }
       }
     }
   }
 
   for (const m of months) {
     for (const h of ["igst", "cgst", "sgst", "cess"] as const) {
-      netItc[m][h] = netItc[m][h] - itcReclaimed[m][h];
+      netItc[m][h] = itcRcm[m][h] + itcOther[m][h] - itcReversed[m][h];
     }
   }
 

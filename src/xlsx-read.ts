@@ -219,8 +219,12 @@ function parseElements(xml: string, part: string): Element {
 
 // ------------------------------------------------------------ parts to grid
 
+function localName(n: string): string {
+  return n.includes(":") ? n.slice(n.indexOf(":") + 1) : n;
+}
+
 function directChildren(el: Element, name: string): Element[] {
-  return el.children.filter((c) => c.name === name);
+  return el.children.filter((c) => localName(c.name) === name);
 }
 
 /** Builtin date-bearing number formats (OOXML §18.6.2 subset). */
@@ -316,7 +320,7 @@ function readSheet(
     const cells: Map<number, GridCell> = new Map();
     let col = 0;
     for (const c of rEl.children) {
-      if (c.name !== "c") continue;
+      if (localName(c.name) !== "c") continue;
       const ref = c.attrs.get("r");
       if (ref) {
         let k = 0;
@@ -331,14 +335,14 @@ function readSheet(
       const t = c.attrs.get("t") ?? "n";
       let value: string | number | null = null;
       let isDate = false;
-      const vEl = c.children.find((x) => x.name === "v");
-      const isEl = c.children.find((x) => x.name === "is");
+      const vEl = c.children.find((x) => localName(x.name) === "v");
+      const isEl = c.children.find((x) => localName(x.name) === "is");
       if (t === "s") {
         const idx = Number(vEl?.text ?? NaN);
         value = Number.isFinite(idx) && strings[idx] !== undefined ? strings[idx] : null;
       } else if (t === "inlineStr") {
         let text = "";
-        const isNode = c.children.find((x) => x.name === "is");
+        const isNode = c.children.find((x) => localName(x.name) === "is");
         if (isNode) {
           for (const tt of directChildren(isNode, "t")) text += tt.text;
           for (const r of directChildren(isNode, "r")) {
