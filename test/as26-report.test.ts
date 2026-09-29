@@ -249,11 +249,11 @@ describe("tb_write_26as_report", () => {
     // Deductors is the party-level sheet: it names the 26AS deductor.
     expect(partyCells("Deductors", 0)).toContain("Nagar Palika Nagar Bhavan");
     // Books entries are named by the ledger they are booked on ...
-    expect(partyCells("Books not in 26AS", 1)).toContain("Anand Buildmart Pvt Ltd");
+    expect(partyCells("Books not in 26AS", 2)).toContain("Anand Buildmart Pvt Ltd");
     expect(partyCells("Books Events", 0)).toContain("Anand Buildmart Pvt Ltd");
     // ... 26AS entries by the 26AS deductor (the 26AS unmatched and value
     // sheets are 26AS-side rows, so the deductor name is what identifies them)
-    expect(partyCells("26AS unmatched", 1)).toContain("Nagar Palika Nagar Bhavan");
+    expect(partyCells("26AS unmatched", 2)).toContain("Nagar Palika Nagar Bhavan");
     for (const r of partyCells("Bill value mismatch", 1)) {
       expect(r).toBe("Nagar Palika Nagar Bhavan");
     }
@@ -279,19 +279,32 @@ describe("tb_write_26as_report", () => {
     }
     // no party cell anywhere joins names with " + "
     for (const [name, col] of [
-      ["Findings", 3], ["Books Events", 0], ["Books not in 26AS", 1],
-      ["26AS unmatched", 1], ["Bill value mismatch", 1], ["Combination matches", 2],
+      ["Findings", 3], ["Books Events", 0], ["Books not in 26AS", 2],
+      ["26AS unmatched", 2], ["Bill value mismatch", 1], ["Combination matches", 2],
       ["FD interest 20% TDS", 1],
     ] as const) {
       for (const r of partyCells(name, col)) expect(r, name).not.toContain(" + ");
     }
+    // the cross-sheet party key: one id per party, the SAME on both unmatched
+    // sheets and on the party's Deductors row (captain 2026-09-29)
+    const bookIds = partyCells("Books not in 26AS", 1).filter(Boolean);
+    const as26Ids = partyCells("26AS unmatched", 1).filter(Boolean);
+    expect(bookIds.length).toBeGreaterThan(0);
+    expect(as26Ids.length).toBeGreaterThan(0);
+    for (const id of new Set(bookIds)) expect(as26Ids).toContain(id);
+    for (const id of new Set([...bookIds, ...as26Ids])) {
+      expect(id).toMatch(/^P\d+$/);
+      expect(partyCells("Deductors", 1)).toContain(id);
+    }
     // the row-id pointers still join: a books row is cited under the ledger
     // label, a 26AS row under the deductor label
     const rowParties = new Map<string, string>();
-    for (const name of ["Books not in 26AS", "26AS unmatched", "Bill value mismatch"]) {
+    for (const [name, col] of [
+      ["Books not in 26AS", 2], ["26AS unmatched", 2], ["Bill value mismatch", 1],
+    ] as const) {
       for (const r of sheet(name).rows.values()) {
         const id = r.cells.get(0)?.value;
-        if (typeof id === "string" && id) rowParties.set(id, String(r.cells.get(1)?.value ?? ""));
+        if (typeof id === "string" && id) rowParties.set(id, String(r.cells.get(col)?.value ?? ""));
       }
     }
     let pointers = 0;
@@ -323,19 +336,21 @@ describe("tb_write_26as_report", () => {
       bookEvents: [],
       billRows: [
         {
-          sheetId: "booksded", party: "Pseudonym One", date: "10-Jun-2025", tax: 4600.15,
+          sheetId: "booksded", partyId: "P1", party: "Pseudonym One", date: "10-Jun-2025", tax: 4600.15,
           gross: null, voucherType: "Journal", ref: "Doc 1", status: null, section: null,
           inWindow: true, linkBasis: "reference",
           linked: { date: "09-Sep-2025", ref: "Doc 2", taxable: 230000 }, delta: null,
           windowState: "in",
         },
         {
+          // no party id: the defensive blank case (a hand-built row that
+          // carries no recon index) renders an empty cell, never a wrong one
           sheetId: "booksded", party: "Pseudonym One", date: "20-Dec-2025", tax: 1100,
           gross: null, voucherType: "Journal", ref: "Doc 3", status: null, section: null,
           inWindow: true, linkBasis: "none", linked: null, delta: null, windowState: "in",
         },
         {
-          sheetId: "as26", party: "Pseudonym One", date: "05-Jan-2026", tax: 2000,
+          sheetId: "as26", partyId: "P1", party: "Pseudonym One", date: "05-Jan-2026", tax: 2000,
           gross: 100000, voucherType: null, ref: "Doc 4", status: "L", section: "194C",
           inWindow: false, linkBasis: "none", linked: null, delta: null, windowState: "post",
         },
@@ -378,18 +393,20 @@ describe("tb_write_26as_report", () => {
       });
 
     const books = dataRows(wb.find((s) => s.name === "Books not in 26AS")!);
+    // the party id sits beside the row id: the same party carries the same
+    // id on both unmatched sheets and on its Deductors row
     expect(books[0]).toEqual([
-      "B1", "Pseudonym One", "10-Jun-2025", "Journal", "Doc 1", "4600.15",
+      "B1", "P1", "Pseudonym One", "10-Jun-2025", "Journal", "Doc 1", "4600.15",
       "Doc 2", "09-Sep-2025", "230000", "reference", "",
     ]);
     expect(books[1]).toEqual([
-      "B2", "Pseudonym One", "20-Dec-2025", "Journal", "Doc 3", "1100",
+      "B2", "", "Pseudonym One", "20-Dec-2025", "Journal", "Doc 3", "1100",
       "", "", "", "none", "",
     ]);
 
     const as26 = dataRows(wb.find((s) => s.name === "26AS unmatched")!);
     expect(as26[0]).toEqual([
-      "D1", "Pseudonym One", "05-Jan-2026", "194C", "2000", "100000", "L", "none", "post-period",
+      "D1", "P1", "Pseudonym One", "05-Jan-2026", "194C", "2000", "100000", "L", "none", "post-period",
     ]);
 
     const value = dataRows(wb.find((s) => s.name === "Bill value mismatch")!);
@@ -450,19 +467,23 @@ describe("tb_write_26as_report > Deductors cell placement", () => {
     const sheet = wb.find((s) => s.name === "Deductors")!;
     // header row: column letters must hold the right header
     const header = sheet.rows[0];
-    expect(header.cells.get(7)!.value).toBe("books interest"); // H
-    expect(header.cells.get(8)!.value).toBe("gross incl GST"); // I
+    // column B is the cross-sheet party id, so the value columns shifted by one
+    expect(header.cells.get(8)!.value).toBe("books interest"); // I
+    expect(header.cells.get(9)!.value).toBe("gross incl GST"); // J
     const cell = (eRow: number, col: number): unknown => sheet.rows[eRow].cells.get(col)?.value;
     const sales = 1, bank = 2;
-    // sales row: taxable G, GST-inclusive I, H EMPTY
-    expect(cell(sales, 6)).toBe(1800000); // G taxable
-    expect(cell(sales, 7) ?? null).toBeNull(); // H books interest stays empty
-    expect(cell(sales, 8)).toBe(2124000); // I gross incl GST
-    expect(cell(sales, 10)).toBe("taxable"); // K basis
-    // bank row: interest H, no GST-inclusive value
-    expect(cell(bank, 7)).toBe(1199509); // H books interest
-    expect(cell(bank, 8) ?? null).toBeNull(); // I gross incl GST stays empty
-    expect(cell(bank, 10)).toBe("interest"); // K basis
+    // the cross-sheet party id: P1, P2 in Deductors-sheet order
+    expect(cell(sales, 1)).toBe("P1");
+    expect(cell(bank, 1)).toBe("P2");
+    // sales row: taxable H, GST-inclusive J, I EMPTY
+    expect(cell(sales, 7)).toBe(1800000); // H taxable
+    expect(cell(sales, 8) ?? null).toBeNull(); // I books interest stays empty
+    expect(cell(sales, 9)).toBe(2124000); // J gross incl GST
+    expect(cell(sales, 11)).toBe("taxable"); // L basis
+    // bank row: interest I, no GST-inclusive value
+    expect(cell(bank, 8)).toBe(1199509); // I books interest
+    expect(cell(bank, 9) ?? null).toBeNull(); // J gross incl GST stays empty
+    expect(cell(bank, 11)).toBe("interest"); // L basis
   });
 });
 
@@ -718,7 +739,8 @@ describe("writeAs26Report — shared-ledger group", () => {
       const cell = (r: { cells: Map<number, { value: unknown }> }, i: number) => r.cells.get(i)?.value ?? "";
       const deductors = wb.find((s) => s.name === "Deductors")!;
       expect(cell(deductors.rows[1], 0)).toBe("Pseudonym One + Pseudonym Two");
-      expect(cell(deductors.rows[1], 2)).toBe(1668896);
+      expect(cell(deductors.rows[1], 1)).toBe("P1"); // the cross-sheet party key
+      expect(cell(deductors.rows[1], 3)).toBe(1668896);
       // The Mapping sheet lists one row per 26AS name, each with its OWN tax.
       const mapping = wb.find((s) => s.name === "Mapping")!;
       expect(cell(mapping.rows[1], 0)).toBe("Pseudonym One");

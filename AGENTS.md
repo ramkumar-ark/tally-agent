@@ -919,6 +919,17 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - The Mapping sheet keeps BOTH names ("26AS name" + "mapped ledger"), and the
   shared-ledger Deductors row joins member 26AS names with `" + "`: it is the
   operator's cross-reference / party-level row, not an entry label.
+- **A `P<n>` party id cross-references the two unmatched sheets (captain
+  2026-09-29).** `P1`, `P2`, … in Deductors-sheet order (`recon` index + 1);
+  `BillRow.reconIdx` carries the index out of `buildBillRows`, `as26Review`
+  stamps `partyId`, and the same string sits on the Deductors row, on
+  `Books not in 26AS` and on `26AS unmatched` (column B of both). It is the
+  captain's answer to "are these two entries the same party?", needed because
+  the two sheets name opposite sides (a ledger vs a deductor). The id is
+  BLANK only for a row with no recon index (hand-built/older results) — never
+  a wrong id; in practice every row is built inside a `recon` loop. The
+  Deductors column insertion shifted that sheet's value columns by one: keep
+  the "books interest" / "gross incl GST" placement test honest.
 - Bank parties report ONE books-tax channel (the operator-mapped events),
   both in check 009 and on the Deductors sheet; value delta picks the
   closest basis (taxable / GST-inclusive / interest) and names it.

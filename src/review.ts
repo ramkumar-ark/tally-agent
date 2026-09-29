@@ -497,6 +497,12 @@ export interface As26ReviewResult {
    * findings' "see ... rows <ids>" pointers and these rows line up. */
   billRows: Array<{
     sheetId: "booksded" | "as26" | "value";
+    /** The party's cross-sheet key (`P1`, `P2`, … in Deductors-sheet
+     * order): the same id appears on the Deductors row and on that party's
+     * rows in both unmatched sheets, so the operator can see that both sides
+     * concern one party. Blank when the row's party matched no pair. Optional:
+     * hand-built (older) results lack it. */
+    partyId?: string;
     party: string; date: string; tax: number;
     gross: number | null; voucherType: string | null;
     ref: string | null; status: string | null; section: string | null;
@@ -1815,6 +1821,10 @@ export function createSession(
       return a.tax - b.tax;
     });
     const billRows = sortedRows.map((r) => ({
+      // The cross-sheet party key: `P<n>` in Deductors-sheet order, so this
+      // party's books rows and 26AS rows carry the same id on both unmatched
+      // sheets. Blank only if a hand-built row has no recon index.
+      partyId: typeof r.reconIdx === "number" ? `P${r.reconIdx + 1}` : "",
       party: partyOfRow(r),
       date: displayDate(r.date),
       tax: r.tax,

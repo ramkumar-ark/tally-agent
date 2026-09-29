@@ -14,6 +14,11 @@ export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approxi
 
 export interface BillRow {
   kind: BillKind; ledgerKey: string; nameKey: string;
+  /** Index of the party's `result.recon` entry — the party-level row the
+   * Deductors sheet prints. The session turns it into that sheet's `P<n>` key
+   * (captain 2026-09-29), so a books row and a 26AS row of one party carry
+   * the same id. */
+  reconIdx: number;
   date: string; tax: number;
   voucherType: string | null; ref: string | null;
   gross: number | null; status: string | null;
@@ -67,7 +72,7 @@ export function buildBillRows(
 
   const rows: BillRow[] = [];
 
-  for (const r of result.recon) {
+  for (const [ri, r] of result.recon.entries()) {
     // Totals-only parties (design §12.1) get no drill-down rows: their
     // entries stay off "Books not in 26AS" / "26AS unmatched" / value rows.
     if (r.totalsOnly) continue;
@@ -125,7 +130,7 @@ export function buildBillRows(
       if (!d || !keySet.has(d.ledgerKey) || d.kind !== r.match.kind) continue;
       const link = linkOf(d.tax, d.date, d.reference, d.ledgerKey);
       rows.push({
-        kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey,
+        kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey, reconIdx: ri,
         date: d.date, tax: d.tax, voucherType: d.voucherType || null, ref: d.voucherNumber,
         gross: null, status: null, section, inWindow: inWindow(d.date, opts),
         linkBasis: link ? link.basis : "none",
@@ -141,7 +146,7 @@ export function buildBillRows(
       const date = item.date;
       const link = linkOf(item.tax, date, null);
       rows.push({
-        kind: "as26", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey,
+        kind: "as26", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey, reconIdx: ri,
         date, tax: item.tax, voucherType: null, ref: null,
         gross: item.gross ?? null, status: item.status ?? null, section: tx.section,
         inWindow: inWindow(date, opts),
@@ -152,7 +157,7 @@ export function buildBillRows(
     }
   }
 
-  for (const r of result.recon) {
+  for (const [ri, r] of result.recon.entries()) {
     if (r.totalsOnly) continue;
     const pool = poolOf(r.match.ledgerKeys);
     const keySet = new Set(r.match.ledgerKeys);
@@ -177,7 +182,7 @@ export function buildBillRows(
       const delta = round2(t.amount - link.sale.taxable);
       if (Math.abs(delta) <= AS26_VALUE_TOLERANCE) continue;
       rows.push({
-        kind: "value", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey,
+        kind: "value", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey, reconIdx: ri,
         date, tax: t.tax, voucherType: null, ref: null,
         gross: t.amount, status: t.status || null, section: t.section,
         inWindow: inWindow(date, opts),

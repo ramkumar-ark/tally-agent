@@ -1297,10 +1297,17 @@ export async function writeAs26Report(opts: {
       f.id, f.check, f.severity, f.party, f.kind, f.section, f.amount, f.detail,
     ]),
   };
+  // Cross-sheet party key (captain 2026-09-29): `P<n>` in Deductors-sheet
+  // order, stamped on the Deductors row and on that party's rows in BOTH
+  // unmatched sheets, so an operator can see at a glance that a books entry
+  // and a 26AS entry belong to the same party. Blank only for a hand-built
+  // row that carries no recon index.
+  const partyIdCell = (r: As26ReviewResult["billRows"][number]): string => r.partyId ?? "";
   const deductorsSheet: Sheet = {
     name: "Deductors",
     columns: [
       { header: "party", width: 26, format: "text" },
+      { header: "party id", width: 10, format: "text" },
       { header: "kind", width: 6, format: "text" },
       { header: "26AS tax", width: 16, format: "money" },
       { header: "books tax", width: 16, format: "money" },
@@ -1317,12 +1324,13 @@ export async function writeAs26Report(opts: {
       { header: "unmatched", width: 10, format: "text" },
       { header: "search skipped", width: 12, format: "text" },
     ],
-    rows: opts.result.recon.map((r) => [
+    rows: opts.result.recon.map((r, i) => [
       // A shared-ledger group is ONE row naming every 26AS name on the ledger;
       // each name's own 26AS tax is below the group total (Mapping sheet).
       r.match.members
         ? r.match.members.map((m) => m.as26Name).join(" + ")
         : r.match.as26Name,
+      `P${i + 1}`,
       r.match.kind, r.as26Tax, r.booksTax,
       round2(r.booksTax - r.as26Tax),
       r.as26GrossValue ?? null, r.booksTaxableValue ?? null,
@@ -1382,6 +1390,7 @@ export async function writeAs26Report(opts: {
     name: "Books not in 26AS",
     columns: [
       { header: "row", width: 8, format: "text" },
+      { header: "party id", width: 10, format: "text" },
       { header: "party", width: 26, format: "text" },
       { header: "date", width: 12, format: "text" },
       { header: "voucher type", width: 12, format: "text" },
@@ -1396,7 +1405,7 @@ export async function writeAs26Report(opts: {
     // Ids number over ALL rows of the sheet (including combination-consumed
     // ones) so the numbering stays stable; consumed rows are not shown.
     rows: booksRows.map((r, i) => ({ r, id: `B${i + 1}` })).filter(({ r }) => !r.explained).map(({ r, id }) => [
-      id, r.party, r.date, r.voucherType ?? "", r.ref ?? "", r.tax,
+      id, partyIdCell(r), r.party, r.date, r.voucherType ?? "", r.ref ?? "", r.tax,
       r.linked?.ref ?? "", r.linked ? r.linked.date : "", r.linked?.taxable ?? null,
       r.linkBasis, windowCell(r),
     ]),
@@ -1406,6 +1415,7 @@ export async function writeAs26Report(opts: {
     name: "26AS unmatched",
     columns: [
       { header: "row", width: 8, format: "text" },
+      { header: "party id", width: 10, format: "text" },
       { header: "party", width: 26, format: "text" },
       { header: "date", width: 12, format: "text" },
       { header: "section", width: 10, format: "text" },
@@ -1416,7 +1426,7 @@ export async function writeAs26Report(opts: {
       { header: "window", width: 12, format: "text" },
     ],
     rows: as26Rows.map((r, i) => ({ r, id: `D${i + 1}` })).filter(({ r }) => !r.explained).map(({ r, id }) => [
-      id, r.party, r.date, r.section ?? "", r.tax, r.gross ?? null,
+      id, partyIdCell(r), r.party, r.date, r.section ?? "", r.tax, r.gross ?? null,
       r.status ?? "", r.linkBasis, windowCell(r),
     ]),
   };
