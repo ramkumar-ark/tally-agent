@@ -576,14 +576,14 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     const [a, b] = r.recon;
     expect(a.match.as26Name).toBe(SHORT);
     expect(a.match.shared).toBeUndefined();
-    expect(a.sharedRow).toEqual({ index: 1, of: 2, group: 0 });
+    expect(a.sharedRow).toEqual({ index: 1, of: 2 });
     expect(a.as26Tax).toBe(SHORT_TAX);
     expect(a.booksTax).toBe(SHORT_TAX);
     expect(a.as26GrossValue).toBe(SHORT_GROSS);
     expect(a.paired).toHaveLength(1);
     expect(a.unmatchedBooks).toEqual([]);
     expect(b.match.as26Name).toBe(DEPT);
-    expect(b.sharedRow).toEqual({ index: 2, of: 2, group: 0 });
+    expect(b.sharedRow).toEqual({ index: 2, of: 2 });
     expect(b.as26Tax).toBe(DEPT_TAX);
     expect(b.booksTax).toBe(DEPT_TAX);
     expect(b.as26GrossValue).toBe(DEPT_GROSS);
@@ -637,7 +637,7 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     const r = analyzeAs26(sharedFile(), facts, sharedMap, [LEDGER], WINDOW);
     expect(r.recon).toHaveLength(3);
     const residue = r.recon[2];
-    expect(residue.sharedRow).toEqual({ index: 3, of: 2, residue: true, group: 0 });
+    expect(residue.sharedRow).toEqual({ index: 3, of: 2, residue: true });
     expect(reconPartyId(2, residue)).toBe("P1.u");
     expect(reconPartyLabel(residue)).toBe(LEDGER);   // a books entry: named by the ledger
     expect(residue.match.as26Name).toBe("");
@@ -701,9 +701,9 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     const r = analyzeAs26(file, facts, map, [LEDGER, SECOND], WINDOW);
     expect(r.recon).toHaveLength(3);
     expect(r.recon.map((x) => [x.match.as26Name, x.as26Tax, x.booksTax, x.sharedRow])).toEqual([
-      [SHORT, SHORT_TAX, SHORT_TAX, { index: 1, of: 3, group: 0 }],
-      [DEPT, DEPT_TAX, DEPT_TAX, { index: 2, of: 3, group: 0 }],
-      [THIRD_NAME, 100, 100, { index: 3, of: 3, group: 0 }],
+      [SHORT, SHORT_TAX, SHORT_TAX, { index: 1, of: 3 }],
+      [DEPT, DEPT_TAX, DEPT_TAX, { index: 2, of: 3 }],
+      [THIRD_NAME, 100, 100, { index: 3, of: 3 }],
     ]);
     // every row sees the group's ledger pool (both ledgers) so the shared
     // ledger's entries are available to whichever name explains them
@@ -714,6 +714,45 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     expect(r.totals.booksTax).toBe(SHORT_TAX + DEPT_TAX + 100);
     expect(r.totals.as26Tax).toBe(SHORT_TAX + DEPT_TAX + 100);
     expect(r.findings).toEqual([]);
+  });
+
+  it("the split group takes ONE base id, so every other party keeps its own and ids stay contiguous", () => {
+    // The live defect (captain 2026-09-30): a two-row group used to consume two
+    // base ids, so every party after it moved up one (P3 disappeared). The
+    // group is ONE party of the reconciliation; only its row count grew.
+    const PLAIN = "Alpha Works Depot";
+    const PLAIN_LEDGER = "Alpha Works Depot Ledger";
+    const PK = canonicalKey(PLAIN_LEDGER);
+    const file: As26File = {
+      ...sharedFile(),
+      summaries: [...sharedFile().summaries, { kind: "tds", name: PLAIN, nameKey: canonicalKey(PLAIN), section: "194C", taxTotal: 250000, taxClaimed: 0, balanceCf: 0, gross: 12500000 }],
+      transactions: [...sharedFile().transactions, { kind: "tds" as const, nameKey: canonicalKey(PLAIN), date: "20251001", amount: 12500000, tax: 250000, status: "F", bookingDate: null, section: "194C" }],
+    };
+    // the shared ledger is mapped first, so the group is party 1 and the plain
+    // party follows it — exactly the live ordering
+    const map = { mappings: [
+      { ledger: LEDGER, as26Name: SHORT },
+      { ledger: LEDGER, as26Name: DEPT },
+      { ledger: PLAIN_LEDGER, as26Name: PLAIN },
+    ]};
+    const facts: BooksFacts = {
+      ...books(BOTH),
+      deductions: [
+        ...books(BOTH).deductions,
+        // one books entry on the shared ledger no 26AS name explains
+        { ledgerKey: LK, kind: "tds" as const, date: "20250901", tax: 40000, voucherType: "Journal" },
+        { ledgerKey: PK, kind: "tds" as const, date: "20251001", tax: 250000, voucherType: "Journal" },
+      ],
+      sales: [...INVOICES, { ledgerKey: PK, date: "20251001", ref: "INV-D", taxable: 12500000, gross: 14750000 }],
+    };
+    const r = analyzeAs26(file, facts, map, [LEDGER, PLAIN_LEDGER], WINDOW);
+    const ids = r.recon.map((x, i) => reconPartyId(i, x));
+    // the group is three rows (two names + the unattributed residue) and still
+    // exactly one party; the plain party after it is P2, not P3
+    expect(ids).toEqual(["P1.1", "P1.2", "P1.u", "P2"]);
+    // the bases present are 1 and 2 — contiguous, nothing skipped
+    expect([...new Set(ids.map((id) => Number(id.slice(1).split(".")[0])))].sort()).toEqual([1, 2]);
+    expect(r.recon[3].match.as26Name).toBe(PLAIN);
   });
 });
 

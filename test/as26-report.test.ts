@@ -164,7 +164,7 @@ describe("tb_26as_review tool", () => {
     expect(rows).toHaveLength(3);
     expect(rows.map((r: { sharedRow: { index: number; of: number; residue?: boolean } }) => r.sharedRow))
       .toEqual([
-        { index: 1, of: 2, group: 0 }, { index: 2, of: 2, group: 0 }, { index: 3, of: 2, residue: true, group: 0 },
+        { index: 1, of: 2 }, { index: 2, of: 2 }, { index: 3, of: 2, residue: true },
       ]);
     expect(rows.map((r: { as26Tax: number }) => r.as26Tax)).toEqual([4600.15, 14000, 0]);
     expect(rows.map((r: { booksTax: number }) => r.booksTax)).toEqual([0, 0, 115000]);
@@ -741,7 +741,7 @@ describe("writeAs26Report — shared-ledger group", () => {
             booksTax: 523944, as26Tax: 523944, paired: [], combinations: [], ambiguous: 0,
             unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
             as26GrossValue: 26197200, booksTaxableValue: 26197200, valueBasis: "taxable", valueDelta: 0,
-            sharedRow: { index: 1, of: 2, group: 0 },
+            partyBase: 1, sharedRow: { index: 1, of: 2 },
           },
           {
             match: {
@@ -751,7 +751,7 @@ describe("writeAs26Report — shared-ledger group", () => {
             booksTax: 1144952, as26Tax: 1144952, paired: [], combinations: [], ambiguous: 0,
             unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
             as26GrossValue: 57247607, booksTaxableValue: 57247607, valueBasis: "taxable", valueDelta: 0,
-            sharedRow: { index: 2, of: 2, group: 0 },
+            partyBase: 1, sharedRow: { index: 2, of: 2 },
           },
           {
             // the residue: books nothing could attribute, named by the ledger
@@ -761,7 +761,7 @@ describe("writeAs26Report — shared-ledger group", () => {
             },
             booksTax: 0, as26Tax: 0, paired: [], combinations: [], ambiguous: 0,
             unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
-            sharedRow: { index: 3, of: 2, residue: true, group: 0 },
+            partyBase: 1, sharedRow: { index: 3, of: 2, residue: true },
           },
         ],
         billRows: [],

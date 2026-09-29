@@ -821,7 +821,13 @@ export interface PartyRecon {
    * in place of the group, never alongside a combined one. `group` is the
    * recon index of the group's FIRST row, so every row of one shared ledger
    * shares a party id and only the suffix differs. */
-  sharedRow?: { index: number; of: number; residue?: boolean; group?: number };
+  sharedRow?: { index: number; of: number; residue?: boolean };
+  /** The party's 1-based base id, stamped by `analyzeAs26`. A shared-ledger
+   * group consumes exactly ONE base id however many 26AS names it has, so
+   * every other party keeps the id it would have had without the split
+   * (captain 2026-09-30). Absent on a hand-built row, where `reconPartyId`
+   * falls back to the recon's own position. */
+  partyBase?: number;
 }
 
 /** Index-combination subsets of `items` with size 2..maxSize, in index order. */
@@ -1685,9 +1691,9 @@ export function reconPartyLabel(r: PartyRecon): string {
  * 26AS name of a shared-ledger group and `P<n>.u` for its unattributed residue
  * row, so a books entry and a 26AS entry on the two unmatched sheets point at
  * the same per-name Deductors row. */
-export function reconPartyId(reconIdx: number, row: Pick<PartyRecon, "sharedRow">): string {
-  if (!row.sharedRow) return `P${reconIdx + 1}`;
-  const base = (row.sharedRow.group ?? reconIdx) + 1;
+export function reconPartyId(reconIdx: number, row: Pick<PartyRecon, "sharedRow" | "partyBase">): string {
+  const base = row.partyBase ?? reconIdx + 1;
+  if (!row.sharedRow) return `P${base}`;
   return `P${base}.${row.sharedRow.residue ? "u" : String(row.sharedRow.index)}`;
 }
 
@@ -1746,15 +1752,15 @@ export function analyzeAs26(
       includeOtherIncome: true, valueColumns: true,
     });
   }
-  // Every row of one shared ledger takes the party's id of the group's FIRST
-  // row, so the per-name ids read P2.1 / P2.2 / P2.u however many names there
-  // are, and the residue row never renumbers the group.
-  let sharedGroup = -1;
-  partyRows.forEach((row, i) => {
+  // Base ids count PARTIES, not rows: a split shared-ledger group takes one
+  // base id for all of its rows (P2.1 / P2.2 / P2.u), so every party after it
+  // keeps the id it carried before the split — ids stay contiguous and stable
+  // across the run and between reruns (captain 2026-09-30).
+  let base = 0;
+  partyRows.forEach((row) => {
     const sr = row.recon.sharedRow;
-    if (!sr) return;
-    if (sr.index === 1) sharedGroup = i;
-    sr.group = sharedGroup;
+    if (!sr || sr.index === 1) base += 1;
+    row.recon.partyBase = base;
   });
 
   for (const row of partyRows) {
