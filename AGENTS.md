@@ -504,11 +504,19 @@ This file is the project's committed home for project-intrinsic agent knowledge:
     basis/delta and 003 silent. Σ member rows + residue = the group's books
     total by construction, so `result.totals` never moves.
   - **Party ids: `P<n>`, `P<n>.<i>` per name, `P<n>.u` for the residue** —
-    `<n>` is the group's FIRST row, so the residue never renumbers the group.
-    One helper, `reconPartyId(reconIdx, recon)`, feeds BOTH the Deductors sheet
-    (`report.ts`) and `billRows.partyId` (`review.ts`), which is what keeps the
-    two unmatched sheets cross-referencing the per-name rows. Ids after a group
-    shift by one (P3→P4 …): that is positional, not a defect. The Mapping sheet
+    `<n>` is the group's ONE base id, not its first row's position: a split group
+    consumes exactly one base id, so every other party keeps the id it had before
+    the split and the sequence stays contiguous and stable between reruns
+    (captain 2026-09-30; ids are cross-references on the two unmatched sheets
+    and in the markdown, so one that moves when a party is reported on more rows
+    breaks a reader's join). `analyzeAs26` stamps `PartyRecon.partyBase` while
+    walking `partyRows` — a plain row takes the next base, a group's first row
+    (`sharedRow.index === 1`) takes one and its other names plus the residue
+    reuse it. One helper, `reconPartyId(reconIdx, recon)`, feeds BOTH the
+    Deductors sheet (`report.ts`) and `billRows.partyId` (`review.ts`), which is
+    what keeps the two unmatched sheets cross-referencing the per-name rows;
+    `reconIdx` is only the fallback for a hand-built row with no `partyBase`.
+    The Mapping sheet
     still emits one row per member; `as26Markdown`'s "Shared ledger …" block now
     prints one line per row plus a group total. `reconcileParty`'s own
     `match.shared` short-circuit survives ONLY as the direct-call fallback for a
@@ -980,8 +988,9 @@ When updating this file, preserve this bar for all agents and keep entries conci
   shared-ledger group is no longer ONE joined Deductors row — it is one row per
   26AS name (plus a residue row), so there is nothing to join.
 - **A `P<n>` party id cross-references the two unmatched sheets (captain
-  2026-09-29).** `P1`, `P2`, … in Deductors-sheet order (`recon` index + 1) —
-  or `P<n>.<i>` / `P<n>.u` inside a shared-ledger group, always through
+  2026-09-29).** `P1`, `P2`, … counting PARTIES, not rows — `PartyRecon.partyBase`
+  (the `recon` index is only the fallback for a hand-built row) — or `P<n>.<i>` /
+  `P<n>.u` inside a shared-ledger group, always through
   `reconPartyId`, never a hand-built `P${i+1}`;
   `BillRow.reconIdx` carries the index out of `buildBillRows`, `as26Review`
   stamps `partyId`, and the same string sits on the Deductors row, on
