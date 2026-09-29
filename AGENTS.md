@@ -974,21 +974,50 @@ When updating this file, preserve this bar for all agents and keep entries conci
   is built from `map.mappings` alone — never the Bank Interest sheet, or a
   bank interest posting would key its receipt to the bank instead of the
   party.
-- **The live 26AS path is refused (2026-09-29):** `tally_get_ledger_vouchers`
-  returns one display counterparty per row and no voucher composition, so a
-  journal that also moves funds between the company's own ledgers (the
-  retention-release/warranty case above) cannot be attributed to its deductor
-  live — the internal transfer is what the row displays, and the deduction
-  keys to the wrong bucket. `tb_26as_review` therefore requires
-  `dayBookPath`: `refuseLiveAs26Read` (guard + message
-  `AS26_LIVE_READ_REFUSED` in `src/as26.ts`, called once from
-  `src/review.ts`'s `as26Review` after the date check) throws without a
-  bundle. The whole live branch stays in place under a DEAD-WHILE-THE-GUARD-
-  STANDS comment; lifting the restriction is deleting that one call, once the
-  upstream exposes the voucher's entries per row. Every other lane still
-  runs live. Tests: `test/as26-review.test.ts` / `test/as26-report.test.ts`
-  / `test/as26-leak.test.ts` now supply a day book; `test/as26-live-guard.test.ts`
-  pins the refusal and that other tools still hit Tally.
+- **The live 26AS books side is lifted by the connector's entry composition
+  (2026-09-29):** the blocker above was the missing composition, and the
+  connector now attaches it — `tally_get_ledger_vouchers` takes
+  `includeEntries: true` and returns per-row `entries` (full voucher
+  composition, amounts already positive=debit), the voucher's real party
+  (`voucherPartyLedgerName`) and a match basis. `ledgerVoucherRows`'s
+  `opts.includeEntries` carries it (`LedgerVoucherRow.entries`/`voucherParty`/
+  `entryMatchBasis`, `LedgerVoucherFetch.entriesAttached`) and
+  `vouchersFromLedgerRows` (`src/as26.ts`) rebuilds day-book-shaped `VoucherRow`s
+  keyed by voucher identity + a SORTED composition signature — two ledgers
+  reporting the same voucher dedupe to one, and each report row joins exactly
+  one rebuilt voucher. The live branch then projects through the SAME
+  `projectLedgerRows(..., { skipMirroredPairs: true })` and
+  `rekeyDeductionsToDeductor` as the day book, so the retention-release
+  journal reaches its deductor live. Never reintroduce a `r.ledger` raw map key
+  here: every `rowsByLedger` consumer canonicalises, and a raw key silently
+  zeroes the whole books side (this exact bug shipped one broken commit).
+  - **A row with no `entries` is unattached, never guessed.** `vouchersFromLedgerRows`
+    returns them; all of them with no attached voucher throws
+    `AS26_LIVE_ENTRIES_UNAVAILABLE`, a build that never reports the field throws
+    `AS26_LIVE_ENTRIES_UNSUPPORTED` (both name `includeEntries` + `dayBookPath`),
+    and a partial set raises the `AS26-012` / `live_rows_unattached` advisory
+    (count, date range, receivable-side total) instead of attributing it.
+  - **Whole-FY live is transport-infeasible, by design of the other lanes:**
+    `tally_get_vouchers` (the sales / other-income / bank sides) cannot carry a
+    year over stdio — measured 3 months OK, 4/6/12 months `MCP error -32000:
+    Connection closed` (85s / 175s / 218s). A live 26AS review is therefore a
+    period-length run, and a whole FY still wants the day book. The live
+    Ledger-Vouchers report also DEDUPES its display rows, so a live run reads
+    a little under a day-book run of the same window (one 237.00 row on
+    28-Mar-2026, reported as the AS26-012 advisory) — the documented display
+    dedupe, not an attribution loss.
+  - The connector must be rebuilt (`npm run build` in
+    `tally_prime_mcp_server`) or a stale `dist/` reads as
+    `AS26_LIVE_ENTRIES_UNSUPPORTED`; that message exists for exactly that.
+  - **The day-book branch ignores `fromDate`/`toDate`** (the bundle's own
+    window governs, by design — the export is the reviewed period), so parity
+    against a live period run needs a windowed copy of the bundle; a full-FY
+    day book re-run with a 3-month window returns the full-FY numbers.
+  - Parity reference: `data/ta-26as-live-entries/report.md` (Q1 FY 26 window,
+    live vs day-book totals, findings, runtime). Tests:
+    `test/as26-entries-rebuild.test.ts` (composition rebuild + the two
+    refusals + the advisory) and `test/as26-live-guard.test.ts` (refusals,
+    bundle run, other lanes still live).
 
 ## Sharp edges found implementing the 3CD TDS/TCS summary (2026-09-24)
 

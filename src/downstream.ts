@@ -82,16 +82,33 @@ export interface LedgerVoucherRow {
    * Voucher composition for a duty credit row, day-book path only: the other
    * same-sign debit lines of the voucher (`Dr A X / Dr B Y / Cr Duty X+Y`).
    * Lets the engine split one lump duty credit into a deduction per party
-   * (2026-09-26o item 038). Absent on the live Ledger-Vouchers path, which
-   * carries no voucher composition.
+   * (2026-09-26o item 038).
    */
   draws?: Array<{ ledger: string; amount: number }>;
+  /** `includeEntries` only: the voucher's FULL ledger-entry composition,
+   * positive = debit. The connector has already flipped Tally's sign here (as
+   * on its trial-balance path), so this is parsed as-is, never negated again.
+   * ABSENT means "unknown": the connector could not join a voucher to this
+   * report row without guessing, and absence never means "this voucher has a
+   * single counterparty" (connector src/tools/reads.ts, includeEntries). */
+  entries?: VoucherEntry[];
+  /** `includeEntries` only: the voucher's TRUE party ledger ("" when Tally
+   * records none). Never the display counterparty in `counterparty`. */
+  voucherParty?: string;
+  /** `includeEntries` only: how the composition was joined to the row
+   * ("guid" | "date-number" | "date-counterparty"). */
+  entryMatchBasis?: string;
 }
 
 export interface LedgerVoucherFetch {
   rows: LedgerVoucherRow[];
   /** Rows dropped at the boundary: undated, out of range, or with no readable side. */
   dropped: number;
+  /** `includeEntries` only: the connector's own count of rows it gave a
+   * composition. UNDEFINED when the running connector build does not report
+   * the field at all — i.e. it predates `includeEntries` and silently ignores
+   * the flag, which is how the 26AS live path detects a stale build. */
+  entriesAttached?: number;
 }
 
 export interface Downstream {
@@ -111,12 +128,16 @@ export interface Downstream {
     fromDate: string,
     toDate: string,
   ): Promise<unknown[]>;
-  /** The same ledger report, typed for scrutiny: signed amounts, range re-filtered. */
+  /** The same ledger report, typed for scrutiny: signed amounts, range re-filtered.
+   * `opts.includeEntries` opts into the connector's voucher composition (the
+   * full entry list per row); off by default, and the flag-off parse is
+   * byte-for-byte today's. */
   ledgerVoucherRows(
     company: string | undefined,
     ledgerName: string,
     fromDate: string,
     toDate: string,
+    opts?: { includeEntries?: boolean },
   ): Promise<LedgerVoucherFetch>;
   /** Day Book with ledger lines for a period, typed and range-filtered at the boundary (R-MCP-5). */
   vouchers(
@@ -169,6 +190,30 @@ const taxOf = (v: unknown): LedgerVoucherTax | null => {
     effectiveRatePct: pct !== "" && Number.isFinite(n) ? n : null,
     taxStatus: text(t.taxStatus),
   };
+};
+
+/**
+ * The connector's attached voucher composition (`includeEntries`). It has
+ * ALREADY flipped Tally's "negative = debit" into our convention (positive =
+ * debit, R-MCP-5), so the amount is taken as-is and only the stated `side`
+ * can move the sign — never an unconditional negation like `parseVoucherRows`
+ * does on raw Tally lines. Returns undefined when the row carries no
+ * composition (or none readable): absence is "unknown", never "a voucher with
+ * a single counterparty".
+ */
+const attachedEntries = (v: unknown): VoucherEntry[] | undefined => {
+  if (!Array.isArray(v) || v.length === 0) return undefined;
+  const out: VoucherEntry[] = [];
+  for (const e of v) {
+    if (typeof e !== "object" || e === null) continue;
+    const er = e as Record<string, unknown>;
+    const ledger = text(er.ledgerName ?? er.LEDGERNAME);
+    if (!ledger) continue;
+    const abs = Math.abs(num(er.amount ?? er.AMOUNT));
+    const side = String(er.side ?? "").trim().toLowerCase();
+    out.push({ ledger, amount: side === "credit" ? -abs : abs });
+  }
+  return out.length > 0 ? out : undefined;
 };
 
 const withCompany = (
@@ -224,22 +269,37 @@ export function parseVoucherRows(
 }
 
 export function makeDownstream(call: RawCaller, close: () => Promise<void>): Downstream {
+  /** The report envelope's rows plus the fields that only exist behind
+   * `includeEntries` (see `LedgerVoucherFetch.entriesAttached`). */
+  const ledgerVoucherEnvelopeWithMeta = async (
+    company: string | undefined,
+    ledgerName: string,
+    fromDate: string,
+    toDate: string,
+    includeEntries?: boolean,
+  ): Promise<{ rows: unknown[]; entriesAttached: number | undefined }> => {
+    const body = await call(
+      "tally_get_ledger_vouchers",
+      withCompany({ ledgerName, fromDate, toDate, ...(includeEntries ? { includeEntries: true } : {}) }, company),
+    );
+    // The downstream server wraps rows in a report envelope
+    // ({ source, company, ledgerName, ..., vouchers: [...] }), not a bare
+    // array as originally assumed — see the downstream's src/tools/reads.ts.
+    const parsed = JSON.parse(body) as { vouchers?: unknown[]; entriesAttached?: unknown };
+    return {
+      rows: Array.isArray(parsed.vouchers) ? parsed.vouchers : [],
+      // Present only when the flag was on AND the build reports it; a stale
+      // build answers without the field, which is the signal itself.
+      entriesAttached: typeof parsed.entriesAttached === "number" ? parsed.entriesAttached : undefined,
+    };
+  };
+
   const ledgerVoucherEnvelope = async (
     company: string | undefined,
     ledgerName: string,
     fromDate: string,
     toDate: string,
-  ): Promise<unknown[]> => {
-    const body = await call(
-      "tally_get_ledger_vouchers",
-      withCompany({ ledgerName, fromDate, toDate }, company),
-    );
-    // The downstream server wraps rows in a report envelope
-    // ({ source, company, ledgerName, ..., vouchers: [...] }), not a bare
-    // array as originally assumed — see the downstream's src/tools/reads.ts.
-    const parsed = JSON.parse(body) as { vouchers?: unknown[] };
-    return Array.isArray(parsed.vouchers) ? parsed.vouchers : [];
-  };
+  ): Promise<unknown[]> => (await ledgerVoucherEnvelopeWithMeta(company, ledgerName, fromDate, toDate)).rows;
 
   return {
     callRaw: call,
@@ -328,8 +388,15 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
 
     ledgerVouchers: ledgerVoucherEnvelope,
 
-    async ledgerVoucherRows(company, ledgerName, fromDate, toDate) {
-      const raw = await ledgerVoucherEnvelope(company, ledgerName, fromDate, toDate);
+    async ledgerVoucherRows(company, ledgerName, fromDate, toDate, opts) {
+      const envelope = await ledgerVoucherEnvelopeWithMeta(
+        company,
+        ledgerName,
+        fromDate,
+        toDate,
+        opts?.includeEntries,
+      );
+      const raw = envelope.rows;
       const from = normDate(fromDate);
       const to = normDate(toDate);
       const rows: LedgerVoucherRow[] = [];
@@ -348,6 +415,7 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
           dropped += 1;
           continue;
         }
+        const entries = attachedEntries(r.entries);
         rows.push({
           date,
           voucherType: text(r.voucherType),
@@ -357,9 +425,17 @@ export function makeDownstream(call: RawCaller, close: () => Promise<void>): Dow
           amount: sign * Math.abs(num(r.amount ?? r.matchedAmount)),
           matchStatus: matchStatusOf(r.matchStatus),
           tax: taxOf(r.taxBreakup),
+          // The composition keys travel only together with a composition.
+          ...(entries
+            ? {
+                entries,
+                voucherParty: text(r.voucherPartyLedgerName),
+                entryMatchBasis: text(r.entryMatchBasis),
+              }
+            : {}),
         });
       }
-      return { rows, dropped };
+      return { rows, dropped, entriesAttached: envelope.entriesAttached };
     },
 
     async vouchers(company, fromDate, toDate) {

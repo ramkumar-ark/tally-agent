@@ -32,8 +32,10 @@ import {
   declaredCreditLedgers,
   receivableLedgers,
   rekeyDeductionsToDeductor,
-  refuseLiveAs26Read,
   voucherIdentity,
+  vouchersFromLedgerRows,
+  AS26_LIVE_ENTRIES_UNAVAILABLE,
+  AS26_LIVE_ENTRIES_UNSUPPORTED,
   type BooksDeduction,
   type PartyMatch,
   type PartyRecon,
@@ -741,10 +743,11 @@ export interface Session {
    * TRACES Form 26AS reconciliation (design of record:
    * docs/design/2026-09-22-form-26as-reconciliation-design.md). The operator
    * export arrives already parsed (path-only channel at the tool layer); the
-   * operator party map is read inside the gateway by path. The day-book file
-   * is REQUIRED (2026-09-29): without it `refuseLiveAs26Read` throws, because
-   * the live voucher fetch sees one display counterparty per row and no
-   * voucher composition, so fund-movement journals would be misattributed.
+   * operator party map is read inside the gateway by path. The books come
+   * from a day-book file when one is given, else from the live Tally read
+   * with the connector's attached voucher composition (2026-09-29) — the
+   * live path attributes a deduction by the same rules, never by the report's
+   * single display counterparty.
    */
   as26Review(
     company: string | undefined,
@@ -1239,19 +1242,25 @@ export function createSession(
     ledgers: string[],
     fromDate: string,
     toDate: string,
-  ): Promise<{ rows: Map<string, LedgerVoucherRow[]>; calls: number }> => {
+    opts?: { includeEntries?: boolean },
+  ): Promise<{ rows: Map<string, LedgerVoucherRow[]>; calls: number; entriesCapable: boolean }> => {
     const rows = new Map<string, LedgerVoucherRow[]>();
     let calls = 0;
+    // Whether any fetch's envelope reported the connector's own entriesAttached
+    // count: a build older than includeEntries ignores the flag and answers
+    // without the field, which is how the live 26AS path names the real fault.
+    let entriesCapable = false;
     for (const ledger of ledgers) {
       for (const [f, t] of monthChunks(fromDate, toDate)) {
-        const fetched = await d.ledgerVoucherRows(company, ledger, f, t);
+        const fetched = await d.ledgerVoucherRows(company, ledger, f, t, opts);
+        if (fetched.entriesAttached !== undefined) entriesCapable = true;
         calls += 1;
         const list = rows.get(canonicalKey(ledger)) ?? [];
         list.push(...fetched.rows);
         rows.set(canonicalKey(ledger), list);
       }
     }
-    return { rows, calls };
+    return { rows, calls, entriesCapable };
   };
 
   /** Voucher-row groups keyed by the queried (real) ledger, engine-ready. */
@@ -1271,10 +1280,15 @@ export function createSession(
    * TDS/TCS receivable ledger under an asset group is the operator's setup
    * error, thrown hard (never a silent zero).
    *
-   * The books come from a day-book bundle ONLY: `refuseLiveAs26Read` (the
-   * single guard, defined in src/as26.ts) refuses a run that would fetch
-   * ledger rows live, because the live read cannot show every entry of a
-   * voucher. The live branch below stays in place for the lift.
+   * The books come from a day-book bundle when one is passed, else from live
+   * Tally: the live branch asks `tally_get_ledger_vouchers` for the attached
+   * voucher composition (`includeEntries`) and rebuilds day-book-shaped
+   * vouchers from it (`vouchersFromLedgerRows`, src/as26.ts), so both paths
+   * attribute deductions by `projectLedgerRows` +
+   * `rekeyDeductionsToDeductor` and never by the report's display
+   * counterparty. A row the connector could not join without guessing is
+   * counted, never guessed (`AS26-012`); a run where NO row could be joined
+   * is refused (`AS26_LIVE_ENTRIES_UNAVAILABLE`).
    */
   async function as26Review(
     company: string | undefined,
@@ -1287,8 +1301,6 @@ export function createSession(
     if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
       throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
     }
-    // The one live-path guard; see AS26_LIVE_READ_REFUSED in src/as26.ts.
-    refuseLiveAs26Read(dayBook);
     lastCompany = company;
 
     let groups: Array<{ name: string; parent: string }> = [];
@@ -1304,10 +1316,10 @@ export function createSession(
       // bundle masters have no gstin/pan — 26AS needs only name+parent
       masterPairs = dayBook.ledgers ?? [];
     } else {
-      // DEAD WHILE THE GUARD STANDS: fetches via tally_get_ledger_vouchers,
-      // one display counterparty per row and no voucher composition. Restored
-      // by deleting refuseLiveAs26Read's call above once the connector
-      // exposes full voucher composition on that read.
+      // Live: masters and the day-book-shaped voucher walk come from Tally
+      // itself. `tally_get_vouchers` is what carries the vouchers for the
+      // sales / other-income / bank sides; the deduction side needs no
+      // guessing of its own below.
       const [g, m, v] = await Promise.all([
         d.groups(company).catch(() => null),
         d.ledgersTax(company).catch(() => null),
@@ -1426,8 +1438,15 @@ export function createSession(
 
     const deductions: BooksDeduction[] = [];
     let credits = 0;
+    // Rows the live read could not join to a voucher: reported, never guessed.
+    let unattached: Array<{ date: string; amount: number }> = [];
     if (receivable.length > 0) {
       let rows: Map<string, LedgerVoucherRow[]>;
+      // The vouchers the deductions are attributed from: the day-book bundle
+      // itself, or the live read's attached composition rebuilt into the same
+      // shape. Every attribution below reads these, never a report row's
+      // display counterparty.
+      let deductionVouchers: VoucherRow[] = voucherList;
       if (dayBook) {
         rows = new Map(
           projectLedgerRows(voucherList, receivable.map((r) => r.name), {
@@ -1439,12 +1458,34 @@ export function createSession(
           }).map((r) => [canonicalKey(r.ledger), r.rows]),
         );
       } else {
-        rows = (await fetchLedgerRows(
+        // Live: the same month-chunked read, with the composition attached.
+        const fetched = await fetchLedgerRows(
           company,
           receivable.map((r) => r.name),
           fromDate,
           toDate,
-        )).rows;
+          { includeEntries: true },
+        );
+        const attached = vouchersFromLedgerRows([...fetched.rows.values()].flat());
+        if (attached.vouchers.length === 0 && attached.unattached.length > 0) {
+          // Not one row could be joined without guessing: a books side built
+          // from the display counterparty would be the misattribution the
+          // 2026-09-29 guard existed to prevent. Refuse rather than present it.
+          // A build that never reports the field is a different fault (stale
+          // connector) and says so, because the operator's fix differs.
+          throw new Error(
+            fetched.entriesCapable
+              ? AS26_LIVE_ENTRIES_UNAVAILABLE
+              : AS26_LIVE_ENTRIES_UNSUPPORTED,
+          );
+        }
+        unattached = attached.unattached;
+        deductionVouchers = attached.vouchers;
+        rows = new Map(
+          projectLedgerRows(attached.vouchers, receivable.map((r) => r.name), {
+            skipMirroredPairs: true,
+          }).map((r) => [canonicalKey(r.ledger), r.rows]),
+        );
       }
       for (const r of receivable) {
         const ev = deductionEvents(rowsByLedger(rows, r.name), r.kind);
@@ -1454,16 +1495,14 @@ export function createSession(
       // Addendum 9: a gross-up journal's TDS debit displays against the
       // income ledger, so its event keys to income and can never join the
       // deductor's party. Re-key to the voucher's party line wherever the
-      // counterparty is not a party ledger and the party line is one; the
-      // live path has no voucher party and is untouched. A party ledger is
-      // one parked under Sundry Debtors/Creditors — not merely any asset.
-      // 2026-09-29: the operator's mapped deductors, so a retention bucket
-      // standing in as the voucher's party line cannot win over the real
-      // deductor sitting on the same voucher. Documented limitation: the live
-      // path still attributes a retention-release journal to the warranty
-      // bucket — tally_get_ledger_vouchers carries one display counterparty
-      // per row and no voucher composition, so the pair cannot be recognised
-      // there. Only the day-book bundle has the entries.
+      // counterparty is not a party ledger and the party line is one. A party
+      // ledger is one parked under Sundry Debtors/Creditors — not merely any
+      // asset. 2026-09-29: the operator's mapped deductors, so a retention
+      // bucket standing in as the voucher's party line cannot win over the
+      // real deductor sitting on the same voucher. Since the live read
+      // rebuilds day-book-shaped vouchers from the attached composition, this
+      // runs identically on both paths — the retention-release journal now
+      // reaches its deductor live too.
       const parentOfDed = new Map<string, string>();
       for (const l of masterPairs) parentOfDed.set(canonicalKey(l.name), l.parent);
       for (const g of groups) parentOfDed.set(canonicalKey(g.name), g.parent);
@@ -1481,9 +1520,7 @@ export function createSession(
       const mappedDeductorKeys = new Set(map.mappings.map((m) => canonicalKey(m.ledger)));
       const isMappedDeductor = (name: string): boolean =>
         mappedDeductorKeys.has(canonicalKey(name));
-      const rekeyed = dayBook
-        ? rekeyDeductionsToDeductor(deductions, voucherList, isPartyLedger, isMappedDeductor)
-        : null;
+      const rekeyed = rekeyDeductionsToDeductor(deductions, deductionVouchers, isPartyLedger, isMappedDeductor);
       if (rekeyed) {
         deductions.length = 0;
         deductions.push(...rekeyed);
@@ -1611,7 +1648,17 @@ export function createSession(
       ].map(canonicalKey),
     );
     const otherIncome = otherIncomeCredits(voucherList, ctx, partyKeyByVoucher, otherIncomeExclude);
-    const result = analyzeAs26(file, { deductions, sales, otherIncome, bankEvents, fdAuto }, map, ledgerNames, { fromDate, toDate });
+    // The live read's unattached rows, as the engine's AS26-012 fact. The
+    // day-book path has no such row (every voucher carries its composition).
+    const unattachedFact = unattached.length > 0
+      ? {
+          count: unattached.length,
+          amount: unattached.reduce((s, r) => s + Math.abs(r.amount), 0),
+          firstDate: unattached.reduce((d, r) => (r.date < d ? r.date : d), unattached[0].date),
+          lastDate: unattached.reduce((d, r) => (r.date > d ? r.date : d), unattached[0].date),
+        }
+      : undefined;
+    const result = analyzeAs26(file, { deductions, sales, otherIncome, bankEvents, fdAuto, unattached: unattachedFact }, map, ledgerNames, { fromDate, toDate });
     // Bill-level drill-down (pure, unmasked): the SAME file instance the
     // session analyzed, so the rows and the findings share one provenance.
     const billRowsEngine = buildBillRows(result, { deductions, sales, bankEvents }, file, { fromDate, toDate });

@@ -2,38 +2,110 @@ import { readFileSync } from "node:fs";
 import { canonicalKey } from "./key.js";
 import { lawOf } from "./tds-law.js";
 import type { As26File, As26Kind } from "./as26-file.js";
-import type { DayBookInput } from "./tds-daybook.js";
 
 /**
- * THE ONE GUARD ON THE LIVE 26AS READ (2026-09-29).
+ * THE LIVE 26AS READ, AND HOW IT EARNS ITS ATTRIBUTION (2026-09-29).
  *
- * `Session.as26Review` runs only from a day-book bundle; without one it
- * throws this message. The reason: `tally_get_ledger_vouchers` returns one
- * display counterparty per row and no voucher composition, so a journal that
- * ALSO moves funds between the company's own ledgers (a retention release
- * squared against a warranty liability — see AGENTS.md "Sharp edges found on
- * retention-release journals") cannot be attributed to its deductor on the
- * live read: the internal transfer is what the row displays as the
- * counterparty, and the deduction is filed against the wrong party. The
- * day-book bundle carries every entry of the voucher, so only it is correct.
+ * `tally_get_ledger_vouchers` shows one display counterparty per row, so a
+ * journal that ALSO moves funds between the company's own ledgers (a
+ * retention release squared against a warranty liability — see AGENTS.md
+ * "Sharp edges found on retention-release journals") used to be attributed to
+ * the wrong deductor on a live read, and the whole live path was refused
+ * (`refuseLiveAs26Read`, now gone) in favour of the day-book bundle.
  *
- * LIFT THIS by deleting `refuseLiveAs26Read` and its single call site in
- * `src/review.ts`, once the Tally connector change "expose full voucher
- * composition on the live ledger-vouchers read" has landed and the live
- * branch of `as26Review` reads the entries too. Nothing else in this lane
- * needs to change.
+ * The connector's opt-in `includeEntries` lifts that: each row that could be
+ * joined to a voucher without guessing carries the voucher's FULL entry
+ * composition, and `vouchersFromLedgerRows` turns those rows back into
+ * day-book-shaped vouchers so the live books side is attributed by the same
+ * `projectLedgerRows` / `rekeyDeductionsToDeductor` rules the day book uses.
+ * A row with no composition is NOT rebuilt and NOT guessed: it comes back in
+ * `unattached`, and the caller decides what to say about it.
  */
-export const AS26_LIVE_READ_REFUSED =
-  "the 26AS review will not run against live Tally: the live read (tally_get_ledger_vouchers) shows one " +
-  "counterparty per row and cannot show every entry of a voucher, so a journal that moves funds between " +
-  "the company's own ledgers would be attributed to the wrong deductor. Export the day book " +
-  "(scripts/export-daybook.mjs) and pass its path as dayBookPath.";
 
-/** Throws `AS26_LIVE_READ_REFUSED` unless a day-book bundle was supplied.
- * The only place the live 26AS path is refused — see the constant above. */
-export function refuseLiveAs26Read(dayBook: DayBookInput | undefined): void {
-  if (dayBook) return;
-  throw new Error(AS26_LIVE_READ_REFUSED);
+/** Operator-facing refusal for a live run whose books side could not be read
+ * at all: the running connector build is older than `includeEntries`, so the
+ * flag is ignored and no row carries a composition. Never let a books side
+ * built from the display counterparty pass as a reconciled one. */
+export const AS26_LIVE_ENTRIES_UNSUPPORTED =
+  "the 26AS review cannot read the live Tally books: the running tally_prime_mcp_server does not support the " +
+  "includeEntries flag on tally_get_ledger_vouchers, so no voucher composition came back and a deduction " +
+  "cannot be attributed without guessing. Rebuild the connector from a checkout that has it (or update " +
+  "TALLY_MCP_ARGS to a build that does). Export the day book (scripts/export-daybook.mjs) and pass its path " +
+  "as dayBookPath to run against a file instead.";
+
+/** Operator-facing refusal when the connector does support the flag but not
+ * one row could be joined to a voucher without guessing: the books side would
+ * be empty and a silent zero would read as a reconciliation. */
+export const AS26_LIVE_ENTRIES_UNAVAILABLE =
+  "the 26AS review could not read the live Tally books: tally_get_ledger_vouchers returned no voucher " +
+  "composition for any TDS/TCS receivable row in this period — no report row could be joined to a voucher " +
+  "without guessing. A report row's composition is unknown, never a voucher with a single counterparty. " +
+  "Shorten the period, or export the day book (scripts/export-daybook.mjs) and pass its path as dayBookPath.";
+
+export interface UnattachedRow {
+  date: string;
+  /** The queried ledger's own amount on the report row, positive = debit. */
+  amount: number;
+}
+
+export interface AttachedVouchers {
+  /** Day-book-shaped vouchers, one per distinct joined voucher. */
+  vouchers: VoucherRow[];
+  /** Rows the connector left unattached — no composition, so no attribution. */
+  unattached: UnattachedRow[];
+}
+
+/** Composition signature: the same voucher always yields the same string, and
+ * two DIFFERENT vouchers that happen to share date|type|number never merge. */
+function compositionSignature(entries: Array<{ ledger: string; amount: number }>): string {
+  return entries
+    .map((e) => `${canonicalKey(e.ledger)}:${e.amount.toFixed(2)}`)
+    .sort()
+    .join(",");
+}
+
+/**
+ * Rebuild day-book-shaped vouchers from live ledger-voucher rows.
+ *
+ * Only rows carrying the connector's attached composition are represented: a
+ * row the connector could not join without guessing is reported in
+ * `unattached` and used for NOTHING, because the one column it does carry —
+ * the display counterparty — is exactly the attribution this path exists to
+ * avoid guessing (a gross-up journal names the income ledger; a retention
+ * release names the warranty bucket).
+ *
+ * Identity is date|type|number PLUS the composition signature. A voucher's
+ * composition is the same whichever ledger's report surfaced it, so the same
+ * voucher seen through two receivable ledgers collapses to one (a
+ * double-counted deduction would be a fabricated one), while two genuinely
+ * distinct vouchers sharing a number keep their own entries.
+ *
+ * `cancelled` is false throughout: the ledger report does not mark
+ * cancellation, so a cancelled voucher is read exactly as the live path has
+ * always read it (and as the connector's own composition dump does).
+ */
+export function vouchersFromLedgerRows(rows: LedgerVoucherRow[]): AttachedVouchers {
+  const byKey = new Map<string, VoucherRow>();
+  const order: string[] = [];
+  const unattached: UnattachedRow[] = [];
+  for (const r of rows) {
+    if (!r.entries || r.entries.length === 0) {
+      unattached.push({ date: r.date, amount: r.amount });
+      continue;
+    }
+    const key = `${r.date}|${canonicalKey(r.voucherType)}|${r.voucherNumber.trim()}|${compositionSignature(r.entries)}`;
+    if (byKey.has(key)) continue;
+    byKey.set(key, {
+      date: r.date,
+      voucherType: r.voucherType,
+      voucherNumber: r.voucherNumber,
+      partyLedgerName: r.voucherParty ?? "",
+      cancelled: false,
+      entries: r.entries.map((e) => ({ ledger: e.ledger, amount: e.amount })),
+    });
+    order.push(key);
+  }
+  return { vouchers: order.map((k) => byKey.get(k)!), unattached };
 }
 
 export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "none";
@@ -49,7 +121,7 @@ export interface BooksOtherIncome { partyKey: string; incomeLedger: string; date
  * ledger in the same voucher, FD principal debited (carried, not compared). */
 export interface BankBooksEvent { nameKey: string; date: string; interest: number; tax: number; fdDebit: number; }
 export interface BankBooks { nameKey: string; events: BankBooksEvent[]; }
-export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; otherIncome?: BooksOtherIncome[]; bankEvents?: BankBooks[]; /** Addendum 3: FD auto-detection outcome computed by the caller (owner of the group tree): auto-assigned rows for the workbook audit, and the unassigned remainder with its interest-side credit total. */ fdAuto?: { rows: FdAssignment[]; unassigned: string[]; interest: number }; }
+export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; otherIncome?: BooksOtherIncome[]; bankEvents?: BankBooks[]; /** Addendum 3: FD auto-detection outcome computed by the caller (owner of the group tree): auto-assigned rows for the workbook audit, and the unassigned remainder with its interest-side credit total. */ fdAuto?: { rows: FdAssignment[]; unassigned: string[]; interest: number }; /** Live read only: TDS/TCS receivable report rows the connector could not join to a voucher, so no deduction was attributed from them. Counted and reported (AS26-012), never guessed from the row's display counterparty. Unset on the day-book path. */ unattached?: { count: number; amount: number; firstDate: string; lastDate: string }; }
 
 /** The Bank Interest sheet's parsed rows (design §12.5): presence marks the
  * 26AS name a bank; its interest income and FD ledgers feed the bank-194A
@@ -1745,6 +1817,21 @@ export function analyzeAs26(
       `bank on the Bank Interest sheet (interest-side credit ${money(facts.fdAuto.interest)}): neither a distinctive ` +
       "name token nor a single listed bank resolved them. They are listed by name on the report's 'FD ledger auto-assign' " +
       "sheet, marked unassigned — map them there if they belong to a bank.");
+  }
+
+  // Live read only: report rows whose voucher the connector could not join
+  // without guessing. Their tax is attributed to nobody — guessing from the
+  // one display column is exactly the misattribution this lane refused to do
+  // — so the count, the receivable-side total and the date span are reported
+  // and every books figure in the run is read as an understatement.
+  if (facts.unattached && facts.unattached.count > 0) {
+    const u = facts.unattached;
+    push("live_rows_unattached", "review", "TDS/TCS receivable rows (unattached)", "tds", null, u.amount,
+      `${count(u.count)} row(s) on the TDS/TCS receivable ledger(s) between ${displayDate(u.firstDate)} ` +
+      `and ${displayDate(u.lastDate)} (receivable-side total ${money(u.amount)}) could not be joined to their voucher ` +
+      "by Tally, so no deduction was attributed from them — an unattached row's composition is unknown, never a " +
+      "voucher with a single counterparty. This period's books tax is therefore understated by up to that amount, " +
+      "and no party can be named as its source. Re-run with a day-book export (dayBookPath) to attribute them.");
   }
 
   // 004 — mapping gaps: no money checks ran for these parties

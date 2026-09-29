@@ -1,3 +1,6 @@
+// The 26AS live read after the 2026-09-29 lift: the connector's
+// `includeEntries` composition carries the attribution, so the live path runs
+// — but a books side that cannot be composed is refused, never guessed.
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,10 +10,10 @@ import { createSession } from "../src/review.js";
 import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import { parseAs26Export } from "../src/as26-file.js";
-import { AS26_LIVE_READ_REFUSED } from "../src/as26.js";
+import { AS26_LIVE_ENTRIES_UNAVAILABLE, AS26_LIVE_ENTRIES_UNSUPPORTED } from "../src/as26.js";
 import { buildAs26Fixture } from "./as26-fixture.js";
 import type { DayBookInput } from "../src/tds-daybook.js";
-import type { Downstream } from "../src/downstream.js";
+import type { Downstream, LedgerVoucherRow } from "../src/downstream.js";
 
 const dirs: string[] = [];
 const tempDir = (prefix: string): string => {
@@ -34,20 +37,57 @@ const liveMustNotRun = (): Downstream =>
     close: async () => {},
   }) as never;
 
+const GROUPS = [
+  { name: "Current Assets", parent: "" },
+  { name: "Sundry Debtors", parent: "Current Assets" },
+  { name: "Sales Accounts", parent: "" },
+  { name: "Works Contract Service", parent: "Sales Accounts" },
+];
+const LEDGERS = [
+  { name: "TDS Receivable", parent: "Current Assets" },
+  { name: "Anand Buildmart Pvt Ltd", parent: "Sundry Debtors" },
+  { name: "Works Contract Service", parent: "Sales Accounts" },
+];
+const masters = LEDGERS.map((l) => ({
+  name: l.name, parent: l.parent, gstin: null, state: "", pan: null,
+  isTdsApplicable: false, tdsDeducteeType: "", natureOfPayment: null,
+}));
+/** A display row as the report shows it, with NO composition attached. */
+const rowWithoutEntries: LedgerVoucherRow = {
+  date: "20250612", voucherType: "Journal", voucherNumber: "JV/1", reference: "",
+  counterparty: "Anand Buildmart Pvt Ltd", amount: 2300, matchStatus: "matched", tax: null,
+};
+const entryless = (entriesAttached: number | undefined): Downstream => ({
+  groups: async () => GROUPS,
+  ledgersTax: async () => masters as never,
+  vouchers: async () => [
+    {
+      date: "20250612", voucherType: "Journal", voucherNumber: "JV/1",
+      partyLedgerName: "Anand Buildmart Pvt Ltd", cancelled: false,
+      entries: [
+        { ledger: "TDS Receivable", amount: 2300 },
+        { ledger: "Anand Buildmart Pvt Ltd", amount: -2300 },
+      ],
+    },
+  ] as never,
+  ledgerVoucherRows: async () => ({
+    rows: [rowWithoutEntries], dropped: 0,
+    // A build older than includeEntries never reports the field at all.
+    ...(entriesAttached === undefined ? {} : { entriesAttached }),
+  }),
+  callRaw: async () => { throw new Error("not used"); },
+  listCompanies: async () => ["Demo Traders Pvt Ltd"],
+  trialBalance: async () => { throw new Error("not used"); },
+  ledgers: async () => LEDGERS as never,
+  ledgerVouchers: async () => [] as never,
+  close: async () => {},
+} as never);
+
 const dayBook: DayBookInput = {
   shape: "bundle",
   company: "Demo Traders Pvt Ltd",
-  groups: [
-    { name: "Current Assets", parent: "" },
-    { name: "Sundry Debtors", parent: "Current Assets" },
-    { name: "Sales Accounts", parent: "" },
-    { name: "Works Contract Service", parent: "Sales Accounts" },
-  ],
-  ledgers: [
-    { name: "TDS Receivable", parent: "Current Assets" },
-    { name: "Anand Buildmart Pvt Ltd", parent: "Sundry Debtors" },
-    { name: "Works Contract Service", parent: "Sales Accounts" },
-  ],
+  groups: GROUPS,
+  ledgers: LEDGERS,
   vouchers: [
     {
       date: "20250605", voucherType: "Sales", voucherNumber: "CS/9",
@@ -82,21 +122,34 @@ function harness() {
   return { file, mapPath, session };
 }
 
-describe("the 26AS review refuses the live read", () => {
-  it("throws one named refusal when no day-book bundle is supplied", async () => {
-    const { file, mapPath, session } = harness();
-    let msg = "";
-    try {
-      await session.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, mapPath);
-    } catch (e) { msg = String((e as Error).message); }
-    expect(msg).toBe(AS26_LIVE_READ_REFUSED);
-    // the message tells the operator what to do, without any company data
+const reviewOf = (d: Downstream, dayBookIn?: DayBookInput) => {
+  const { file, mapPath } = harness();
+  return createSession(d, EMPTY_OVERRIDES, EMPTY_WRONG_GROUP)
+    .as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, mapPath, dayBookIn);
+};
+const messageOf = async (p: Promise<unknown>): Promise<string> => {
+  try { await p; return ""; } catch (e) { return String((e as Error).message); }
+};
+
+describe("the 26AS live read", () => {
+  it("refuses a connector build that cannot attach any composition, and says why", async () => {
+    const msg = await messageOf(reviewOf(entryless(undefined)));
+    expect(msg).toBe(AS26_LIVE_ENTRIES_UNSUPPORTED);
+    // the message names the fault and the two ways out, without any company data
+    expect(msg).toContain("includeEntries");
     expect(msg).toContain("dayBookPath");
     expect(msg).toContain("export-daybook.mjs");
     expect(msg).not.toContain("Demo Traders");
   });
 
-  it("validates the period before refusing, so a bad date still says YYYYMMDD", async () => {
+  it("refuses differently when the build has the flag but joined nothing", async () => {
+    const msg = await messageOf(reviewOf(entryless(0)));
+    expect(msg).toBe(AS26_LIVE_ENTRIES_UNAVAILABLE);
+    expect(msg).toContain("dayBookPath");
+    expect(msg).not.toContain("Demo Traders");
+  });
+
+  it("validates the period before reading anything", async () => {
     const { file, mapPath, session } = harness();
     await expect(
       session.as26Review("Demo Traders Pvt Ltd", "2026-04-01", "20260331", file, mapPath),

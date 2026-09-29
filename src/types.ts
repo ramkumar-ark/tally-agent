@@ -415,7 +415,8 @@ export type As26CheckId =
   | "books_tax_not_in_26as" | "as26_tax_not_in_books" | "assessable_value_mismatch"
   | "mapping_gap" | "late_booking" | "export_inconsistent"
   | "unresolved_combination" | "deduction_without_sale"
-  | "as26_totals_mismatch" | "fd_20pct_tds" | "fd_ledgers_unassigned";
+  | "as26_totals_mismatch" | "fd_20pct_tds" | "fd_ledgers_unassigned"
+  | "live_rows_unattached";
 
 /** AS26 ids live in their own ordinal space (AS26-<ordinal>-<n>); the TDS, deposit and ledger tables are never renumbered. */
 export const AS26_CHECK_ORDINAL: Record<As26CheckId, number> = {
@@ -430,6 +431,7 @@ export const AS26_CHECK_ORDINAL: Record<As26CheckId, number> = {
   as26_totals_mismatch: 9,
   fd_20pct_tds: 10,
   fd_ledgers_unassigned: 11,
+  live_rows_unattached: 12,
 };
 
 export function as26FindingId(check: As26CheckId, ordinal: number): string {
