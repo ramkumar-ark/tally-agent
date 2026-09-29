@@ -128,7 +128,7 @@ describe("matchParties — mapping-only", () => {
 // --- Task 6: books facts helpers ---
 
 import type { LedgerVoucherRow, VoucherRow } from "../src/downstream.js";
-import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty, deductorKey, rekeyDeductionsToDeductor, otherIncomeCredits, voucherIdentity } from "../src/as26.js";
+import { deductionEvents, booksSales, receivableLedgers, linkInvoice, reconcileParty, deductorKey, rekeyDeductionsToDeductor, otherIncomeCredits, voucherIdentity, AS26_TAX_TOLERANCE } from "../src/as26.js";
 import { projectLedgerRows } from "../src/tds-daybook.js";
 import type { GstCtx } from "../src/gst.js";
 
@@ -1084,6 +1084,113 @@ describe("reconcileParty — invoice-anchored tiers (addendum 6)", () => {
     expect(r2.combinations).toHaveLength(0);
     expect(r2.ambiguous).toBeGreaterThanOrEqual(1);
     expect(r2.unmatchedBooks).toHaveLength(4);
+  });
+});
+
+/** One books entry explained by at most ONE match: the two unmatched sheets
+ * must net to the Deductors delta. Live case (Narayanan, Greater Chennai
+ * Corporation, v5): one zone-4 journal of 24,256 sat in TWO rate-exact
+ * combination matches (26AS 27,047 and 46,089), so the books side was
+ * explained by it twice and the sheets missed the 26AS tax by that amount. */
+describe("a books entry is explained by at most one match (combo reuse)", () => {
+  // The three journals pre-date every invoice, so no entry anchors (the
+  // rate-exact fallback's pool) and each 26AS row is rate-exact for one
+  // invoice at 2%: 27,047 = 24,256 + 2,791 and 46,089 = 21,833 + 24,256.
+  const sharedFacts: BooksFacts = {
+    deductions: [
+      { ledgerKey: NK, kind: "tds" as const, date: "20251007", tax: 24256, voucherType: "Journal" },
+      { ledgerKey: NK, kind: "tds" as const, date: "20251112", tax: 2791, voucherType: "Journal" },
+      { ledgerKey: NK, kind: "tds" as const, date: "20251007", tax: 21833, voucherType: "Journal" },
+    ],
+    sales: [saleOf("20251201", "INV 1", 1352350), saleOf("20251201", "INV 2", 2304450)],
+  };
+  const sharedFile = txFile(
+    [txGross(27047, 1352350, "20260212"), txGross(46089, 2304450, "20260212")],
+    27047 + 46089,
+  );
+  /** Per party: books-not-in-26AS minus 26AS-unmatched equals the Deductors
+   * delta, up to one tolerance per accepted match (each accepted match ties
+   * its two sides within AS26_TAX_TOLERANCE). */
+  const sheetIdentity = (r: ReturnType<typeof reconcileParty>): { gap: number; slack: number } => {
+    const net = round2ForTest(
+      r.unmatchedBooks.reduce((s, i) => s + i.tax, 0) - r.unmatchedAs26.reduce((s, i) => s + i.tax, 0),
+    );
+    return {
+      gap: round2ForTest(Math.abs(net - (r.booksTax - r.as26Tax))),
+      slack: AS26_TAX_TOLERANCE * (r.paired.length + r.combinations.length),
+    };
+  };
+
+  it("the later 26AS row that needs the consumed journal is left unmatched, not double-explained", () => {
+    const r = reconcileParty(sharedFile, sharedFacts, matchOf(sharedFile, sharedFacts), "20260331");
+    expect(r.combinations).toHaveLength(1);
+    expect(r.combinations[0].target.tax).toBe(27047);
+    expect(r.combinations[0].parts.map((p) => p.tax).sort((a, b) => a - b)).toEqual([2791, 24256]);
+    // the second row and the journal only it could use both stay unmatched
+    expect(r.unmatchedAs26.map((i) => i.tax)).toEqual([46089]);
+    expect(r.unmatchedBooks.map((i) => i.tax)).toEqual([21833]);
+    const { gap, slack } = sheetIdentity(r);
+    expect(gap).toBeLessThanOrEqual(slack);
+  });
+
+  it("no books or 26AS entry is consumed by two matches of any kind", () => {
+    const r = reconcileParty(sharedFile, sharedFacts, matchOf(sharedFile, sharedFacts), "20260331");
+    const used = { books: new Map<number, number>(), as26: new Map<number, number>() };
+    const dupes: string[] = [];
+    const claim = (side: "books" | "as26", id: number | undefined): void => {
+      if (id === undefined) return;
+      const n = (used[side].get(id) ?? 0) + 1;
+      used[side].set(id, n);
+      if (n > 1) dupes.push(`${side}#${id}`);
+    };
+    for (const p of r.paired) { claim("books", p.books.dedIdx); claim("as26", p.as26.txIdx); }
+    for (const c of r.combinations) {
+      if (c.side === "as26") { claim("as26", c.target.txIdx); c.parts.forEach((p) => claim("books", p.dedIdx)); }
+      else { claim("books", c.target.dedIdx); c.parts.forEach((p) => claim("as26", p.txIdx)); }
+    }
+    expect(dupes).toEqual([]);
+  });
+
+  it("every party's two sheets net to its delta, a rounding-accepted match included", () => {
+    const SECOND = "anand buildmart pvt ltd";
+    const secondName = "Anand Buildmart Pvt Ltd";
+    const file: As26File = {
+      summaries: [
+        sum(27047 + 46089),
+        { kind: "tds", name: secondName, nameKey: SECOND, section: "194C",
+          taxTotal: 15041, taxClaimed: 0, balanceCf: 0, gross: 0 },
+      ],
+      transactions: [
+        ...sharedFile.transactions,
+        { kind: "tds", nameKey: SECOND, date: "20260212", amount: 15041, tax: 15041,
+          status: "F", bookingDate: null, section: "194C" },
+      ],
+      skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+    };
+    const f: BooksFacts = {
+      deductions: [
+        ...sharedFacts.deductions,
+        { ledgerKey: SECOND, kind: "tds" as const, date: "20251007", tax: 1628, voucherType: "Journal" },
+        { ledgerKey: SECOND, kind: "tds" as const, date: "20251007", tax: 13414, voucherType: "Journal" },
+      ],
+      sales: sharedFacts.sales,
+    };
+    const map = { mappings: [
+      { ledger: nameOf, as26Name: nameOf },
+      { ledger: secondName, as26Name: secondName },
+    ] };
+    const r = analyzeAs26(file, f, map, [nameOf, secondName],
+      { fromDate: "20250401", toDate: "20260331" });
+    expect(r.recon).toHaveLength(2);
+    for (const p of r.recon) {
+      const { gap, slack } = sheetIdentity(p);
+      expect(gap).toBeLessThanOrEqual(slack);
+    }
+    // the second party's accepted match is off by one rupee: identity holds
+    // within exactly one tolerance, never more
+    const second = r.recon.find((p) => p.match.as26NameKey === SECOND)!;
+    expect(second.combinations).toHaveLength(1);
+    expect(sheetIdentity(second).slack).toBeCloseTo(AS26_TAX_TOLERANCE, 5);
   });
 });
 

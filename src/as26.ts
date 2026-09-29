@@ -1408,6 +1408,16 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
     }
     const gTakenBooks = new Set<number>();
     const gTakenAs26 = new Set<number>();
+    // One books entry is explained by AT MOST ONE match of any kind. Two 26AS
+    // rows can each be fitted by a subset that shares a journal (a corporation
+    // posting one TDS on the zone-4 ledger and several zone ledgers around it);
+    // consuming it twice counted its tax as explained on the books side only
+    // once while both 26AS rows left the unmatched sheet, so the party's
+    // "books not in 26AS" minus "26AS unmatched" no longer equalled its
+    // Deductors delta. Targets are walked in 26AS row order — the earliest row
+    // wins — and a later target whose only fit needs an already-consumed entry
+    // finds no other combination, so it and its parts both stay unmatched and
+    // net out honestly on the two sheets.
     for (const [j, cands] of fitsByTarget) {
       if (gTakenAs26.has(j)) continue;
       const parts = cands[0].parts;
@@ -1416,15 +1426,14 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
         ambiguous += 1;
         continue;
       }
+      const partIdx = parts.map((p) => unmatchedBooks.findIndex((x) => x === p));
+      if (partIdx.some((k) => k < 0 || gTakenBooks.has(k))) continue;
       combinations.push({
         target: unmatchedAs26[j], parts, side: "as26",
         basis: cands[0].basis, invoiceRef: cands[0].invoiceRef,
         invoiceDate: cands[0].invoiceDate, invoiceTaxable: cands[0].invoiceTaxable,
       });
-      for (const p of parts) {
-        const k = unmatchedBooks.findIndex((x) => x === p);
-        if (k >= 0) gTakenBooks.add(k);
-      }
+      for (const k of partIdx) if (k >= 0) gTakenBooks.add(k);
       gTakenAs26.add(j);
     }
     unmatchedBooks = unmatchedBooks.filter((_, i) => !gTakenBooks.has(i));
