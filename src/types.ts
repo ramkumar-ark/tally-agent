@@ -246,7 +246,8 @@ export type TdsCheckId =
   | "tds_exposure_271c" | "tds_section_unknown" | "tds_master_gap"
   | "tds_threshold_crossed"
   | "tds_daybook_month_empty" | "tds_daybook_rows_rejected" | "tds_daybook_unverified"
-  | "tds_daybook_ledger_unmastered" | "tcs_unclassified_ledger";
+  | "tds_daybook_ledger_unmastered" | "tcs_unclassified_ledger"
+  | "tds_consolidation_search_skipped";
 
 /** TDS ids live in their own ordinal space (TDS-<ordinal>-<n>); other tables are never renumbered. */
 export const TDS_CHECK_ORDINAL: Record<TdsCheckId, number> = {
@@ -258,6 +259,7 @@ export const TDS_CHECK_ORDINAL: Record<TdsCheckId, number> = {
   tds_daybook_month_empty: 14, tds_daybook_rows_rejected: 15, tds_daybook_unverified: 16,
   tds_daybook_ledger_unmastered: 17,
   tcs_unclassified_ledger: 18,
+  tds_consolidation_search_skipped: 19,
 };
 
 export function tdsFindingId(check: TdsCheckId, ordinal: number): string {

@@ -260,6 +260,23 @@ export interface TdsReviewResult {
   /** Could-counts only: how much of the Winman side was consumed. */
   winman: { used: boolean; challans: number; deductees: number; panAdopted: number };
   findings: TdsMaskedFinding[];
+  /**
+   * One duty credit applied across several bookings (2026-09-29). The captain's
+   * rule: a single deduction entry booked against several expense entries of
+   * the SAME calendar month is normal bookkeeping, not a compliance issue, so
+   * those bookings count as deducted and raise no finding. Listed here so a
+   * reviewer can see why each of them is silent. `scope` is "month" (the
+   * captain's rule) or "window" (the pre-existing 30-day cross-month split).
+   * Deductees are pseudonyms, dates `displayDate`-formatted, amounts `money()`.
+   */
+  consolidations: Array<{
+    deductee: string;
+    section: string;
+    scope: "month" | "window";
+    creditDate: string;
+    tax: number;
+    bookings: Array<{ date: string; tax: number }>;
+  }>;
   totals: {
     bySection: Array<{ section: string; gross: number; tax: number }>;
     notDeducted: number;
@@ -2550,6 +2567,19 @@ export function createSession(
     const counts: Record<Severity, number> = { critical: 0, warning: 0, review: 0 };
     for (const f of findings) counts[f.severity] += 1;
 
+    // Consolidations (2026-09-29): one credit covering several bookings. The
+    // same masking path as a finding's deductee, so a consolidated party is
+    // the same pseudonym the (silent) bookings would have carried. The booked
+    // dates go out as `displayDate` and no voucher number is emitted.
+    const consolidations = analysis.consolidations.map((con) => ({
+      deductee: maskLedgerName(con.party, groupOfLedger.get(canonicalKey(con.party)) ?? "", c, vault),
+      section: con.section,
+      scope: con.scope,
+      creditDate: displayDate(con.creditDate),
+      tax: con.tax,
+      bookings: con.bookings.map((b) => ({ date: displayDate(b.date), tax: b.tax })),
+    }));
+
     const result: TdsReviewResult = {
       company,
       mastersAvailable: !mastersUnavailable.value,
@@ -2565,6 +2595,7 @@ export function createSession(
       },
       counts,
       findings,
+      consolidations,
       totals: {
         bySection: analysis.totals.bySection.map((t) => ({
           section: t.section,

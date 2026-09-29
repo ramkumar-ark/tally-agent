@@ -1,5 +1,5 @@
 import type { LedgerVoucherRow } from "./downstream.js";
-import { money, displayDate } from "./format.js";
+import { money, count, displayDate, displayMonth } from "./format.js";
 import { calendarMonths, depositDue, interestOn, lateFeePerDay, lawOf, s139DueDate, statementDue, timingOnlySection } from "./tds-law.js";
 import type { OperatorFile } from "./tds-file.js";
 import { canonicalKey } from "./key.js";
@@ -142,6 +142,45 @@ export interface TdsShare {
   interestII?: number;
 }
 
+/**
+ * One duty credit that covers SEVERAL bookings, as the review reports it
+ * (2026-09-29). Such a credit raises no finding of its own — that is the point
+ * of the report: it is how a reader sees that a booking counted as deducted
+ * because of a shared journal, not because nothing happened.
+ */
+export interface TdsConsolidation {
+  party: string;
+  section: string;
+  /** "month": every covered booking falls in the credit's own calendar month. "window": the bounded 30-day split. */
+  scope: "month" | "window";
+  /** YYYYMMDD of the shared duty credit. */
+  creditDate: string;
+  creditVoucherNumber: string;
+  /** The credit's own tax — the sum of the covered bookings' liabilities. */
+  tax: number;
+  bookings: { date: string; voucherNumber: string; tax: number }[];
+}
+
+/**
+ * A same-month consolidation the partial search could not settle (2026-09-29):
+ * the month holds more unpaired bookings than `CONSOLIDATION_MAX_CANDIDATES`,
+ * and neither the whole-month sum nor any searched subset equalled the credit's
+ * tax. The review states the bound in plain words rather than staying silent.
+ */
+export interface TdsConsolidationSkip {
+  party: string;
+  section: string;
+  /** YYYYMMDD of the credit whose allocation could not be settled. */
+  creditDate: string;
+  tax: number;
+  /** YYYYMM — the credit's own calendar month. */
+  month: string;
+  /** How many unpaired same-month bookings the month holds. */
+  unpairedBookings: number;
+  /** How many of them the partial subset search actually looked at. */
+  searchedBookings: number;
+}
+
 export interface TdsDeduction {
   date: string;
   voucherNumber: string;
@@ -158,6 +197,15 @@ export interface TdsDeduction {
    * 1:1 field. Empty/absent on every ordinary credit.
    */
   shares?: TdsShare[];
+  /**
+   * Set when this ONE credit covers more than one booking (2026-09-29):
+   * "month" for a same-calendar-month consolidation (the ordinary shape — one
+   * journal pays a month of bills) and "window" for the bounded cross-month
+   * split. The review lists every such credit under `consolidations`, so a
+   * reader can see why a booking counts as deducted even though it raised no
+   * finding of its own.
+   */
+  consolidated?: "month" | "window";
   /** The duty ledger the credit was read from (set on ambiguous-ledger rows). */
   ledger?: string;
   /** How the credit's section was resolved (2026-09-26f): same-voucher, same-date bill, or nearest bill, N days. */
@@ -591,7 +639,22 @@ const SPLIT_MAX_CANDIDATES = 12;
 const SPLIT_WINDOW_DAYS = 30;
 
 /**
- * Split allocation (2026-09-29): one TDS journal commonly pays TDS on
+ * The same-month consolidation search (2026-09-29, captain). A month-end TDS
+ * journal is routinely booked against EVERY expense entry of one deductee and
+ * section in that month — normal bookkeeping, not a compliance gap, and the
+ * 1:1 model could only hand it to one bill, stranding the rest. The whole set
+ * of the month's unpaired bookings is therefore tried FIRST and UNBOUNDED
+ * (that set is the common shape, and it is one sum, not a search): N bookings
+ * clear one credit for any N. Only a PARTIAL month — a journal that pays some
+ * of the month's bills — falls to the subset search, and that search looks at
+ * at most this many of the month's unpaired bookings. A larger month still
+ * gets the whole-month check; only the partial search is capped, and every cap
+ * hit is reported as a finding rather than left silent.
+ */
+const CONSOLIDATION_MAX_CANDIDATES = 12;
+
+/**
+ * Consolidated allocation (2026-09-29): one TDS journal commonly pays TDS on
  * several bills of the same party in the same month. Under a strict 1:1 join
  * the credit can attach to only one of them, so the other bill reports
  * "no duty credit was found" and the pairing cascades: each stranded booking
@@ -601,18 +664,33 @@ const SPLIT_WINDOW_DAYS = 30;
  *
  * A credit is therefore allocated to two or more bookings of the same
  * deductee and section whose computed liabilities sum to its tax within
- * `TDS_TOLERANCE`. Selection is deterministic: the fewest bookings, then the
- * tightest date span around the credit, then the earliest booking. An exact
- * 1:1 pairing always wins over a split, so the ordinary case is untouched.
- * Returns the bookings a split settled; the credit keeps its own tax and its
- * own place in the deposit/challan streams (see `TdsShare`).
+ * `TDS_TOLERANCE`, in two scopes, tried in this order:
+ * 1. "month" — every booking falls in the credit's OWN calendar month, the
+ *    case the captain named. The month's whole unpaired set is tried first
+ *    (unbounded, one sum, so any N of them clear one credit); a partial month
+ *    falls to a subset search bounded by `CONSOLIDATION_MAX_CANDIDATES`.
+ * 2. "window" — the original 30-day, `SPLIT_MAX_BOOKINGS` split, unchanged,
+ *    which is what still handles a credit that pays bills of a different month.
+ * Selection is deterministic: the fewest bookings, then the tightest date span
+ * around the credit, then the earliest booking. An exact 1:1 pairing always
+ * wins, so the ordinary case is untouched.
+ *
+ * Returns the bookings a shared credit settled, the shared credits themselves
+ * (the review lists them — a booking covered by a shared journal raises no
+ * finding, so this is where a reviewer sees why it counts as deducted), and
+ * the same-month attempts the partial search could not settle. The credit keeps
+ * its own tax and its own place in the deposit/challan streams (see `TdsShare`).
  */
 function allocateSplitCredits(
   events: TdsEvents,
   ctx: Pick<TdsCtx, "panKeyOf">,
-): Set<TdsBooking> {
+): { covered: Set<TdsBooking>; consolidations: TdsConsolidation[]; skipped: TdsConsolidationSkip[] } {
   const covered = new Set<TdsBooking>();
-  if (events.bookings.length === 0 || events.deductions.length === 0) return covered;
+  const consolidations: TdsConsolidation[] = [];
+  const skipped: TdsConsolidationSkip[] = [];
+  if (events.bookings.length === 0 || events.deductions.length === 0) {
+    return { covered, consolidations, skipped };
+  }
   const candsByKey = new Map<string, { booking: TdsBooking; liability: number }[]>();
   for (const b of events.bookings) {
     if (b.section === null) continue;
@@ -634,8 +712,10 @@ function allocateSplitCredits(
     (a, b) => a.date.localeCompare(b.date) || a.voucherNumber.localeCompare(b.voucherNumber),
   )) {
     if (d.booking !== undefined) continue;
-    const cands = (candsByKey.get(`${deducteeKeyOf(ctx, d.party)}|${d.section}`) ?? [])
-      .filter((c) => !covered.has(c.booking))
+    const open = (candsByKey.get(`${deducteeKeyOf(ctx, d.party)}|${d.section}`) ?? []).filter(
+      (c) => !covered.has(c.booking),
+    );
+    const cands = open
       .filter((c) => Math.abs(dateDiffDays(d.date, c.booking.date)) <= SPLIT_WINDOW_DAYS)
       .sort(
         (a, b) =>
@@ -645,11 +725,48 @@ function allocateSplitCredits(
           a.booking.voucherNumber.localeCompare(b.booking.voucherNumber),
       )
       .slice(0, SPLIT_MAX_CANDIDATES);
-    if (cands.length < 2) continue;
-    // An exact one-to-one pairing is the ordinary case and always wins.
-    if (cands.some((c) => Math.abs(c.liability - d.tax) <= TDS_TOLERANCE)) continue;
-    const subset = splitSubset(d, cands);
-    if (!subset) continue;
+    // The credit's own calendar month, whole and uncut — the captain's case.
+    const monthCands = open.filter((c) => c.booking.date.slice(0, 6) === d.date.slice(0, 6));
+    if (cands.length < 2 && monthCands.length < 2) continue;
+    // An exact one-to-one pairing is the ordinary case and always wins, in
+    // either scope (the same month included, beyond the window candidate cap).
+    if (
+      [...cands, ...monthCands].some((c) => Math.abs(c.liability - d.tax) <= TDS_TOLERANCE)
+    ) {
+      continue;
+    }
+    let subset: { booking: TdsBooking; liability: number }[] | null = null;
+    let scope: "month" | "window" = "window";
+    if (monthCands.length >= 2) {
+      // (1) the whole month, unbounded: one sum over every unpaired booking
+      // of the month. This is what clears N > 4 bookings with one credit.
+      const wholeMonth = round2(monthCands.reduce((sum, c) => sum + c.liability, 0));
+      if (Math.abs(wholeMonth - d.tax) <= TDS_TOLERANCE) {
+        subset = monthCands;
+      } else {
+        // (2) a partial month, bounded. A cap hit is recorded, never silent.
+        const capped = monthCands.slice(0, CONSOLIDATION_MAX_CANDIDATES);
+        subset = bestSubset(d, capped, capped.length);
+        if (!subset && monthCands.length > capped.length) {
+          skipped.push({
+            party: d.party,
+            section: d.section,
+            creditDate: d.date,
+            tax: d.tax,
+            month: d.date.slice(0, 6),
+            unpairedBookings: monthCands.length,
+            searchedBookings: capped.length,
+          });
+        }
+      }
+      if (subset) scope = "month";
+    }
+    if (!subset) {
+      if (cands.length < 2) continue;
+      subset = bestSubset(d, cands, SPLIT_MAX_BOOKINGS);
+      if (!subset) continue;
+      scope = "window";
+    }
     // Date order for the share list (the candidate list is nearest-credit
     // first, which is a search order, not a report order), so the credit's
     // `booking` marker is its earliest covered bill.
@@ -659,6 +776,7 @@ function allocateSplitCredits(
         a.booking.voucherNumber.localeCompare(b.booking.voucherNumber),
     );
     d.shares = subset.map((c) => ({ booking: c.booking, tax: c.liability }));
+    d.consolidated = scope;
     // `booking` stays the credit's "claimed" marker (the 1:1 field the
     // candidate filters and the deposit phase read); the findings pass takes
     // the share list in preference, so the first share's own figures are
@@ -666,17 +784,38 @@ function allocateSplitCredits(
     d.booking = subset[0].booking;
     d.joinedTo = subset[0].booking.voucherNumber;
     for (const s of d.shares) covered.add(s.booking);
+    consolidations.push({
+      party: d.party,
+      section: d.section,
+      scope,
+      creditDate: d.date,
+      creditVoucherNumber: d.voucherNumber,
+      tax: d.tax,
+      bookings: d.shares.map((s) => ({
+        date: s.booking.date,
+        voucherNumber: s.booking.voucherNumber,
+        tax: s.tax,
+      })),
+    });
   }
-  return covered;
+  return { covered, consolidations, skipped };
 }
 
-/** The best subset of 2..SPLIT_MAX_BOOKINGS candidates summing to the credit's tax. */
-function splitSubset(
+/**
+ * The best subset of 2..maxBookings candidates whose liabilities sum to the
+ * credit's tax. Shared by the two scopes: the 30-day window split caps the
+ * count at `SPLIT_MAX_BOOKINGS` (a journal that pays a quarter's bills is
+ * still a journal that pays a few), while the same-month partial search is
+ * bounded by its candidate cap instead, because "any number of bookings in
+ * this month" is the case the captain named.
+ */
+function bestSubset(
   d: TdsDeduction,
   cands: { booking: TdsBooking; liability: number }[],
+  maxBookings: number,
 ): { booking: TdsBooking; liability: number }[] | null {
   const n = cands.length;
-  const max = Math.min(SPLIT_MAX_BOOKINGS, n);
+  const max = Math.min(maxBookings, n);
   let best: { booking: TdsBooking; liability: number }[] | null = null;
   let bestKey = "";
   const consider = (pick: { booking: TdsBooking; liability: number }[]): void => {
@@ -757,14 +896,22 @@ function creditEvidence(
  *   exact sum of their liabilities — a month of bills netted into one TDS
  *   journal is ordinary practice, and the 1:1 model could only hand that
  *   credit to one bill, stranding the rest (and cascading the pairing for
- *   later bills of the same party). The split pass runs first, is bounded
- *   (SPLIT_MAX_BOOKINGS bookings, SPLIT_MAX_CANDIDATES candidates per credit)
- *   and is skipped whenever an exact 1:1 pairing exists for that credit;
+ *   later bills of the same party). The consolidation pass runs first, covers
+ *   the credit's own calendar month for any number of bookings (whole-month
+ *   set first, then a bounded partial search) and the 30-day window for up to
+ *   `SPLIT_MAX_BOOKINGS` of them, and is skipped whenever an exact 1:1 pairing
+ *   exists for that credit. `report` receives the shared credits and the
+ *   same-month attempts its bound could not settle;
  * - a deposit joins a duty credit by date + amount, each side consumed once;
  *   a deposit that carries no section (an ambiguous duty ledger's row) joins
  *   only a credit of the same duty ledger.
  */
-function joinEvents(events: TdsEvents, stamped: boolean, ctx: Pick<TdsCtx, "panKeyOf">): void {
+function joinEvents(
+  events: TdsEvents,
+  stamped: boolean,
+  ctx: Pick<TdsCtx, "panKeyOf">,
+  report?: { consolidations: TdsConsolidation[]; skipped: TdsConsolidationSkip[] },
+): void {
   const claimed = new Set<TdsDeduction>();
   const byVoucher = new Map<string, TdsDeduction[]>();
   for (const d of events.deductions) {
@@ -773,9 +920,12 @@ function joinEvents(events: TdsEvents, stamped: boolean, ctx: Pick<TdsCtx, "panK
     list.push(d);
     byVoucher.set(d.voucherNumber, list);
   }
-  const splitCovered = stamped
-    ? allocateSplitCredits(events, ctx)
-    : new Set<TdsBooking>();
+  const allocated = stamped ? allocateSplitCredits(events, ctx) : null;
+  const splitCovered = allocated?.covered ?? new Set<TdsBooking>();
+  if (allocated && report) {
+    report.consolidations.push(...allocated.consolidations);
+    report.skipped.push(...allocated.skipped);
+  }
   for (const b of [...events.bookings].sort((a, b) => a.date.localeCompare(b.date))) {
     // A booking a split credit already covers is settled: the credit is
     // claimed, and the walk must not hand it a second credit or let a later
@@ -1019,7 +1169,7 @@ export function analyzeTds(
   expenseLedgers: TdsLedgerRows[],
   partyLedgers: TdsLedgerRows[],
   ctx: TdsCtx & { operator: OperatorFile },
-): { events: TdsEvents; findings: TdsFinding[]; totals: TdsTotals; liabilities: TdsLiability[]; clause21b: Clause21bBookRow[] } {
+): { events: TdsEvents; findings: TdsFinding[]; totals: TdsTotals; liabilities: TdsLiability[]; clause21b: Clause21bBookRow[]; consolidations: TdsConsolidation[] } {
   const events = extractEvents(dutyLedgers, expenseLedgers, partyLedgers, ctx);
   // Debit notes and charge reversals reduce the charge bases before any
   // threshold or liability is measured (2026-09-26o items 4/5).
@@ -1030,11 +1180,16 @@ export function analyzeTds(
   // booking's computed liability (the books pair the 19,000 journal with the
   // 9,50,000 bill). The math reads only gross bases and is ordering-safe.
   for (const agg of aggs.values()) stampLiabilities(agg, ctx);
-  joinEvents(events, true, ctx);
-  // Split allocations (2026-09-29): a booking a shared credit covers reads
-  // that credit, but only its OWN share of the credit's tax — the findings,
-  // the interest stamps and the s.40(a)(ia) base all measure the bill, not
-  // the journal. Indexed once (never a per-booking scan of the deductions).
+  // Consolidations (2026-09-29): one credit covering several bookings. They
+  // raise no finding, so they are collected here and handed to the review.
+  const consolidations: TdsConsolidation[] = [];
+  const consolidationSkips: TdsConsolidationSkip[] = [];
+  joinEvents(events, true, ctx, { consolidations, skipped: consolidationSkips });
+  // Consolidated allocations (2026-09-29): a booking a shared credit covers
+  // reads that credit, but only its OWN share of the credit's tax — the
+  // findings, the interest stamps and the s.40(a)(ia) base all measure the
+  // bill, not the journal. Indexed once (never a per-booking scan of the
+  // deductions).
   const shareOf = new Map<TdsBooking, { ded: TdsDeduction; share: TdsShare }>();
   for (const d of events.deductions) {
     for (const share of d.shares ?? []) shareOf.set(share.booking, { ded: d, share });
@@ -1283,6 +1438,31 @@ export function analyzeTds(
     );
   }
 
+  // A month the consolidation search could not settle (2026-09-29). The whole
+  // month's unpaired bookings are always tried, so a skip means the credit
+  // covers only PART of a month that has more unpaired bookings than the
+  // partial search looks at. Stated in plain words, with the two counts, so
+  // the reader knows the bound was hit rather than the rule being off.
+  for (const s of consolidationSkips) {
+    // What happens to the bookings the credit does not cover depends on the
+    // section: 194Q and a timing-only section report their coverage as a
+    // party-month or section total (2026-09-26k / 2026-09-26o item 035), so
+    // promising a per-booking not-deducted finding there would be a lie.
+    const uncovered = s.section === "194Q"
+      ? "this section's coverage is reported as a party-month total, not booking by booking"
+      : timingOnlySection(s.section)
+        ? "this section's deposit position is reported at section level, not booking by booking"
+        : "the bookings it does not cover are reported below as not deducted";
+    push(
+      "tds_consolidation_search_skipped",
+      "review",
+      s.party,
+      s.section,
+      0,
+      `the duty credit of ${money(s.tax)} dated ${displayDate(s.creditDate)} for ${s.section} in ${displayMonth(`${s.month.slice(0, 4)}-${s.month.slice(4, 6)}`)} did not match all ${count(s.unpairedBookings)} unpaired ${s.unpairedBookings === 1 ? "booking" : "bookings"} of this party that month, and the consolidation search looked at only the first ${count(s.searchedBookings)} of them; ${uncovered}. Split the credit or declare the bookings on the operator file to settle it.`,
+    );
+  }
+
   // Deposit-level detail rows (date, deductee, section) for sorting later.
 
   // Party-month resolved credit totals (2026-09-26d): Σ tax of every
@@ -1449,7 +1629,16 @@ export function analyzeTds(
         .map((p) => p.date)
         .sort()[0];
       const deductibleDate = advance ?? b.date;
-      if (ded.date > deductibleDate && (ctx.lateDeductionInterest ?? true)) {
+      // A same-month consolidation carries the month's BATCH date, not this
+      // booking's own deduction date (2026-09-29, captain: one deduction entry
+      // against several bookings of the same month is normal bookkeeping).
+      // Every monthly-payment section falls due by the 7th of the month AFTER
+      // the booking (s.201(1) proviso read with the section's own schedule), so
+      // a journal dated inside the booking's own month is never late — the
+      // finding (and its s.201(1A) interest) would be an artefact of the batch
+      // date. A delay of a real month or more is still reported, and so is
+      // every finding for a cross-month "window" consolidation.
+      if (ded.date > deductibleDate && ded.consolidated !== "month" && (ctx.lateDeductionInterest ?? true)) {
         const shielded = ctx.deducteeFiledReturn(b.party);
         const months = calendarMonths(deductibleDate, ded.date);
         const interest = shielded ? 0 : interestOn(0.01, months, dedTax);
@@ -1472,34 +1661,48 @@ export function analyzeTds(
       // the deduction, its date is the deposit date for lateness — overriding an
       // in-window book remittance (1:1 or month-pool). The book remittance date
       // applies only where no challan covers the deduction.
-      if (dep && ded.subsequentDeposit && ded.date <= ctx.asOnDate) {
+      //
+      // A consolidated credit's deposit facts belong to the CREDIT (2026-09-29):
+      // one credit deposited once cannot be late once per share — on a real
+      // company that repetition reported 734 late-deposit findings for 65
+      // credits. They are raised once, on the credit's primary booking, for the
+      // credit's whole tax. A credit that covers several bookings contributes
+      // NO s.40(a)(ia) base at all (below): the month's single deposit must be
+      // resolved against the month pool (2026-09-26e) first, and a base spread
+      // over the month's bookings overstates the disallowance — a 194Q
+      // liability is only its post-threshold excess, so multiplying it out
+      // read a whole month's purchases as not-deposited expenditure.
+      const consolidated = ded.shares !== undefined;
+      const creditReported = !consolidated || ded.booking === b;
+      const creditTax = consolidated ? ded.tax : dedTax;
+      if (creditReported && dep && ded.subsequentDeposit && ded.date <= ctx.asOnDate) {
         const due = depositDue(ded.date);
         if (ded.subsequentDeposit > due) {
           const months = calendarMonths(ded.date, ded.subsequentDeposit);
-          const ii = interestOn(0.015, months, dedTax);
+          const ii = interestOn(0.015, months, creditTax);
           push(
             "tds_late_deposit",
             "warning",
             b.party,
             section,
-            dedTax,
+            creditTax,
             `deposit on ${displayDate(ded.subsequentDeposit)} after the Rule 30 due date of ${displayDate(due)} — per the return's challan; s.201(1A) interest (ii) of ${money(ii)} for ${months} month(s) at 1.5%.`,
             [{ kind: "ii", amount: ii, from: ded.date, to: ded.subsequentDeposit, basis: `1.5% of ${months} month(s)` }],
           );
           interestIi += ii;
           stampInterestII(ii);
         }
-      } else if (dep) {
+      } else if (creditReported && dep) {
         const due = depositDue(ded.date);
         if (dep.date > due) {
           const months = calendarMonths(ded.date, dep.date);
-          const ii = interestOn(0.015, months, dedTax);
+          const ii = interestOn(0.015, months, creditTax);
           push(
             "tds_late_deposit",
             "warning",
             b.party,
             section,
-            dedTax,
+            creditTax,
             `deposit on ${displayDate(dep.date)} after the Rule 30 due date of ${displayDate(due)}; s.201(1A) interest (ii) of ${money(ii)} for ${months} month(s) at 1.5%.`,
             [{ kind: "ii", amount: ii, from: ded.date, to: dep.date, basis: `1.5% of ${months} month(s)` }],
           );
@@ -1515,11 +1718,11 @@ export function analyzeTds(
             "review",
             b.party,
             section,
-            dedTax,
+            creditTax,
             `book deposit on ${displayDate(dep.date)} disagrees with the operator challan for section ${section}, month ${month}.`,
           );
         }
-      } else if (ded.subsequentDeposit && ded.date <= ctx.asOnDate) {
+      } else if (creditReported && ded.subsequentDeposit && ded.date <= ctx.asOnDate) {
         // Deposited in the subsequent year (2026-09-26i): deposited, but
         // after the FY end — lateness interest (ii) still runs to the
         // challan date, while the s.40(a)(ia) base is untouched (the engine
@@ -1527,21 +1730,23 @@ export function analyzeTds(
         const due = depositDue(ded.date);
         if (ded.subsequentDeposit > due) {
           const months = calendarMonths(ded.date, ded.subsequentDeposit);
-          const ii = interestOn(0.015, months, dedTax);
+          const ii = interestOn(0.015, months, creditTax);
           push(
             "tds_late_deposit",
             "warning",
             b.party,
             section,
-            dedTax,
+            creditTax,
             `deposit on ${displayDate(ded.subsequentDeposit)} after the Rule 30 due date of ${displayDate(due)} — per the return's challan; s.201(1A) interest (ii) of ${money(ii)} for ${months} month(s) at 1.5%.`,
             [{ kind: "ii", amount: ii, from: ded.date, to: ded.subsequentDeposit, basis: `1.5% of ${months} month(s)` }],
           );
           interestIi += ii;
           stampInterestII(ii);
         }
-      } else if (ded.date <= ctx.asOnDate && !ded.depositCovered) {
-        notDepositedTax += dedTax;
+      } else if (ded.date <= ctx.asOnDate && !ded.depositCovered && !consolidated) {
+        // One credit, one deposit: the tax and the finding are the credit's,
+        // raised on its primary booking (2026-09-29).
+        notDepositedTax += creditTax;
         // s.40(a)(ia) base is proportional to the tax NOT deposited (2026-09-26o
         // item 041): when a deduction carries only part of the booking's tax
         // (a split 194T draw), only that share of the expenditure disallows.
@@ -1550,19 +1755,21 @@ export function analyzeTds(
         if (!timingOnlySection(section)) {
           notDepositedBase += liability > ZERO ? round2(b.gross * (dedTax / liability)) : b.gross;
         }
-        const notDepositedId = push(
-          "tds_not_deposited",
-          "critical",
-          b.party,
-          section,
-          dedTax,
-          `duty credit of ${money(dedTax)} on ${displayDate(ded.date)} has no deposit debit by ${displayDate(ctx.asOnDate)} (the Rule 30 due date falls next month).`,
-        );
-        clause21b.push({
-          party: b.party, date: b.date, voucherNumber: b.voucherNumber,
-          gross: b.gross, tdsDone: dedTax, tdsDeposited: 0, depositDate: null,
-          section, reason: "not_deposited", liability, findingId: notDepositedId,
-        });
+        if (creditReported) {
+          const notDepositedId = push(
+            "tds_not_deposited",
+            "critical",
+            b.party,
+            section,
+            creditTax,
+            `duty credit of ${money(creditTax)} on ${displayDate(ded.date)} has no deposit debit by ${displayDate(ctx.asOnDate)} (the Rule 30 due date falls next month).`,
+          );
+          clause21b.push({
+            party: b.party, date: b.date, voucherNumber: b.voucherNumber,
+            gross: b.gross, tdsDone: creditTax, tdsDeposited: 0, depositDate: null,
+            section, reason: "not_deposited", liability, findingId: notDepositedId,
+          });
+        }
       }
     }
 
@@ -1921,6 +2128,7 @@ export function analyzeTds(
     findings,
     liabilities,
     clause21b,
+    consolidations,
     totals: {
       bySection: [...bySection.values()],
       notDeducted: round2(notDeducted),
