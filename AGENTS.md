@@ -240,6 +240,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Masked review output masks block group names too (over-redaction beyond
   design §3's letter); the workbook de-masks them via the vault. Recorded so
   the two documents do not look contradictory.
+- **The pass-2 fetch skip is a transport optimisation and must never decide
+  scope** (fixed 2026-09-30, `isAssetRowInScope` in `src/depreciation.ts`,
+  used by `depreciationReview` in `src/review.ts`). The skip drops ledgers
+  whose closing−opening+charge residual is ~0 — which is every IDLE asset once
+  the FY depreciation journal is deleted. `input.ledgerRows` was built from the
+  skip list, so 20 idle ledgers (₹92.4 lakh of opening) vanished and their
+  block share was piled onto the movers, inflating e.g. TANDEM ROLLER from
+  ₹4,69,609 to ₹14,00,183. Scope is "moved OR has a non-nil opening", full stop
+  (`isNil(bookOpening)` is the nil test — never a truthy check). An asset
+  ledger with a nil TB balance at BOTH ends is not an asset row and gets no
+  row: 4 of the 24 candidates on the real company were nil-both-ends, which
+  is why 20 rows appear, not 24.
 
 ## Sharp edges found implementing the TDS spreadsheet input (2026-09-16)
 
