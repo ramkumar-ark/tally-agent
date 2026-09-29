@@ -1608,11 +1608,11 @@ export function createSession(
         // Touched is voucher-wide: the receivable debit can be listed before
         // the bank's own ledger rows in the same voucher.
         let touched = keys.some((k) => ik.has(k) || fk.has(k));
-        let interest = 0, tax = 0, fd = 0;
+        let interest = 0, tax = 0, fd = 0, fdLedger: string | undefined;
         v.entries.forEach((e, i) => {
           const k = keys[i];
           if (ik.has(k) && e.amount < 0) { interest += -e.amount; }
-          else if (fk.has(k) && e.amount > 0) { fd += e.amount; }
+          else if (fk.has(k) && e.amount > 0) { fd += e.amount; fdLedger ??= e.ledger; }
           else if (receivableKeySet.has(k) && e.amount > 0) {
             // A bank's TDS receivable debit counts when the voucher also
             // carries one of the bank's own ledgers — OR when its display
@@ -1627,6 +1627,7 @@ export function createSession(
           events.push({
             nameKey: canonicalKey(b.as26Name), date: String(v.date),
             interest: round2(interest), tax: round2(tax), fdDebit: round2(fd),
+            fdLedger,
           });
         }
       }
@@ -1669,16 +1670,6 @@ export function createSession(
       isTallyLedger.has(canonicalKey(n)) || ledgerGroupOf.has(canonicalKey(n));
     const pseudoName = (n: string): string => {
       if (!n) return n;
-      // A party can own several Tally ledgers (a shared ledger, or a 26AS
-      // name split across two ledgers): the engine's party label is then the
-      // " + "-joined form. Mask it element-wise so it equals the sheet's
-      // ledger-name label — one compound pseudonym would not match, and its
-      // stored "real" value would be a masked string, which de-masking on
-      // disk would write out as an alias.
-      if (n.includes(" + ")) {
-        const parts = n.split(" + ");
-        if (parts.every((p) => p && ledgerName(p))) return parts.map((p) => pseudoName(p)).join(" + ");
-      }
       if (ledgerName(n)) {
         return maskLedgerName(n, ledgerGroupOf.get(canonicalKey(n)) ?? "", c, vault);
       }
@@ -1752,6 +1743,8 @@ export function createSession(
         invoiceTaxable: c.invoiceTaxable ?? null,
         targetId: c.targetId,
         partIds: c.partIds,
+        // Filled in below, once the ledger-key → pseudonym map exists.
+        party: undefined as string | undefined,
       })),
       unmatchedBooks: r.unmatchedBooks.map((i) => ({ ...i, date: displayDate(i.date) })),
       unmatchedAs26: r.unmatchedAs26.map((i) => ({ ...i, date: displayDate(i.date) })),
@@ -1786,27 +1779,33 @@ export function createSession(
       maskLedgerName(r.name, ledgerGroupOf.get(canonicalKey(r.name)) ?? "", c, vault),
     );
 
-    // --- bill rows (masking R-P-5): the engine rows pseudonymed like the
-    // findings, so every row's party label equals its party's finding label
-    // and the row-id pointers below line up. Party labels are the masked
-    // TALLY LEDGER names (the workbook's Deductors sheet is the one place the
-    // 26AS deductor name is shown); booksded rows key on a ledger key, so
-    // canonically key both label maps and look up either. A multi-ledger or
-    // shared group's ledgerName is already the " + "-joined masked form. ---
-    const byLedgerParty = new Map<string, string>(); // canonical ledger key → masked ledger name
+    // --- bill rows (masking R-P-5): every row is named by its OWN side
+    // (captain 2026-09-29). A booksded row is a books entry, so it shows the
+    // ledger that entry is booked on (its own deduction's ledger key, already
+    // canonical); an as26/value row is a 26AS entry, so it shows the masked
+    // 26AS deductor name. The Deductors sheet is the one place a party-level
+    // 26AS name belongs. Findings are labelled the same way, so the row-id
+    // pointers below line up. ---
     const ledgerOrder = new Map<string, number>();   // canonical ledger key → recon index (min)
     const partyIndex = new Map<string, number>();    // as26NameKey → recon index
-    const partyLabel = new Map<string, string>();    // as26NameKey → masked ledger name(s)
+    const as26LabelOf = new Map<string, string>();   // as26NameKey → masked 26AS deductor name
+    const ledgerKeysOf = new Map<string, string[]>();// as26NameKey → the party's ledger keys
     recon.forEach((m, i) => {
       if (!partyIndex.has(m.match.as26NameKey)) partyIndex.set(m.match.as26NameKey, i);
-      if (!partyLabel.has(m.match.as26NameKey)) partyLabel.set(m.match.as26NameKey, m.match.ledgerName);
+      if (!as26LabelOf.has(m.match.as26NameKey)) as26LabelOf.set(m.match.as26NameKey, m.match.as26Name);
+      if (!ledgerKeysOf.has(m.match.as26NameKey)) ledgerKeysOf.set(m.match.as26NameKey, m.match.ledgerKeys);
       for (const k of m.match.ledgerKeys) {
-        byLedgerParty.set(k, pseudoKey(k));
         const prev = ledgerOrder.get(k);
         if (prev === undefined || i < prev) ledgerOrder.set(k, i);
       }
     });
     const KIND_ORDER: Record<BillKind, number> = { booksded: 0, as26: 1, value: 2 };
+    // A row's own party cell: a books entry is named by the ledger it is booked
+    // on, a 26AS entry by the 26AS deductor name.
+    const partyOfRow = (r: (typeof sortedRows)[number]): string =>
+      r.kind === "booksded"
+        ? pseudoKey(r.ledgerKey)
+        : (as26LabelOf.get(r.nameKey) ?? pseudoKey(r.ledgerKey));
     const sortedRows = [...billRowsEngine].sort((a, b) => {
       const ia = partyIndex.get(a.nameKey) ?? ledgerOrder.get(a.nameKey) ?? Number.MAX_SAFE_INTEGER;
       const ib = partyIndex.get(b.nameKey) ?? ledgerOrder.get(b.nameKey) ?? Number.MAX_SAFE_INTEGER;
@@ -1816,7 +1815,7 @@ export function createSession(
       return a.tax - b.tax;
     });
     const billRows = sortedRows.map((r) => ({
-      party: partyLabel.get(r.nameKey) ?? byLedgerParty.get(r.nameKey) ?? pseudoKey(r.ledgerKey),
+      party: partyOfRow(r),
       date: displayDate(r.date),
       tax: r.tax,
       gross: r.gross,
@@ -1844,8 +1843,17 @@ export function createSession(
     const outOfWindowIds = new Set<string>();
     const idByDedIdx = new Map<number, string>();
     const idByTxIdx = new Map<string, string>();
-    const labelOf = (r: (typeof sortedRows)[number]): string =>
-      partyLabel.get(r.nameKey) ?? byLedgerParty.get(r.nameKey) ?? pseudoKey(r.ledgerKey);
+    // Every label a row may be cited under: its own party cell, plus the
+    // party's 26AS name and each of its ledgers. A books finding is labelled
+    // with the entry's ledger, a 26AS finding with the 26AS name, so a row has
+    // to answer to both.
+    const labelsOfRow = (r: (typeof sortedRows)[number]): string[] => {
+      const out = new Set<string>([partyOfRow(r)]);
+      const as26 = as26LabelOf.get(r.nameKey);
+      if (as26) out.add(as26);
+      for (const k of ledgerKeysOf.get(r.nameKey) ?? []) out.add(pseudoKey(k));
+      return [...out];
+    };
     for (const kind of ["booksded", "as26", "value"] as const) {
       let n = 0;
       for (const r of sortedRows) {
@@ -1855,11 +1863,13 @@ export function createSession(
         if (r.dedIdx !== undefined) idByDedIdx.set(r.dedIdx, id);
         if (r.txIdx !== undefined) idByTxIdx.set(`${r.nameKey}|${r.txIdx}`, id);
         if (r.explained) continue;
-        const rows = byParty.get(labelOf(r)) ?? new Map();
-        const list = rows.get(kind) ?? [];
-        list.push(id);
-        rows.set(kind, list);
-        byParty.set(labelOf(r), rows);
+        for (const label of labelsOfRow(r)) {
+          const rows = byParty.get(label) ?? new Map();
+          const list = rows.get(kind) ?? [];
+          list.push(id);
+          rows.set(kind, list);
+          byParty.set(label, rows);
+        }
         if (kind === "as26" && !r.inWindow) outOfWindowIds.add(id);
       }
     }
@@ -1880,6 +1890,14 @@ export function createSession(
         ).filter((x): x is string => x !== undefined);
         mc.targetId = targetId;
         mc.partIds = partIds;
+        // A combination is named by its TARGET's side: an as26 target shows
+        // the 26AS deductor name, a books target the ledger that entry sits
+        // on (its own deduction), falling back to the party's label.
+        mc.party = ec.side === "as26"
+          ? m.match.as26Name
+          : (deductions[ec.target.dedIdx ?? -1]?.ledgerKey
+            ? pseudoKey(deductions[ec.target.dedIdx!].ledgerKey)
+            : (m.match.ledgerNames.length === 1 ? m.match.ledgerName : m.match.as26Name));
       });
     });
     // Findings point at their drill-down rows. Appended after the findings'
@@ -1910,9 +1928,11 @@ export function createSession(
       if (parts.length > 0) f.detail += ` ${parts.join("; ")}.`;
     }
 
-    const fd20BankLabel = new Map(recon.map((r) => [r.match.as26NameKey, r.match.ledgerName]));
+    // FD 20% rows are books entries: each is named by the FD ledger it was
+    // booked on (the engine stamps it), falling back to the party's label.
+    const fd20BankLabel = new Map(recon.map((r) => [r.match.as26NameKey, r.match.as26Name]));
     const fd20 = result.fd20.map((e) => ({
-      party: fd20BankLabel.get(e.nameKey) ?? pseudoKey(e.nameKey),
+      party: e.fdLedger ? pseudoName(e.fdLedger) : (fd20BankLabel.get(e.nameKey) ?? pseudoKey(e.nameKey)),
       date: displayDate(e.date),
       interest: e.interest,
       tax: e.tax,

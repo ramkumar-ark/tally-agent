@@ -119,7 +119,7 @@ export interface BooksOtherIncome { partyKey: string; incomeLedger: string; date
 /** One books voucher of an operator-mapped bank (design §12.2): interest
  * credited on the bank's interest ledgers, TDS credited on a receivable
  * ledger in the same voucher, FD principal debited (carried, not compared). */
-export interface BankBooksEvent { nameKey: string; date: string; interest: number; tax: number; fdDebit: number; }
+export interface BankBooksEvent { nameKey: string; date: string; interest: number; tax: number; fdDebit: number; /** The FD ledger the principal was booked on, when the voucher debited one. A books entry is named by the ledger it sits on, so the FD-20% report needs it. */ fdLedger?: string; }
 export interface BankBooks { nameKey: string; events: BankBooksEvent[]; }
 export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; otherIncome?: BooksOtherIncome[]; bankEvents?: BankBooks[]; /** Addendum 3: FD auto-detection outcome computed by the caller (owner of the group tree): auto-assigned rows for the workbook audit, and the unassigned remainder with its interest-side credit total. */ fdAuto?: { rows: FdAssignment[]; unassigned: string[]; interest: number }; /** Live read only: TDS/TCS receivable report rows the connector could not join to a voucher, so no deduction was attributed from them. Counted and reported (AS26-012), never guessed from the row's display counterparty. Unset on the day-book path. */ unattached?: { count: number; amount: number; firstDate: string; lastDate: string }; }
 
@@ -786,6 +786,10 @@ export interface PartyRecon {
      * rows stay traceable even though they left the unmatched sheets. */
     targetId?: string;
     partIds?: string[];
+    /** The masked party label this combination is reported under: the 26AS
+     * deductor name for an as26-side target, the books ledger for a books-side
+     * target. Filled by the session (it owns the vault). */
+    party?: string;
   }>;
   ambiguous: number;
   unmatchedBooks: ReconItem[]; unmatchedAs26: ReconItem[];
@@ -1560,6 +1564,13 @@ export function analyzeAs26(
   const sumSales = (rows: BooksSale[], pick: (s: BooksSale) => number): number => round2(rows.reduce((s, x) => s + pick(x), 0));
 
   const recons: PartyRecon[] = [];
+  // Party labels are per side (captain 2026-09-29): a 26AS entry is named by
+  // the deductor name 26AS records, a books entry by the ledger it is booked
+  // on. A group spanning several ledgers has no single books name, so a
+  // books-side finding for one falls back to the 26AS name.
+  const as26Label = (m: PartyMatch): string => m.as26Name;
+  const booksLabel = (m: PartyMatch): string =>
+    m.ledgerNames.length === 1 ? m.ledgerNames[0] : m.as26Name;
   /** Books FD-interest entries taxed at ~20% — excluded from totals, reported
    * separately (design §12.4). */
   const fd20All: BankBooksEvent[] = [];
@@ -1619,7 +1630,11 @@ export function analyzeAs26(
         const fdInterest = round2(fd20Entries.reduce((s, e) => s + e.interest, 0));
         const fdTax = round2(fd20Entries.reduce((s, e) => s + e.tax, 0));
         fd20All.push(...fd20Entries);
-        push("fd_20pct_tds", "review", match.ledgerName, match.kind, summary?.section ?? null, fdTax,
+        // The FD ledger each entry is booked on, when the events carry one and
+        // they all name the same ledger; otherwise the group's books label.
+        const fdLedgers = [...new Set(fd20Entries.map((e) => e.fdLedger).filter((x): x is string => !!x))];
+        const fdLabel = fdLedgers.length === 1 ? fdLedgers[0] : booksLabel(match);
+        push("fd_20pct_tds", "review", fdLabel, match.kind, summary?.section ?? null, fdTax,
           `${fd20Entries.length} FD interest entry/entries carry books TDS of approx 20% of the interest ` +
           `(interest ${money(fdInterest)}, tax ${money(fdTax)}): the bank deducted the higher rate, often for a ` +
           "missing PAN, and these entries are not expected to reflect in 26AS. Listed on the 'FD interest 20% TDS' sheet.");
@@ -1665,7 +1680,7 @@ export function analyzeAs26(
       const schedule = capSchedule(partySales.map((s) => ({
         label: s.ref ?? displayDate(s.date), amount: s.gross, date: s.date,
       })));
-      push("books_tax_not_in_26as", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
+      push("books_tax_not_in_26as", "critical", booksLabel(match), match.kind, summary?.section ?? null, excessBooks, detail, schedule);
     }
     }
 
@@ -1680,7 +1695,7 @@ export function analyzeAs26(
         `26AS ${match.kind.toUpperCase()} tax of ${money(r.as26Tax)} against books tax of ${money(r.booksTax)}` +
         (latest !== "00000000" ? `; latest booking date ${displayDate(latest)}` : "") +
         (statuses ? `; booking statuses seen: ${statuses}` : "");
-      push("as26_tax_not_in_books", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessAs26, detail);
+      push("as26_tax_not_in_books", "critical", as26Label(match), match.kind, summary?.section ?? null, excessAs26, detail);
     }
     }
 
@@ -1691,7 +1706,7 @@ export function analyzeAs26(
       const dTok = Math.abs(round2(as26Gross - booksTaxable));
       if (dTok > AS26_VALUE_TOLERANCE) {
         push(
-          "assessable_value_mismatch", "warning", match.ledgerName, match.kind, summary?.section ?? null,
+          "assessable_value_mismatch", "warning", as26Label(match), match.kind, summary?.section ?? null,
           dTok,
           `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)}: the books taxable is out by ${money(dTok)} (tolerance ${money(AS26_VALUE_TOLERANCE)}). Bill-level value rows, where present, carry the per-invoice detail.`,
         );
@@ -1710,7 +1725,7 @@ export function analyzeAs26(
         ...r.unmatchedAs26.map((i) => ({ label: displayDate(i.date), amount: i.tax, date: i.date })),
       ]);
       push(
-        "unresolved_combination", "review", match.ledgerName, match.kind, summary?.section ?? null,
+        "unresolved_combination", "review", as26Label(match), match.kind, summary?.section ?? null,
         Math.max(sumB, sumA),
         `Totals reconcile within tolerance (${money(r.booksTax)} books against ${money(r.as26Tax)} 26AS) but ` +
         `${r.unmatchedBooks.length} books item(s) and ${r.unmatchedAs26.length} 26AS item(s) stay unexplained` +
@@ -1724,7 +1739,7 @@ export function analyzeAs26(
     // 005 — 26AS credits landed outside the reviewed window
     if (r.lateBookedTax > 0) {
       push(
-        "late_booking", "review", match.ledgerName, match.kind, summary?.section ?? null, r.lateBookedTax,
+        "late_booking", "review", as26Label(match), match.kind, summary?.section ?? null, r.lateBookedTax,
         `${money(r.lateBookedTax)} of 26AS tax was booked after ${displayDate(opts.toDate)} — outside the reviewed window, so books and export totals may reconcile once the window is extended (timing possible).`,
       );
     }
@@ -1735,7 +1750,7 @@ export function analyzeAs26(
     if (!totalsOnly) {
     if (r.booksTax > 0 && partySales.length === 0 && match.kind === "tds") {
       push(
-        "deduction_without_sale", "review", match.ledgerName, match.kind, summary?.section ?? null, r.booksTax,
+        "deduction_without_sale", "review", booksLabel(match), match.kind, summary?.section ?? null, r.booksTax,
         "Books carry the deduction but no sale entry exists for this customer in the period — the deduction may sit against a prior-period sale or a receipt (not asserted).",
       );
     }
@@ -1763,7 +1778,7 @@ export function analyzeAs26(
         // A group whose totals tie needs no finding — the shared mapping is
         // reported on the Deductors and Mapping sheets and in the markdown.
         if (miss) {
-          push("as26_totals_mismatch", "critical", match.ledgerName, match.kind,
+          push("as26_totals_mismatch", "critical", as26Label(match), match.kind,
             summary?.section ?? null, Math.abs(taxDelta),
             `${count((match.members ?? []).length)} 26AS ${match.kind.toUpperCase()} names stand on the one Tally ` +
             `ledger ${match.ledgerName}: ${memberList}. The names' 26AS tax totals ${money(r.as26Tax)} against ` +
@@ -1782,13 +1797,13 @@ export function analyzeAs26(
         const head = `26AS ${match.kind.toUpperCase()} ${secLabel} totals: tax ${money(r.as26Tax)}` +
           (as26Gross > 0 ? `, amount paid/credited ${money(as26Gross)}` : "");
         if (mappingEmpty) {
-          push("as26_totals_mismatch", "review", match.ledgerName, match.kind, summary?.section ?? null, r.as26Tax,
+          push("as26_totals_mismatch", "review", as26Label(match), match.kind, summary?.section ?? null, r.as26Tax,
             `${head}. The Bank Interest mapping names this bank but none of its interest income or FD ledgers, ` +
             "so no books totals could be compared; fill the ledger names and re-run.");
         } else {
           const bits = [`books tax total ${money(compTax)}`];
           if (valMiss) bits.unshift(`books interest total ${money(booksInterest)} against`);
-          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", match.ledgerName, match.kind,
+          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", as26Label(match), match.kind,
             summary?.section ?? null, taxMiss ? Math.abs(taxDelta) : Math.abs(round2(as26Gross - booksInterest)),
             taxMiss
               ? `${head}; ${bits.join(", ")}. These sections reconcile on totals, never bill by bill.`

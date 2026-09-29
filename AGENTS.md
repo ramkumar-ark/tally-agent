@@ -892,21 +892,33 @@ When updating this file, preserve this bar for all agents and keep entries conci
   unmatched. Combined with the bounded subset search, 11+1 book-journals
   against one 26AS row is the canonical case (B1–B11/D1).
 - `as26Review`'s 5th argument is the MAP PATH STRING, not a parsed map.
-- Party labels are the **Tally LEDGER name** (masked with `pseudoName`, i.e.
-  `maskLedgerName`), everywhere except the workbook's **Deductors** sheet,
-  whose party cell is the 26AS deductor name (`vault.pseudonym(_, "debtor")`,
-  member names joined by `" + "` for a shared group). Findings, bill rows
-  (B/D/V), fd20, `byLedgerParty` and the Combination matches sheet all carry
-  the ledger name — the row-id pointer join (`byParty`) depends on the
-  findings' label equalling the sheet rows' label, so the two must never
-  diverge. Findings that have no ledger by nature keep naming the 26AS party
-  they report on: `mapping_gap` (`g.ledger ?? g.name`), `export_inconsistent`
-  (`s.name`), `live_rows_unattached`, `fd_ledgers_unassigned`. A party's
-  label is `match.ledgerName` = its ledger names joined by `" + "`, and
-  `pseudoName` masks that form element-wise — never compound-pseudonym it,
-  or de-masking would write an alias out on disk.
-- The Mapping sheet keeps BOTH names ("26AS name" + "mapped ledger"): it is
-  the operator's cross-reference, not a party label.
+- **Every party label is PER SIDE (captain 2026-09-29), never a " + "-joined
+  list.** A 26AS entry is named by the 26AS deductor name
+  (`vault.pseudonym(_, "debtor")`); a books entry by the ONE ledger it is
+  booked on (`pseudoKey` → `maskLedgerName`). Concretely: `Deductors` (the
+  party-level sheet) and the party-level findings `as26_totals_mismatch`,
+  `as26_tax_not_in_books`, `assessable_value_mismatch`,
+  `unresolved_combination`, `late_booking` carry the 26AS name;
+  `books_tax_not_in_26as`, `deduction_without_sale` and `fd_20pct_tds` carry
+  the books ledger. Bill rows follow their sheet: `booksded` rows name their
+  own deduction's `ledgerKey` (they are books entries), `as26`/`value` rows
+  name the 26AS deductor. A Combination matches row is named by its TARGET's
+  side (`c.party`, filled in `as26Review`; a books target resolves through
+  `deductions[target.dedIdx].ledgerKey`). `BankBooksEvent.fdLedger` exists
+  because an FD-20% row is a books entry and must name the FD ledger. A
+  multi-ledger group has no single books name, so `booksLabel`/`fdLabel` fall
+  back to the 26AS name. Findings that have no ledger by nature keep naming
+  the 26AS party: `mapping_gap` (`g.ledger ?? g.name`), `export_inconsistent`
+  (`s.name`), `live_rows_unattached`, `fd_ledgers_unassigned`.
+  **The row-id pointer join therefore CANNOT compare the finding's label to
+  the row's label** — a books finding is labelled with a ledger and a 26AS
+  finding with the deductor, while each row carries its own side. Every row is
+  registered in `byParty` under EVERY label of its party
+  (`labelsOfRow` = own cell + 26AS name + each of its ledgers), so
+  `byParty.get(f.party)` resolves whichever side the finding used.
+- The Mapping sheet keeps BOTH names ("26AS name" + "mapped ledger"), and the
+  shared-ledger Deductors row joins member 26AS names with `" + "`: it is the
+  operator's cross-reference / party-level row, not an entry label.
 - Bank parties report ONE books-tax channel (the operator-mapped events),
   both in check 009 and on the Deductors sheet; value delta picks the
   closest basis (taxable / GST-inclusive / interest) and names it.

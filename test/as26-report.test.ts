@@ -216,7 +216,7 @@ describe("tb_write_26as_report", () => {
     void session;
   });
 
-  it("labels Deductors with the 26AS deductor name and every other party column with the Tally ledger name", async () => {
+  it("names every row by its own side: the 26AS deductor on 26AS rows, the booked ledger on books rows", async () => {
     const { tools } = harness();
     const as26Path = join(tempDir("as26-labels-"), "export.xlsm");
     writeFileSync(as26Path, buildAs26Fixture());
@@ -241,56 +241,66 @@ describe("tb_write_26as_report", () => {
     });
     const paths = JSON.parse(out);
     const wb = readWorkbook(readFileSync(paths.workbookPath));
-    const textOf = (name: string): string => {
-      const sh = wb.find((s) => s.name === name)!;
-      return [...sh.rows.values()].flatMap((r) => [...r.cells.values()].map((c) => String(c.value))).join("|");
-    };
-    // Deductors is the one sheet that names the 26AS deductor
-    expect(textOf("Deductors")).toContain("Nagar Palika Nagar Bhavan");
-    // every other party-labelled sheet names the Tally ledger instead (the
-    // Mapping sheet is the operator's cross-reference and names both by design)
-    for (const name of [
-      "Books Events", "Books not in 26AS", "26AS unmatched",
-      "Bill value mismatch", "Combination matches", "FD interest 20% TDS",
-    ]) {
-      const sh = wb.find((s) => s.name === name)!;
-      const hasDataRow = [...sh.rows.values()].some((r) => /^[A-Z]+\d+$/.test(String(r.cells.get(0)?.value ?? "")));
-      if (!hasDataRow) continue;
-      const text = textOf(name);
-      expect(text, name).toContain("Anand Buildmart");
-      expect(text, name).not.toContain("Nagar Palika");
+    const sheet = (name: string) => wb.find((s) => s.name === name)!;
+    const partyCells = (name: string, col: number): string[] =>
+      // the first row of every sheet is its header row
+      [...sheet(name).rows.values()].slice(1).map((r) => String(r.cells.get(col)?.value ?? ""));
+
+    // Deductors is the party-level sheet: it names the 26AS deductor.
+    expect(partyCells("Deductors", 0)).toContain("Nagar Palika Nagar Bhavan");
+    // Books entries are named by the ledger they are booked on ...
+    expect(partyCells("Books not in 26AS", 1)).toContain("Anand Buildmart Pvt Ltd");
+    expect(partyCells("Books Events", 0)).toContain("Anand Buildmart Pvt Ltd");
+    // ... 26AS entries by the 26AS deductor (the 26AS unmatched and value
+    // sheets are 26AS-side rows, so the deductor name is what identifies them)
+    expect(partyCells("26AS unmatched", 1)).toContain("Nagar Palika Nagar Bhavan");
+    for (const r of partyCells("Bill value mismatch", 1)) {
+      expect(r).toBe("Nagar Palika Nagar Bhavan");
     }
-    // the same on the findings' party column, for every reconciled-party
-    // check (the unmapped-party and export-audit findings name the 26AS
-    // deductor by design — there is no ledger to name)
-    const PARTY_CHECKS = new Set([
-      "books_tax_not_in_26as", "as26_tax_not_in_books", "assessable_value_mismatch",
-      "unresolved_combination", "late_booking", "deduction_without_sale",
-      "as26_totals_mismatch", "fd_20pct_tds",
+    // a combination is named by its TARGET's side (books target = its ledger,
+    // 26AS target = the deductor) — either way, never a joined list
+    for (const r of [...partyCells("Combination matches", 2), ...partyCells("FD interest 20% TDS", 1)]) {
+      if (!r) continue; // the FD sheet's trailing total row
+      expect(["Anand Buildmart Pvt Ltd", "Nagar Palika Nagar Bhavan"]).toContain(r);
+    }
+    // the findings follow their own side too
+    const BOOKS_SIDE = new Set(["books_tax_not_in_26as", "deduction_without_sale", "fd_20pct_tds"]);
+    const AS26_SIDE = new Set([
+      "as26_tax_not_in_books", "assessable_value_mismatch", "unresolved_combination",
+      "late_booking", "as26_totals_mismatch",
     ]);
-    const findingsSheet = wb.find((s) => s.name === "Findings")!;
-    const partyFindings = [...findingsSheet.rows.values()].filter((r) => PARTY_CHECKS.has(String(r.cells.get(1)?.value ?? "")));
-    expect(partyFindings.length).toBeGreaterThan(0);
-    for (const r of partyFindings) {
-      expect(String(r.cells.get(3)?.value ?? ""), String(r.cells.get(1)?.value)).toBe("Anand Buildmart Pvt Ltd");
+    const findingsRows = [...sheet("Findings").rows.values()]
+      .map((r) => ({ check: String(r.cells.get(1)?.value ?? ""), party: String(r.cells.get(3)?.value ?? ""), detail: String(r.cells.get(7)?.value ?? "") }))
+      .filter((r) => BOOKS_SIDE.has(r.check) || AS26_SIDE.has(r.check));
+    expect(findingsRows.filter((r) => BOOKS_SIDE.has(r.check)).length).toBeGreaterThan(0);
+    expect(findingsRows.filter((r) => AS26_SIDE.has(r.check)).length).toBeGreaterThan(0);
+    for (const r of findingsRows) {
+      expect(r.party, r.check).toBe(BOOKS_SIDE.has(r.check) ? "Anand Buildmart Pvt Ltd" : "Nagar Palika Nagar Bhavan");
     }
-    // the row-id pointers still join: a finding and the rows it cites share
-    // the ledger-name party label
+    // no party cell anywhere joins names with " + "
+    for (const [name, col] of [
+      ["Findings", 3], ["Books Events", 0], ["Books not in 26AS", 1],
+      ["26AS unmatched", 1], ["Bill value mismatch", 1], ["Combination matches", 2],
+      ["FD interest 20% TDS", 1],
+    ] as const) {
+      for (const r of partyCells(name, col)) expect(r, name).not.toContain(" + ");
+    }
+    // the row-id pointers still join: a books row is cited under the ledger
+    // label, a 26AS row under the deductor label
     const rowParties = new Map<string, string>();
-    for (const sheet of ["Books not in 26AS", "26AS unmatched", "Bill value mismatch"]) {
-      const sh = wb.find((s) => s.name === sheet)!;
-      for (const r of sh.rows.values()) {
+    for (const name of ["Books not in 26AS", "26AS unmatched", "Bill value mismatch"]) {
+      for (const r of sheet(name).rows.values()) {
         const id = r.cells.get(0)?.value;
         if (typeof id === "string" && id) rowParties.set(id, String(r.cells.get(1)?.value ?? ""));
       }
     }
     let pointers = 0;
-    for (const r of findingsSheet.rows.values()) {
-      const party = String(r.cells.get(3)?.value ?? "");
-      const detail = String(r.cells.get(7)?.value ?? "");
-      for (const m of detail.matchAll(/\b([BDV]\d+)\b/g)) {
+    for (const r of findingsRows) {
+      for (const m of r.detail.matchAll(/\b([BDV]\d+)\b/g)) {
         pointers += 1;
-        expect(rowParties.get(m[1]), `${party} → ${m[1]}`).toBe(party);
+        expect(rowParties.get(m[1]), `${r.party} → ${m[1]}`).toBe(m[1].startsWith("B")
+          ? "Anand Buildmart Pvt Ltd"
+          : "Nagar Palika Nagar Bhavan");
       }
     }
     expect(pointers).toBeGreaterThan(0);
@@ -574,7 +584,7 @@ describe("writeAs26Report — combination sheet (addendum 7 follow-up)", () => {
       const comboRows = combo.rows.slice(1).filter((r) => cell(r, 0) !== "");
       expect(comboRows).toHaveLength(1);
       expect(cell(comboRows[0], 1)).toBe("as26");
-      expect(cell(comboRows[0], 2)).toBe("Pseudonym One"); // the TALLY ledger name, not the 26AS name ("Debtor One")
+      expect(cell(comboRows[0], 2)).toBe("Debtor One"); // the TARGET is a 26AS row, so the 26AS name ("Debtor One"), not the TALLY ledger name ("Pseudonym One")
       expect(cell(comboRows[0], 3)).toBe("D2");
       expect(cell(comboRows[0], 6)).toBe("4");
       expect(cell(comboRows[0], 7)).toBe("B1, B2, B3, B4");
