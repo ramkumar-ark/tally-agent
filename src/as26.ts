@@ -1591,7 +1591,17 @@ export function analyzeAs26(
     const booksTaxableBase = sumSales(partySales, (s) => s.taxable);
     const booksGrossBase = sumSales(partySales, (s) => s.gross);
     const summary = file.summaries.find((s) => s.kind === match.kind && s.nameKey === match.as26NameKey);
-    const as26Gross = summary?.gross ?? 0;
+    // A shared-ledger group's 26AS gross is the SUM over every member name's
+    // summary rows, exactly as its tax already is: reading the one row the
+    // primary name matches reported a fraction of the group's receipts (live:
+    // the CMDA group showed 2,61,97,200 for two names totalling 8,34,44,807)
+    // and left the value columns blank.
+    const as26Gross = match.shared
+      ? round2([...new Set((match.members ?? []).map((m) => m.as26NameKey))]
+        .reduce((s, nk) => s + file.summaries
+          .filter((x) => x.kind === match.kind && x.nameKey === nk)
+          .reduce((t, x) => t + x.gross, 0), 0))
+      : (summary?.gross ?? 0);
 
     // Totals-only parties (design §12.1): every 26AS section of the party is
     // 194R, or 194A with the operator-marked bank. Their entries are many
@@ -1660,11 +1670,12 @@ export function analyzeAs26(
     // credited — and the basis is reported next to the delta.
     r.booksInterestValue = booksInterest;
     const valueCands: Array<[string, number]> = [];
-    // A shared-ledger group has no single 26AS gross to compare against — the
-    // names each report their own, and the books sale pool is the ledger's
-    // joint one. Leave the value columns empty rather than measure one name's
-    // gross against the group's books.
-    if (!match.shared && partySales.length > 0) {
+    // A shared-ledger group is measured here exactly like any other party: its
+    // 26AS gross is the members' sum and its books side the joint ledger pool
+    // (sales are not name-tagged, so a per-name split is impossible — the
+    // group carries no drill-down rows at all). Only the reading is at group
+    // level; the basis label and the delta are the same two figures.
+    if (partySales.length > 0) {
       valueCands.push(["taxable", booksTaxable], ["GST-inclusive", booksGross]);
     }
     if (booksInterest > 0) valueCands.push(["interest", booksInterest]);

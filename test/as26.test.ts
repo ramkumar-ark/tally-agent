@@ -606,6 +606,29 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     expect("members" in matches[0]).toBe(false);
   });
 
+  it("the group's 26AS gross sums EVERY member name, and the value columns are filled", () => {
+    // Live CMDA shape: two 194C names on one ledger, 2,61,97,200 and
+    // 5,72,47,607 — the group's gross is their sum, and the books taxable
+    // ties it, so the value delta is a rounding hair rather than blank.
+    const withSales: BooksFacts = {
+      ...books(1668896),
+      sales: [
+        { ledgerKey: LK, date: "20250810", ref: "INV 1", taxable: 4172240, gross: 4923243.2 },
+        { ledgerKey: LK, date: "20250914", ref: "INV 2", taxable: 4172207, gross: 4923204.26 },
+      ],
+    };
+    const r = analyzeAs26(sharedFile(), withSales, sharedMap, [LEDGER], WINDOW);
+    const rec = r.recon[0];
+    expect(rec.as26GrossValue).toBe(2619720 + 5724760);      // 83,44,480, not 26,19,720
+    expect(rec.booksTaxableValue).toBe(8344447);
+    expect(rec.valueBasis).toBe("taxable");
+    expect(rec.valueDelta).toBeCloseTo(-33, 2);
+    // still no drill-down rows and no money finding for the group
+    expect(rec.totalsOnly).toBe(true);
+    expect(rec.unmatchedBooks).toEqual([]);
+    expect(r.findings).toEqual([]);
+  });
+
   it("a three-name component, one name owning two ledgers, keeps the whole picture", () => {
     const SECOND = "Alpha Works Head Office";
     const file: As26File = {
