@@ -378,16 +378,20 @@ let lastGst44: Gst44ReviewResult | undefined;
       "in Excel, then pass its path to tb_tds_review as templatePath - never paste its rows into chat.",
     {
       company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
-    async (args) => {      const outPath = join(
-        cfg.reportDir,
+    async (args) => {
+      const outDir = args.outDir ?? cfg.reportDir;
+      const outPath = join(
+        outDir,
         templateFileName(
           args.company,
           new Date().toISOString().slice(0, 10).replace(/-/g, ""),
         ),
       );
+      await mkdir(outDir, { recursive: true });
       await writeFile(outPath, buildTemplateWorkbook(args.company));
-      await audit("tb_write_tds_template", { company: args.company }, 0, 0);
+      await audit("tb_write_tds_template", { company: args.company, outDir }, 0, 0);
       return JSON.stringify({ templatePath: outPath }, null, 2);
     },
   );
@@ -484,11 +488,12 @@ let lastGst44: Gst44ReviewResult | undefined;
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
       markdown: z.string().describe("The narrative report, in masked terms"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       if (!lastTds) throw new Error("run tb_tds_review first: there are no TDS findings to write");
       const paths = await writeTdsReport({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         company: args.company,
         fromDate: args.fromDate,
         toDate: args.toDate,
@@ -535,6 +540,7 @@ let lastGst44: Gst44ReviewResult | undefined;
             "dropdown/reference sheet instead of live Tally masters.",
         ),
       company: z.string().optional(),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       const file = parseAs26Export(await readFile(args.as26Path));
@@ -550,12 +556,13 @@ let lastGst44: Gst44ReviewResult | undefined;
       if (ledgers.length === 0) ledgers = await session.ledgerNames(args.company ?? cfg.defaultCompany);
       const deductors = templateDeductors(file);
       const outPath = join(
-        cfg.reportDir,
+        args.outDir ?? cfg.reportDir,
         as26TemplateFileName(
           args.company,
           new Date().toISOString().slice(0, 10).replace(/-/g, ""),
         ),
       );
+      await mkdir(args.outDir ?? cfg.reportDir, { recursive: true });
       await writeFile(outPath, buildAs26MapTemplate({ company: args.company, deductors, map, ledgers }));
       await audit(
         "tb_write_26as_template",
@@ -564,6 +571,7 @@ let lastGst44: Gst44ReviewResult | undefined;
           as26Path: args.as26Path,
           ...(args.as26MapPath ? { as26MapPath: args.as26MapPath } : {}),
           ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
+          outDir: args.outDir ?? null,
         },
         deductors.length,
         0,
@@ -657,11 +665,12 @@ let lastGst44: Gst44ReviewResult | undefined;
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
       markdown: z.string().describe("The narrative report, in masked terms"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       if (!lastAs26) throw new Error("run tb_26as_review first: there are no 26AS findings to write");
       const paths = await writeAs26Report({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         company: args.company,
         fromDate: args.fromDate,
         toDate: args.toDate,
@@ -881,11 +890,12 @@ let lastGst44: Gst44ReviewResult | undefined;
       "from the last tb_gst44_review.",
     {
       company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       if (!lastGst44) throw new Error("run tb_gst44_review first: there are no clause 44 findings to write");
       const paths = await writeGst44Report({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         result: {
           company: args.company ?? lastGst44.company,
           fromDate: lastGst44.fromDate,
@@ -1171,11 +1181,12 @@ let lastGst44: Gst44ReviewResult | undefined;
       "restored on write; compose nothing by hand - it is generated from the last tb_pf_esi_review.",
     {
       company: z.string().optional().describe("Company name, used only in the file name"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       if (!lastPfEsi) throw new Error("run tb_pf_esi_review first: there are no PF/ESI findings to write");
       const paths = await writePfEsiReport({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         result: {
           company: args.company ?? lastPfEsi.company,
           fromDate: lastPfEsi.fromDate,
@@ -1663,11 +1674,12 @@ let lastGst44: Gst44ReviewResult | undefined;
       company: z.string(),
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       if (!lastDep) throw new Error("run tb_depreciation_review first: there are no depreciation findings to write");
       const paths = await writeDepreciationReport({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         company: args.company,
         fromDate: args.fromDate,
         toDate: args.toDate,
@@ -1720,11 +1732,12 @@ let lastGst44: Gst44ReviewResult | undefined;
       company: z.string(),
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
     },
     async (args) => {
       if (!lastFa) throw new Error("run tb_fixed_asset_register first: there is no register to write");
       const paths = await writeFaRegisterReport({
-        reportDir: cfg.reportDir,
+        reportDir: args.outDir ?? cfg.reportDir,
         company: args.company,
         fromDate: args.fromDate,
         toDate: args.toDate,
