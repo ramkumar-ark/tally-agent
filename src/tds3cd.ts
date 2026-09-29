@@ -299,7 +299,14 @@ function interestTdsRows(
     }
   } else {
     for (const d of events.deductions) {
-      const amt = round2((d.interestI ?? 0) + (d.interestII ?? 0));
+      // A split credit (2026-09-29) carries each covered bill's own interest
+      // on its share, never on the credit itself — the credit's share of the
+      // s.201(1A) charge is the sum of its bills'.
+      const amt = round2(
+        (d.interestI ?? 0) +
+          (d.interestII ?? 0) +
+          (d.shares ?? []).reduce((a, s) => a + (s.interestI ?? 0) + (s.interestII ?? 0), 0),
+      );
       if (amt <= 0) continue;
       const q = quarterOfDate(d.date);
       byQuarter.set(q, round2((byQuarter.get(q) ?? 0) + amt));

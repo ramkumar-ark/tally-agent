@@ -1157,3 +1157,34 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - D3CD findings have their own ordinal space; `CHECK_ORDINAL` is untouched. `INCLUDE_SAME_VOUCHER_CHARGES`
   is `false` (captain Q3: an expensed charge is not added), so D3CD-010 never fires; a cash-in-hand part
   over ₹10,000 is EXCLUDED and flagged D3CD-011 (Q9).
+
+## Sharp edges found fixing the TDS pairing cascade and TDS-012-1 (2026-09-29)
+
+- **One duty credit may cover SEVERAL bookings** (`TdsShare` on `TdsDeduction`,
+  `allocateSplitCredits`/`splitSubset` in `src/tds.ts`, run before the 1:1 walk). A month of bills
+  netted into one TDS journal is ordinary practice; under the strict 1:1 `claimed` set the credit
+  attached to one bill, stranded the other, and the pairing cascaded by nearest date (measured on a
+  real FY: 9 findings, ~95% of the not-deducted total, for deductions present in the books).
+- **A share is a per-booking VIEW, never an event**: the credit keeps its own tax, its 1:1 deposit
+  chain, its return-challan allocation and its month-pool place. A share must never enter those
+  streams — a 26Q return carries ONE allocation for the journal, not one per bill, so injecting
+  per-booking deductions into `events.deductions` would break the challan and pool matching.
+  Consequences to remember: pass 2 reads `dedTax` (the share) in place of `ded.tax` everywhere;
+  interest stamps go on the SHARE and `src/tds3cd.ts` sums `d.shares[].interestI/II` (stamping the
+  parent would both double-count per booking and lose all but the last).
+- **Exact 1:1 always wins over a split** (a credit that fits one liability is never spread), the
+  search is bounded (`SPLIT_MAX_BOOKINGS` 4, `SPLIT_MAX_CANDIDATES` 12, same 30-day window as the
+  1:1 join) and the tie-break is total (fewest bookings, tightest date span, earliest) so the choice
+  never depends on iteration order.
+- **The party-month coverage rule hides a same-month split.** `monthCredit >= monthLiability`
+  already silences two bills and their credit when all three fall in one month, so a regression test
+  for the allocation MUST place the bills in months the credit is not in, or it passes with or
+  without the fix. (`test/tds-split-allocation.test.ts`.)
+- **"Mapped" for a duty ledger means ≥1 candidate section, never `dutySectionOf !== null`** —
+  `dutySectionOf` returns a section only for a SINGLE mapping, so reading its null as unmapped
+  called the 194-I hire/rent ledger (mapped to both 194-I(a) and 194-I(b)) unmapped while all
+  ₹4.42 lakh of its credits were in fact analysed per row. Without `dutyCandidatesOf` the caller
+  cannot disambiguate at all, so the old gap wording is then the honest one.
+- A not-deducted finding now ends with `creditEvidence(...)` (dates and `money()` only, never a
+  name, voucher number or PAN) naming the credit that was considered — "no duty credit was found"
+  sent the operator hunting a payment the books already held.
