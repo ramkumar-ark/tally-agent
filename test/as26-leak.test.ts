@@ -55,6 +55,43 @@ const receivableRows = [
   { date: "20250612", voucherType: "Journal", voucherNumber: "JV/1", reference: "", counterparty: "Anand Buildmart Pvt Ltd", amount: 115000, matchStatus: "matched", tax: null },
 ];
 
+/** The demo books as an operator day-book file (the review reads the books
+ *  from it alone). Entry amounts carry the export's Tally sign — credit
+ *  positive — and the reader negates them. */
+const writeDayBook = (): string => {
+  const p = join(tempDir("as26-leak-db-"), "daybook.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      company: "Demo Traders Pvt Ltd",
+      groups,
+      ledgers: [
+        { name: "TDS Receivable", parent: "Current Assets" },
+        { name: "Anand Buildmart Pvt Ltd", parent: "Sundry Debtors" },
+        { name: "Works Contract Service", parent: "Sales Accounts" },
+      ],
+      vouchers: [
+        // in-memory vouchers carry gateway amounts (positive = debit); the
+        // export's rows are Tally-signed and keyed LEDGERNAME/AMOUNT
+        ...vouchers.map((v) => ({
+          ...v,
+          entries: v.entries.map((e) => ({ LEDGERNAME: e.ledger, AMOUNT: -e.amount })),
+        })),
+        {
+          date: "20250612", voucherType: "Journal", voucherNumber: "JV/1",
+          partyLedgerName: "Anand Buildmart Pvt Ltd", isCancelled: false,
+          entries: [
+            { LEDGERNAME: "TDS Receivable", AMOUNT: -115000 },
+            { LEDGERNAME: "Anand Buildmart Pvt Ltd", AMOUNT: 115000 },
+          ],
+        },
+      ],
+    }),
+    "utf8",
+  );
+  return p;
+};
+
 const fakeDown = (): Downstream =>
   ({
     groups: async () => groups,
@@ -100,6 +137,7 @@ describe("26AS leak doors", () => {
 
     const out = await tools.get("tb_26as_review")!({
       fromDate: "20250401", toDate: "20260331", as26Path, as26MapPath: mapPath, company: "Demo Traders Pvt Ltd",
+      dayBookPath: writeDayBook(),
     });
     expect(allStrings(JSON.parse(out)).some((s) => planted.concat(["AAAPZ"]).some((p) => s.includes(p)))).toBe(false);
     // the terse pseudo-form (scrubbed digits) must not carry the TAN prefix either

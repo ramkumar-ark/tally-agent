@@ -584,8 +584,10 @@ let lastGst44: Gst44ReviewResult | undefined;
       "20%-taxed FD interest reporting. Pass the PATH of the TRACES Form 26AS export " +
       "(.xlsm) — never paste its rows into chat; parties appear as pseudonyms; drill in with " +
       "tb_ledger_activity using finding ids. Correct the party mapping by passing the filled " +
-      "template from tb_write_26as_template as as26MapPath. Optionally pass dayBookPath to run the books from " +
-      "an operator day-book export instead of live Tally.",
+      "template from tb_write_26as_template as as26MapPath. Pass dayBookPath — it is REQUIRED: the books " +
+      "come from an operator day-book export, because the live Tally read cannot show every entry of a " +
+      "voucher, so a journal that moves funds between the company's own ledgers would be attributed to the " +
+      "wrong deductor. The tool refuses to run without a day-book export.",
     {
       fromDate: z.string().describe("Period start, YYYYMMDD"),
       toDate: z.string().describe("Period end, YYYYMMDD"),
@@ -593,8 +595,10 @@ let lastGst44: Gst44ReviewResult | undefined;
         .describe("Path to the TRACES Form 26AS export (.xlsm); read inside the gateway, only the path is audited"),
       dayBookPath: z.string().optional()
         .describe(
-          "Optional PATH to an operator day-book JSON export for the whole period; books are read " +
-            "from that file instead of from Tally. Pass the path — never paste the rows.",
+          "REQUIRED. PATH to an operator day-book JSON export covering the whole period " +
+            "(scripts/export-daybook.mjs); the books are read from that file and the review refuses to run " +
+            "without it, because the live read cannot show every entry of a voucher. Pass the path — never " +
+            "paste the rows.",
         ),
       company: z.string().optional(),
       as26MapPath: z.string().optional()

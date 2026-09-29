@@ -2,6 +2,39 @@ import { readFileSync } from "node:fs";
 import { canonicalKey } from "./key.js";
 import { lawOf } from "./tds-law.js";
 import type { As26File, As26Kind } from "./as26-file.js";
+import type { DayBookInput } from "./tds-daybook.js";
+
+/**
+ * THE ONE GUARD ON THE LIVE 26AS READ (2026-09-29).
+ *
+ * `Session.as26Review` runs only from a day-book bundle; without one it
+ * throws this message. The reason: `tally_get_ledger_vouchers` returns one
+ * display counterparty per row and no voucher composition, so a journal that
+ * ALSO moves funds between the company's own ledgers (a retention release
+ * squared against a warranty liability — see AGENTS.md "Sharp edges found on
+ * retention-release journals") cannot be attributed to its deductor on the
+ * live read: the internal transfer is what the row displays as the
+ * counterparty, and the deduction is filed against the wrong party. The
+ * day-book bundle carries every entry of the voucher, so only it is correct.
+ *
+ * LIFT THIS by deleting `refuseLiveAs26Read` and its single call site in
+ * `src/review.ts`, once the Tally connector change "expose full voucher
+ * composition on the live ledger-vouchers read" has landed and the live
+ * branch of `as26Review` reads the entries too. Nothing else in this lane
+ * needs to change.
+ */
+export const AS26_LIVE_READ_REFUSED =
+  "the 26AS review will not run against live Tally: the live read (tally_get_ledger_vouchers) shows one " +
+  "counterparty per row and cannot show every entry of a voucher, so a journal that moves funds between " +
+  "the company's own ledgers would be attributed to the wrong deductor. Export the day book " +
+  "(scripts/export-daybook.mjs) and pass its path as dayBookPath.";
+
+/** Throws `AS26_LIVE_READ_REFUSED` unless a day-book bundle was supplied.
+ * The only place the live 26AS path is refused — see the constant above. */
+export function refuseLiveAs26Read(dayBook: DayBookInput | undefined): void {
+  if (dayBook) return;
+  throw new Error(AS26_LIVE_READ_REFUSED);
+}
 
 export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "none";
 

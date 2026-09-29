@@ -956,12 +956,21 @@ When updating this file, preserve this bar for all agents and keep entries conci
   is built from `map.mappings` alone — never the Bank Interest sheet, or a
   bank interest posting would key its receipt to the bank instead of the
   party.
-- **Live path unfixable gateway-side (documented limitation, 2026-09-29):**
-  `tally_get_ledger_vouchers` returns one display counterparty per row and no
-  voucher composition, so on live runs the warranty/retention attribution
-  stands and the deduction keys to the warranty bucket. Fixing it needs the
-  upstream to expose the voucher's entries per row. The day-book bundle
-  carries them, so the day-book path (now the normal one) is correct.
+- **The live 26AS path is refused (2026-09-29):** `tally_get_ledger_vouchers`
+  returns one display counterparty per row and no voucher composition, so a
+  journal that also moves funds between the company's own ledgers (the
+  retention-release/warranty case above) cannot be attributed to its deductor
+  live — the internal transfer is what the row displays, and the deduction
+  keys to the wrong bucket. `tb_26as_review` therefore requires
+  `dayBookPath`: `refuseLiveAs26Read` (guard + message
+  `AS26_LIVE_READ_REFUSED` in `src/as26.ts`, called once from
+  `src/review.ts`'s `as26Review` after the date check) throws without a
+  bundle. The whole live branch stays in place under a DEAD-WHILE-THE-GUARD-
+  STANDS comment; lifting the restriction is deleting that one call, once the
+  upstream exposes the voucher's entries per row. Every other lane still
+  runs live. Tests: `test/as26-review.test.ts` / `test/as26-report.test.ts`
+  / `test/as26-leak.test.ts` now supply a day book; `test/as26-live-guard.test.ts`
+  pins the refusal and that other tools still hit Tally.
 
 ## Sharp edges found implementing the 3CD TDS/TCS summary (2026-09-24)
 

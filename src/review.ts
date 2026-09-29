@@ -32,6 +32,7 @@ import {
   declaredCreditLedgers,
   receivableLedgers,
   rekeyDeductionsToDeductor,
+  refuseLiveAs26Read,
   voucherIdentity,
   type BooksDeduction,
   type PartyMatch,
@@ -741,8 +742,9 @@ export interface Session {
    * docs/design/2026-09-22-form-26as-reconciliation-design.md). The operator
    * export arrives already parsed (path-only channel at the tool layer); the
    * operator party map is read inside the gateway by path. The day-book file
-   * is the optional replacement for the live voucher fetch (captain
-   * deviation 3); it swaps `d.vouchers` and the receivable master source.
+   * is REQUIRED (2026-09-29): without it `refuseLiveAs26Read` throws, because
+   * the live voucher fetch sees one display counterparty per row and no
+   * voucher composition, so fund-movement journals would be misattributed.
    */
   as26Review(
     company: string | undefined,
@@ -1268,6 +1270,11 @@ export function createSession(
    * against counterparty names — but a live run whose masters do not name a
    * TDS/TCS receivable ledger under an asset group is the operator's setup
    * error, thrown hard (never a silent zero).
+   *
+   * The books come from a day-book bundle ONLY: `refuseLiveAs26Read` (the
+   * single guard, defined in src/as26.ts) refuses a run that would fetch
+   * ledger rows live, because the live read cannot show every entry of a
+   * voucher. The live branch below stays in place for the lift.
    */
   async function as26Review(
     company: string | undefined,
@@ -1280,6 +1287,8 @@ export function createSession(
     if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
       throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
     }
+    // The one live-path guard; see AS26_LIVE_READ_REFUSED in src/as26.ts.
+    refuseLiveAs26Read(dayBook);
     lastCompany = company;
 
     let groups: Array<{ name: string; parent: string }> = [];
@@ -1295,6 +1304,10 @@ export function createSession(
       // bundle masters have no gstin/pan — 26AS needs only name+parent
       masterPairs = dayBook.ledgers ?? [];
     } else {
+      // DEAD WHILE THE GUARD STANDS: fetches via tally_get_ledger_vouchers,
+      // one display counterparty per row and no voucher composition. Restored
+      // by deleting refuseLiveAs26Read's call above once the connector
+      // exposes full voucher composition on that read.
       const [g, m, v] = await Promise.all([
         d.groups(company).catch(() => null),
         d.ledgersTax(company).catch(() => null),

@@ -65,6 +65,43 @@ const fakeDown = (): Downstream =>
     close: async () => {},
   }) as never;
 
+/** The demo books as an operator day-book file: the sale voucher and one
+ *  receivable debit. Entry amounts carry the export's Tally sign (credit
+ *  positive) — the reader negates them into the gateway's positive = debit. */
+const writeDayBook = (): string => {
+  const p = join(tempDir("as26-daybook-"), "daybook.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      company: "Demo Traders Pvt Ltd",
+      groups,
+      ledgers: [
+        { name: "TDS Receivable", parent: "Current Assets" },
+        { name: "Anand Buildmart Pvt Ltd", parent: "Sundry Debtors" },
+        { name: "Works Contract Service", parent: "Sales Accounts" },
+      ],
+      vouchers: [
+        // in-memory vouchers carry gateway amounts (positive = debit); the
+        // export's rows are Tally-signed and keyed LEDGERNAME/AMOUNT
+        ...vouchers.map((v) => ({
+          ...v,
+          entries: v.entries.map((e) => ({ LEDGERNAME: e.ledger, AMOUNT: -e.amount })),
+        })),
+        {
+          date: "20250612", voucherType: "Journal", voucherNumber: "JV/1",
+          partyLedgerName: "Anand Buildmart Pvt Ltd", isCancelled: false,
+          entries: [
+            { LEDGERNAME: "TDS Receivable", AMOUNT: -115000 },
+            { LEDGERNAME: "Anand Buildmart Pvt Ltd", AMOUNT: 115000 },
+          ],
+        },
+      ],
+    }),
+    "utf8",
+  );
+  return p;
+};
+
 function harness() {
   const tools = new Map<string, (args: any) => Promise<string>>();
   const registrar: ToolRegistrar = (name, _desc, _schema, handler) => {
@@ -90,6 +127,7 @@ describe("tb_26as_review tool", () => {
     writeFileSync(as26Path, buildAs26Fixture());
     const out = await tools.get("tb_26as_review")!({
       fromDate: "20250401", toDate: "20260331", as26Path, company: "Demo Traders Pvt Ltd",
+      dayBookPath: writeDayBook(),
     });
     const res = JSON.parse(out);
     expect(res.findings.length).toBeGreaterThanOrEqual(0);
@@ -120,6 +158,7 @@ describe("tb_write_26as_report", () => {
     ]}));
     await tools.get("tb_26as_review")!({
       fromDate: "20250401", toDate: "20260331", as26Path, as26MapPath: mapPath, company: "Demo Traders Pvt Ltd",
+      dayBookPath: writeDayBook(),
     });
     const out = await tools.get("tb_write_26as_report")!({
       company: "Demo Traders Pvt Ltd",

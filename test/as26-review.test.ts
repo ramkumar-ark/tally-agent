@@ -64,6 +64,82 @@ const receivableRows = [
   { date: "20260307", voucherType: "Journal", voucherNumber: "JV/9", reference: "", counterparty: "Kaveri Minerals Trading", amount: -50, matchStatus: "unknown", tax: null },
 ];
 
+/**
+ * The same books as the live fixtures above, in day-book form: the sale
+ * voucher feeds booksSales and one journal per receivable row feeds the
+ * deduction events (positive = debit on TDS Receivable).
+ */
+const dayBookGroups = [
+  { name: "Current Assets", parent: "" },
+  { name: "Loans & Advances (Asset)", parent: "Current Assets" },
+  { name: "Sundry Debtors", parent: "Current Assets" },
+  { name: "Sales Accounts", parent: "" },
+  { name: "Works Contract Service", parent: "Sales Accounts" },
+];
+const dayBookLedgers = [
+  { name: "TDS Receivable", parent: "Loans & Advances (Asset)" },
+  { name: "Anand Buildmart Pvt Ltd", parent: "Sundry Debtors" },
+  { name: "Kaveri Minerals Trading", parent: "Sundry Debtors" },
+  { name: "Works Contract Service", parent: "Sales Accounts" },
+];
+const dayBookVouchers: DayBookInput["vouchers"] = [
+  {
+    date: "20250605", voucherType: "Sales", voucherNumber: "CS/9", partyLedgerName: "Anand Buildmart Pvt Ltd",
+    cancelled: false,
+    entries: [
+      { ledger: "Anand Buildmart Pvt Ltd", amount: 230000 },
+      { ledger: "Works Contract Service", amount: -230000 },
+    ],
+  },
+  {
+    date: "20250612", voucherType: "Journal", voucherNumber: "JV/1", partyLedgerName: "Anand Buildmart Pvt Ltd",
+    cancelled: false,
+    entries: [
+      { ledger: "TDS Receivable", amount: 115000 },
+      { ledger: "Anand Buildmart Pvt Ltd", amount: -115000 },
+    ],
+  },
+  {
+    date: "20251018", voucherType: "Journal", voucherNumber: "JV/2", partyLedgerName: "Anand Buildmart Pvt Ltd",
+    cancelled: false,
+    entries: [
+      { ledger: "TDS Receivable", amount: 115000 },
+      { ledger: "Anand Buildmart Pvt Ltd", amount: -115000 },
+    ],
+  },
+  {
+    date: "20260305", voucherType: "Journal", voucherNumber: "JV/8", partyLedgerName: "Anand Buildmart Pvt Ltd",
+    cancelled: false,
+    entries: [
+      { ledger: "TDS Receivable", amount: 3000 },
+      { ledger: "Anand Buildmart Pvt Ltd", amount: -3000 },
+    ],
+  },
+  {
+    date: "20260307", voucherType: "Journal", voucherNumber: "JV/9", partyLedgerName: "Kaveri Minerals Trading",
+    cancelled: false,
+    entries: [
+      { ledger: "TDS Receivable", amount: -50 },
+      { ledger: "Kaveri Minerals Trading", amount: 50 },
+    ],
+  },
+];
+const demoDayBook = (vouchers: DayBookInput["vouchers"] = dayBookVouchers): DayBookInput => ({
+  shape: "bundle",
+  company: "Demo Traders Pvt Ltd",
+  groups: dayBookGroups,
+  ledgers: dayBookLedgers,
+  vouchers,
+  observedFrom: vouchers[0]?.date ?? "",
+  observedTo: vouchers[vouchers.length - 1]?.date ?? "",
+  rejected: 0,
+  emptyMonths: [],
+});
+/** A review of a shortened window reads the books as the live read's period
+ *  filter would have: only the vouchers inside it. */
+const windowedDayBook = (toDate: string): DayBookInput =>
+  demoDayBook(dayBookVouchers.filter((v) => v.date <= toDate));
+
 const fake = (ranges: Array<[string, string, string]> = [], mastersThrow = false) => ({
   groups: async () => groups,
   ledgersTax: async () => { if (mastersThrow) throw new Error("tally down"); return masters as never; },
@@ -83,18 +159,17 @@ const fake = (ranges: Array<[string, string, string]> = [], mastersThrow = false
 describe("Session.as26Review", () => {
   const file = parseAs26Export(buildAs26Fixture());
 
-  it("wires books facts through the receivable-ledger path and masks every party", async () => {
+  it("wires books facts through the day-book bundle and masks every party", async () => {
     const ranges: Array<[string, string, string]> = [];
     const s = createSession(fake(ranges), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
     const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, mapFile(
       JSON.stringify({ mappings: [{ ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" }] }),
-    ));
+    ), demoDayBook());
 
     expect(res.totals.partiesMatched).toBe(1);
-    // month-chunked fetch against the receivable ledger only
-    expect(ranges.map((r) => r[0]).every((l) => l === "TDS Receivable")).toBe(true);
-    expect(ranges.some((r) => r[1] === "20250401" && r[2] === "20250430")).toBe(true);
-    expect(ranges.length).toBeGreaterThan(2);
+    // the books come from the bundle: no live ledger-row read happens at all
+    expect(ranges).toHaveLength(0);
+    expect(res.bookEvents.filter((e) => e.source === "deduction")).toHaveLength(3);
 
     // findings exist (books exceed 26AS on this fixture) and all parties pseudonym
     const f001 = res.findings.filter((f) => f.check === "books_tax_not_in_26as");
@@ -124,7 +199,7 @@ describe("Session.as26Review", () => {
         { ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" },
         { ledger: "Kaveri Minerals Trading", as26Name: "Anand Buildmart Pvt Ltd" },
       ]}),
-    ));
+    ), demoDayBook());
     expect(res.totals.partiesMatched).toBe(1);
     expect(res.recon[0].match.ledgerKeys).toHaveLength(2);
     for (const n of res.recon[0].match.ledgerNames) expect(n).toMatch(PSEUDONYM);
@@ -137,22 +212,16 @@ describe("Session.as26Review", () => {
     expect(raw).not.toContain("Kaveri Minerals");
   });
 
-  it("degrades on master failure and still reconciles against counterparties", async () => {
-    const err = console.error;
-    console.error = () => {};
-    try {
-      const s = createSession(fake([], true), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
-      const res = await s.as26Review(undefined, "20250401", "20260331", file, mapFile(
-        JSON.stringify({ mappings: [{ ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" }] }),
-      ));
-      expect(res.mastersUnavailable).toBe(true);
-      // the receivable ledger is still found by the name heuristic over the
-      // voucher entries, so deductions flow and the operator map joins
-      expect(res.counts.receivableLedgers).toHaveLength(1);
-      expect(res.totals.partiesMatched).toBe(1);
-    } finally {
-      console.error = err;
-    }
+  it("degrades when the bundle carries no ledger masters and still reconciles against counterparties", async () => {
+    // No group tree and no ledger masters in the export: the receivable
+    // ledger is then found by the name rule over the vouchers' own entries
+    // (the master-tree rule cannot run), and the operator map still joins.
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review(undefined, "20250401", "20260331", file, mapFile(
+      JSON.stringify({ mappings: [{ ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" }] }),
+    ), { ...demoDayBook(), groups: null, ledgers: null });
+    expect(res.counts.receivableLedgers).toHaveLength(1);
+    expect(res.totals.partiesMatched).toBe(1);
   });
 
   it("keys day-book rows canonically and keeps GST TDS receivables out of the income-tax set", async () => {
@@ -233,7 +302,7 @@ describe("Session.as26Review", () => {
       }),
     );
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
-    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, p);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, p, demoDayBook());
     expect(res.totals.partiesMatched).toBe(1);
   });
 
@@ -333,7 +402,7 @@ describe("Session.as26Review", () => {
 
   it("billRows reach the tool result masked, with row pointers on findings", async () => {
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
-    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, anandMap());
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file, anandMap(), demoDayBook());
 
     // every party label is a pseudonym, never a name
     expect(res.billRows.length).toBeGreaterThan(0);
@@ -372,7 +441,7 @@ describe("Session.as26Review", () => {
         ["ANAND BUILDMART PVT LTD", "09-Sep-2025", 240000.89, null, 4600.15, 4600.15, "PUNB05678F", null, "F", "15-Oct-2025", "194C"]),
     }));
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
-    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", fileV, anandMap());
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", fileV, anandMap(), demoDayBook());
     const label = res.recon[0].match.ledgerName;
     const order = res.billRows.filter((r) => r.party === label).map((r) => r.sheetId);
     expect(order).toEqual(["booksded", "booksded", "booksded", "as26", "value"]);
@@ -390,7 +459,7 @@ describe("Session.as26Review", () => {
         ["", "20-Nov-2025", 100000, null, 2000, null, "PUNB05678F", null, "F", "05-Jan-2026", "194C"]],
     }));
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
-    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileL, anandMap());
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileL, anandMap(), windowedDayBook("20251231"));
     const late = res.findings.find((x) => x.check === "late_booking");
     expect(late).toBeDefined();
     // D2 is the 05-Jan-2026 booking (outside the window); D1 (15-Oct-2025) is in-window
@@ -413,7 +482,7 @@ describe("Session.as26Review", () => {
       tdsDetail: [...base.tdsDetail.slice(0, 6), preRow, postRow],
     }));
     const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
-    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileW, anandMap());
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20251231", fileW, anandMap(), windowedDayBook("20251231"));
     const as26rows = res.billRows.filter((r) => r.sheetId === "as26");
     // Pin the DIRECTION per named row: a pre↔post inversion would still leave
     // all three states present, so membership alone cannot catch it. An as26
