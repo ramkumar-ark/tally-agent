@@ -21,6 +21,11 @@ export interface WorkflowParams {
 export interface WorkflowInputGenerator {
   tool: string;
   /**
+   * Inputs that must carry a path before args() can build anything. When one
+   * is missing the intake reports the input as missing and names these.
+   */
+  needs?: InputKey[];
+  /**
    * The tool arguments, or undefined when a path this generator needs is not
    * present yet (the input only becomes generatable once that lands).
    */
@@ -125,6 +130,7 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     doc: "docs/operator/gst-44-operator-template.md",
     generator: {
       tool: "tb_write_gst_working_sheet",
+      needs: ["dayBook"],
       args: (c, paths, toFillDir) => {
         const dayBookPath = paths("dayBook");
         if (dayBookPath === undefined) return undefined;
@@ -149,6 +155,7 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     doc: "docs/operator/gst-44-operator-template.md",
     generator: {
       tool: "tb_write_gst44_template",
+      needs: ["dayBook"],
       args: (c, paths, toFillDir) => {
         const dayBookPath = paths("dayBook");
         if (dayBookPath === undefined) return undefined;
@@ -217,6 +224,7 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     doc: "docs/operator/26as-mapping-template.md",
     generator: {
       tool: "tb_write_26as_template",
+      needs: ["as26Export", "dayBook"],
       args: (c, paths, toFillDir) => {
         const as26Path = paths("as26Export");
         const dayBookPath = paths("dayBook");
@@ -239,6 +247,7 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     doc: "docs/design/2026-09-27-winman-3cd-depreciation-design.md",
     generator: {
       tool: "tb_write_dep3cd_template",
+      needs: ["dayBook"],
       args: (c, paths, toFillDir) => {
         const dayBookPath = paths("dayBook");
         if (dayBookPath === undefined) return undefined;
@@ -281,6 +290,7 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     extensions: [".xlsx"],
     generator: {
       tool: "tb_write_loans_template",
+      needs: ["dayBook"],
       args: (c, paths, toFillDir) => {
         const dayBookPath = paths("dayBook");
         if (dayBookPath === undefined) return undefined;

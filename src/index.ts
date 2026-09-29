@@ -76,6 +76,7 @@ import {
   readDayBookMasterPairs,
   type DayBookInput,
 } from "./tds-daybook.js";
+import { registerWorkflowTools } from "./workflow.js";
 
 export type ToolRegistrar = (
   name: string,
@@ -135,11 +136,18 @@ export function newSessionId(now = new Date()): string {
 }
 
 export function registerTools(
-  register: ToolRegistrar,
+  outerRegister: ToolRegistrar,
   session: Session,
   cfg: ToolsConfig,
   sessionId: string = newSessionId(),
 ): void {
+  // Every handler is kept in-process so the workflow tools can call them
+  // directly (one step per run call) without another MCP hop.
+  const handlers = new Map<string, (args: any) => Promise<string>>();
+  const register: ToolRegistrar = (name, description, schema, handler) => {
+    handlers.set(name, handler);
+    outerRegister(name, description, schema, handler);
+  };
   let last: ReviewResult | undefined;
   let lastGst: GstMismatchResult | undefined;
   let lastTds: TdsReviewResult | undefined;
@@ -1756,6 +1764,18 @@ let lastGst44: Gst44ReviewResult | undefined;
       return JSON.stringify(paths, null, 2);
     },
   );
+
+  registerWorkflowTools(register, {
+    call: (name, args) => {
+      const handler = handlers.get(name);
+      if (!handler) throw new Error(`no such internal tool: ${name}`);
+      return handler(args);
+    },
+    session,
+    cfg,
+    sessionId,
+    audit,
+  });
 }
 
 function maskedCount(findings: Array<{ ledger: string }>): number {
