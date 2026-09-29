@@ -139,7 +139,7 @@ describe("tb_26as_review tool", () => {
     expect(JSON.stringify(audit)).not.toContain("Nagar Palika");
   });
 
-  it("a ledger mapped to two 26AS names reconciles as one masked shared party", async () => {
+  it("a ledger mapped to two 26AS names is one masked row per name, plus the unattributed row", async () => {
     const { tools } = harness();
     const as26Path = join(tempDir("as26-shared-"), "export.xlsm");
     writeFileSync(as26Path, buildAs26Fixture());
@@ -152,20 +152,39 @@ describe("tb_26as_review tool", () => {
       fromDate: "20250401", toDate: "20260331", as26Path, as26MapPath: mapPath, company: "Demo Traders Pvt Ltd",
       dayBookPath: writeDayBook(),
     });
-    // One party, not two — and no real name or ledger escapes through the
-    // shared group's members, which the engine keeps raw.
+    // No real name or ledger escapes: each row is named by its own 26AS name
+    // or, for the residue, by the ledger it is booked on.
     expect(out).not.toContain("Anand Buildmart");
     expect(out).not.toContain("Nagar Palika");
     const res = JSON.parse(out);
-    const shared = res.recon.filter((r: { match: { shared?: boolean } }) => r.match.shared);
-    expect(shared).toHaveLength(1);
-    expect(shared[0].match.members).toHaveLength(2);
-    expect(shared[0].as26Tax).toBe(18600.15);   // 26AS detail rows of both names
-    expect(shared[0].booksTax).toBe(115000);
-    // the finding names both members by pseudonym, never by value
-    const f = res.findings.find((x: { check: string }) => x.check === "as26_totals_mismatch");
-    expect(f.party).not.toContain("Nagar");
-    expect(f.detail).toMatch(/Debtor \d/);
+    // One row per 26AS name, each carrying that name's OWN 26AS tax — and one
+    // clearly labelled residue row, because this day book's single 115,000
+    // deduction is not what either name's 26AS rows explain.
+    const rows = res.recon.filter((r: { sharedRow?: unknown }) => r.sharedRow);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r: { sharedRow: { index: number; of: number; residue?: boolean } }) => r.sharedRow))
+      .toEqual([
+        { index: 1, of: 2, group: 0 }, { index: 2, of: 2, group: 0 }, { index: 3, of: 2, residue: true, group: 0 },
+      ]);
+    expect(rows.map((r: { as26Tax: number }) => r.as26Tax)).toEqual([4600.15, 14000, 0]);
+    expect(rows.map((r: { booksTax: number }) => r.booksTax)).toEqual([0, 0, 115000]);
+    // the two names are reported under their own pseudonyms; the books entry
+    // that no name claimed is reported against the LEDGER's pseudonym, and the
+    // rows still add up to the ledger's books total
+    expect(rows[0].match.as26Name).toMatch(/^Debtor \d/);
+    expect(rows[1].match.as26Name).toMatch(/^Debtor \d/);
+    expect(rows[0].match.as26Name).not.toBe(rows[1].match.as26Name);
+    expect(rows[2].match.as26Name).toBe("");            // a books entry, not a 26AS name
+    expect(rows[2].match.ledgerName).toBe(rows[0].match.ledgerName);
+    expect(rows.reduce((s: number, r: { booksTax: number }) => s + r.booksTax, 0)).toBe(115000);
+    // every finding names a pseudonym — a 26AS name per name, the ledger for
+    // what no name claimed
+    for (const f of res.findings.filter((x: { party: string }) => /Debt(or|or Ledger)/.test(x.party))) {
+      expect(f.party).toMatch(/^Debtor \d/);
+      expect(f.party).not.toMatch(/Nagar|Anand/);
+    }
+    // the unmatched sheets cross-reference the per-name rows by their own ids
+    expect(res.billRows.map((b: { partyId: string }) => b.partyId)).toContain("P1.u");
   });
 });
 
@@ -716,16 +735,33 @@ describe("writeAs26Report — shared-ledger group", () => {
         recon: [
           {
             match: {
-              kind: "tds" as const, nameKey: "nk1", ledgerKeys: ["lk"], ledgerName: "Pseudonym Ledger",
-              as26Name: "Pseudonym One", shared: true,
-              members: [
-                { as26NameKey: "nk1", as26Name: "Pseudonym One", kind: "tds" as const, tax: 523944, ledgerNames: ["Pseudonym Ledger"] },
-                { as26NameKey: "nk2", as26Name: "Pseudonym Two", kind: "tds" as const, tax: 1144952, ledgerNames: ["Pseudonym Ledger"] },
-              ],
+              kind: "tds" as const, as26NameKey: "nk1", ledgerKeys: ["lk"], ledgerNames: ["Pseudonym Ledger"],
+              ledgerName: "Pseudonym Ledger", as26Name: "Pseudonym One",
             },
-            booksTax: 1668896, as26Tax: 1668896, paired: [], combinations: [], ambiguous: 0,
+            booksTax: 523944, as26Tax: 523944, paired: [], combinations: [], ambiguous: 0,
             unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
-            totalsOnly: true,
+            as26GrossValue: 26197200, booksTaxableValue: 26197200, valueBasis: "taxable", valueDelta: 0,
+            sharedRow: { index: 1, of: 2, group: 0 },
+          },
+          {
+            match: {
+              kind: "tds" as const, as26NameKey: "nk2", ledgerKeys: ["lk"], ledgerNames: ["Pseudonym Ledger"],
+              ledgerName: "Pseudonym Ledger", as26Name: "Pseudonym Two",
+            },
+            booksTax: 1144952, as26Tax: 1144952, paired: [], combinations: [], ambiguous: 0,
+            unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
+            as26GrossValue: 57247607, booksTaxableValue: 57247607, valueBasis: "taxable", valueDelta: 0,
+            sharedRow: { index: 2, of: 2, group: 0 },
+          },
+          {
+            // the residue: books nothing could attribute, named by the ledger
+            match: {
+              kind: "tds" as const, as26NameKey: "", ledgerKeys: ["lk"], ledgerNames: ["Pseudonym Ledger"],
+              ledgerName: "Pseudonym Ledger", as26Name: "",
+            },
+            booksTax: 0, as26Tax: 0, paired: [], combinations: [], ambiguous: 0,
+            unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
+            sharedRow: { index: 3, of: 2, residue: true, group: 0 },
           },
         ],
         billRows: [],
@@ -738,9 +774,16 @@ describe("writeAs26Report — shared-ledger group", () => {
       const wb = readWorkbook(readFileSync(paths.workbookPath));
       const cell = (r: { cells: Map<number, { value: unknown }> }, i: number) => r.cells.get(i)?.value ?? "";
       const deductors = wb.find((s) => s.name === "Deductors")!;
-      expect(cell(deductors.rows[1], 0)).toBe("Pseudonym One + Pseudonym Two");
-      expect(cell(deductors.rows[1], 1)).toBe("P1"); // the cross-sheet party key
-      expect(cell(deductors.rows[1], 3)).toBe(1668896);
+      // one row per 26AS name, each with its OWN 26AS tax and its own id; the
+      // third row is the unattributed residue, named by the shared ledger
+      expect(cell(deductors.rows[1], 0)).toBe("Pseudonym One");
+      expect(cell(deductors.rows[1], 1)).toBe("P1.1");
+      expect(cell(deductors.rows[1], 3)).toBe(523944);
+      expect(cell(deductors.rows[2], 0)).toBe("Pseudonym Two");
+      expect(cell(deductors.rows[2], 1)).toBe("P1.2");
+      expect(cell(deductors.rows[2], 3)).toBe(1144952);
+      expect(cell(deductors.rows[3], 0)).toBe("Pseudonym Ledger");
+      expect(cell(deductors.rows[3], 1)).toBe("P1.u");
       // The Mapping sheet lists one row per 26AS name, each with its OWN tax.
       const mapping = wb.find((s) => s.name === "Mapping")!;
       expect(cell(mapping.rows[1], 0)).toBe("Pseudonym One");
@@ -750,10 +793,11 @@ describe("writeAs26Report — shared-ledger group", () => {
       expect(cell(mapping.rows[2], 3)).toBe("Pseudonym Ledger");
       const md = readFileSync(paths.markdownPath, "utf8");
       expect(md).toContain("Shared ledger Pseudonym Ledger");
-      expect(md).toContain("Pseudonym One: 26AS tax 5,23,944.00");
-      expect(md).toContain("Pseudonym Two: 26AS tax 11,44,952.00");
+      expect(md).toContain("Pseudonym One (P1.1): 26AS tax 5,23,944.00 against books tax 5,23,944.00");
+      expect(md).toContain("Pseudonym Two (P1.2): 26AS tax 11,44,952.00 against books tax 11,44,952.00");
+      expect(md).toContain("unattributed on this ledger (no 26AS name claimed it) (P1.u)");
       expect(md).toContain("group total: 26AS tax 16,68,896.00 against books tax 16,68,896.00");
-      expect(md).toContain("not split between the names");
+      expect(md).not.toContain("not split between the names");
     } finally {
       rmSync(reportDir, { recursive: true, force: true });
     }

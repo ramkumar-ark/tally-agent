@@ -4,7 +4,7 @@ import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
 import { count, money, displayDate } from "./format.js";
 import { round2, ROUNDING_TOLERANCE, type BlockResult, type BlockResidual, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
-import { AS26_VALUE_TOLERANCE } from "./as26.js";
+import { AS26_VALUE_TOLERANCE, reconPartyId, reconPartyLabel } from "./as26.js";
 import type {
   TdsMaskedFinding as TdsCsvFinding,
   DepMaskedFinding,
@@ -1290,26 +1290,42 @@ export function as26Markdown(
   const unmatchedBooks = recon.reduce((t, r) => t + r.unmatchedBooks.length, 0);
   const unmatchedAs26 = recon.reduce((t, r) => t + r.unmatchedAs26.length, 0);
   lines.push("");
-  // Shared-ledger groups: names that stand on ONE Tally ledger. They reconcile
-  // as one party on totals, so list every member name with its own 26AS tax —
-  // otherwise the group row's single total would hide which name carries what.
-  for (const r of recon) {
-    if (!r.match.members) continue;
+  // Shared-ledger groups: names that stand on ONE Tally ledger. Each name is a
+  // row of its own on the Deductors sheet (captain 2026-09-30), so the prose
+  // lists the same rows in order with the group total — the per-deductor
+  // figures are what the Winman and tax-audit workbooks carry.
+  const sharedGroups = new Map<string, Array<{ r: (typeof recon)[number]; i: number }>>();
+  recon.forEach((r, i) => {
+    if (!r.sharedRow) return;
+    const key = `${r.match.kind}|${r.match.ledgerName}`;
+    const g = sharedGroups.get(key);
+    if (g) g.push({ r, i });
+    else sharedGroups.set(key, [{ r, i }]);
+  });
+  sharedGroups.forEach((rows) => {
+    const head = rows[0].r;
     lines.push(
-      `Shared ledger ${r.match.ledgerName} — ${r.match.kind.toUpperCase()}: ` +
-      `${count(r.match.members.length)} 26AS names on one Tally ledger reconcile together on totals.`,
+      `Shared ledger ${head.match.ledgerName} — ${head.match.kind.toUpperCase()}: ` +
+      `${count(head.sharedRow!.of)} 26AS names on one Tally ledger, each reported on its own row ` +
+      `with the books entries its own transactions explain.`,
     );
-    for (const m of r.match.members) {
+    for (const { r, i } of rows) {
+      const who = r.sharedRow!.residue
+        ? "unattributed on this ledger (no 26AS name claimed it)"
+        : reconPartyLabel(r);
       lines.push(
-        `- ${m.as26Name}: 26AS tax ${money(m.tax)}, mapped ledger ${m.ledgerNames.join(" + ")}`,
+        `- ${who} (${reconPartyId(i, r)}): 26AS tax ${money(r.as26Tax)} against books tax ` +
+        `${money(r.booksTax)} (delta ${money(round2(r.booksTax - r.as26Tax))})`,
       );
     }
+    const totA = round2(rows.reduce((s, x) => s + x.r.as26Tax, 0));
+    const totB = round2(rows.reduce((s, x) => s + x.r.booksTax, 0));
     lines.push(
-      `- group total: 26AS tax ${money(r.as26Tax)} against books tax ${money(r.booksTax)} on the ledger ` +
-      `(delta ${money(round2(r.booksTax - r.as26Tax))}) — the books do not say which name a deduction belongs to, so the tax is not split between the names.`,
+      `- group total: 26AS tax ${money(totA)} against books tax ${money(totB)} on the ledger ` +
+      `(delta ${money(round2(totB - totA))})`,
     );
     lines.push("");
-  }
+  });
   lines.push(
     `Unmatched after reconciliation: ${unmatchedBooks} books entries and ${unmatchedAs26} 26AS rows — see the workbook sheets for the item detail.`,
   );
@@ -1375,12 +1391,11 @@ export async function writeAs26Report(opts: {
       { header: "search skipped", width: 12, format: "text" },
     ],
     rows: opts.result.recon.map((r, i) => [
-      // A shared-ledger group is ONE row naming every 26AS name on the ledger;
-      // each name's own 26AS tax is below the group total (Mapping sheet).
-      r.match.members
-        ? r.match.members.map((m) => m.as26Name).join(" + ")
-        : r.match.as26Name,
-      `P${i + 1}`,
+      // A shared-ledger group reports one row per 26AS name (captain
+      // 2026-09-30), each carrying its own 26AS tax, gross and attributed
+      // books figures; its unattributed residue row is named by the ledger.
+      reconPartyLabel(r),
+      reconPartyId(i, r),
       r.match.kind, r.as26Tax, r.booksTax,
       round2(r.booksTax - r.as26Tax),
       r.as26GrossValue ?? null, r.booksTaxableValue ?? null,

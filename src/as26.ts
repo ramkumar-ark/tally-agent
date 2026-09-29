@@ -129,9 +129,9 @@ export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; 
 export interface BankInterestMapping { as26Name: string; interestLedgers: string[]; fdLedgers: string[]; }
 
 /** One 26AS name inside a shared-ledger group, with its OWN 26AS figures.
- * The books side of a shared group is never apportioned between members — a
- * ledger that backs two names is reported as one party whose 26AS tax is the
- * sum, and the per-name figures below are the reader's audit trail. */
+ * `analyzeAs26` splits the group into one row per member (`sharedPartyRows`):
+ * each name is matched against the shared ledger's books entries and keeps
+ * only the ones its own 26AS transactions explain. */
 export interface SharedMember {
   as26NameKey: string; as26Name: string; kind: As26Kind;
   /** The 26AS tax total of this name for the reviewed period. */
@@ -148,9 +148,11 @@ export interface PartyMatch {
   ledgerName: string;
   as26NameKey: string; as26Name: string;
   kind: As26Kind; source: "operator";
-  /** True when two or more 26AS names of one kind share a Tally ledger, so
-   * the party reconciles on TOTALS with no books-side split. Absent (not
-   * false) for a plain one-name party, so one-to-one output is unchanged. */
+  /** True when two or more 26AS names of one kind share a Tally ledger, so the
+   * party is reported as ONE row per name rather than one combined row
+   * (`sharedPartyRows`); a direct `reconcileParty` call on it falls back to a
+   * totals-only answer with no books-side split. Absent (not false) for a
+   * plain one-name party, so one-to-one output is unchanged. */
   shared?: boolean;
   /** Every name of a shared group, first-inserted first. Absent otherwise. */
   members?: SharedMember[];
@@ -812,6 +814,14 @@ export interface PartyRecon {
   /** Totals-only party (design §12.1): every 26AS section is 194R, or 194A
    * with the operator-marked bank — no bill-level findings or rows. */
   totalsOnly?: boolean;
+  /** A row of a SHARED-LEDGER group (captain 2026-09-30): one 26AS name per
+   * row, `index` 1-based in the group's member order, `of` the member count.
+   * The optional residue row carries the books entries and sales on the shared
+   * ledger that no member's 26AS name explained. The group's rows are emitted
+   * in place of the group, never alongside a combined one. `group` is the
+   * recon index of the group's FIRST row, so every row of one shared ledger
+   * shares a party id and only the suffix differs. */
+  sharedRow?: { index: number; of: number; residue?: boolean; group?: number };
 }
 
 /** Index-combination subsets of `items` with size 2..maxSize, in index order. */
@@ -1044,13 +1054,18 @@ export function linkInvoiceWithCapacity(
 }
 
 
-export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
+export function reconcileParty(
+  file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string,
+  opts: { skipBooks?: ReadonlySet<number> } = {},
+): PartyRecon {
   const keySet = new Set(match.ledgerKeys);
-  // Shared-ledger group: two or more 26AS names stand on one Tally ledger, so
-  // the group reconciles on TOTALS only. The books carry no marker of which
-  // name a deduction belongs to, so pairing items between names would be
-  // guesswork: the group sums its ledgers against the sum of its names and
-  // leaves every item unmatched rather than inventing a split.
+  // Shared-ledger group, called directly: two or more 26AS names stand on one
+  // Tally ledger. `analyzeAs26` no longer comes through here for a group — it
+  // splits one into per-name rows first (captain 2026-09-30, `sharedPartyRows`)
+  // and attributes the shared ledger's books entries to the name they pair
+  // with. This branch is the honest answer for a direct caller that has not
+  // split: the group's ledgers against the sum of its names, every item
+  // unmatched, never a guessed split between the names.
   if (match.shared) {
     const nameKeys = new Set((match.members ?? []).map((m) => m.as26NameKey));
     const booksTax = round2(facts.deductions
@@ -1070,6 +1085,7 @@ export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMa
   }
   const booksItems: ReconItem[] = [];
   facts.deductions.forEach((d, dedIdx) => {
+    if (opts.skipBooks?.has(dedIdx)) return;
     if (keySet.has(d.ledgerKey) && d.kind === match.kind) {
       booksItems.push({ date: d.date, tax: d.tax, dedIdx, ref: d.reference });
     }
@@ -1541,6 +1557,140 @@ import { money, displayDate, count } from "./format.js";
 const as26KeyOf = (t: { kind: As26Kind; nameKey: string; section: string } | As26SummaryRow | As26Transaction): string =>
   `${t.kind}|${t.nameKey}|${t.section}`;
 
+/** One row of a split shared-ledger group: a 26AS name, its attributed books
+ * entries and the sales those entries pair with, or the group residue. */
+export interface As26PartyRow {
+  match: PartyMatch; recon: PartyRecon; sales: BooksSale[];
+  /** 26AS gross of this row: a name's own summary rows, the residue's 0.
+   * Undefined for a plain party, which reads its own summary row. */
+  as26Gross?: number;
+  includeOtherIncome: boolean; valueColumns: boolean;
+}
+
+/** Split a shared-ledger group into one row per 26AS name (captain 2026-09-30).
+ *
+ * Two or more 26AS names stand on one Tally ledger. Each name becomes its own
+ * row carrying its OWN 26AS tax and gross, because those per-deductor figures
+ * are what the Winman and tax-audit workbooks carry. The books side is
+ * attributed by the 26AS transaction-level matching itself: a books deduction
+ * is paired to the name whose 26AS transaction it explains, and one books entry
+ * can explain at most ONE name (first name in `members` order wins, the same
+ * one-books-entry-one-match rule as the combination search). A book's value side
+ * is the sale its name's transaction links to, so each name reports the
+ * invoices it actually earned.
+ *
+ * Whatever no name claimed — books entries, sales, and the group's other
+ * income — becomes ONE residue row named by the shared ledger, so the rows
+ * still add up to the ledger's books total and nothing is silently dropped.
+ */
+export function sharedPartyRows(
+  file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string,
+  salesByKey: Map<string, BooksSale[]>,
+): As26PartyRow[] {
+  const members = match.members ?? [];
+  const keySet = new Set(match.ledgerKeys);
+  const pool = match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []);
+  const groupDeductions = facts.deductions
+    .map((d, dedIdx) => ({ ...d, dedIdx }))
+    .filter((d) => keySet.has(d.ledgerKey) && d.kind === match.kind);
+  const otherIncome = (facts.otherIncome ?? []).filter((x) => match.ledgerKeys.includes(x.partyKey));
+  const claimed = new Set<number>();
+  const takenSales = new Set<string>();
+  const rows: As26PartyRow[] = [];
+
+  members.forEach((m, i) => {
+    const memberMatch: PartyMatch = {
+      ledgerKeys: match.ledgerKeys, ledgerNames: match.ledgerNames, ledgerName: match.ledgerName,
+      as26NameKey: m.as26NameKey, as26Name: m.as26Name, kind: m.kind, source: match.source,
+    };
+    const recon = reconcileParty(file, facts, memberMatch, toDate, { skipBooks: claimed });
+    const dedIdx = [
+      ...recon.paired.map((p) => p.books.dedIdx),
+      ...recon.combinations.flatMap((c) => c.parts.map((p) => p.dedIdx)),
+    ].filter((x): x is number => typeof x === "number");
+    for (const idx of dedIdx) claimed.add(idx);
+    // Value side: the sales this name's own 26AS transactions link to, taken
+    // first-wins so one invoice is never attributed to two names.
+    const sections = new Set(file.summaries
+      .filter((s) => s.kind === m.kind && s.nameKey === m.as26NameKey).map((s) => s.section));
+    const section = sections.size === 1 ? [...sections][0] : null;
+    const cap = claimedTdsCapacity(pool, groupDeductions, section);
+    const sales: BooksSale[] = [];
+    for (const t of file.transactions) {
+      if (t.kind !== m.kind || t.nameKey !== m.as26NameKey) continue;
+      const link = linkInvoiceWithCapacity(pool, {
+        date: t.date, tax: t.tax, reference: null, section, ledgerKey: memberMatch.ledgerKeys[0],
+      }, cap);
+      if (!link) continue;
+      const ckey = capacityKey(link.sale);
+      if (takenSales.has(ckey)) continue;
+      takenSales.add(ckey);
+      sales.push(link.sale);
+    }
+    recon.booksTax = round2(dedIdx.reduce((s, idx) => s + (facts.deductions[idx]?.tax ?? 0), 0));
+    // A books entry this name did not claim belongs to the residue row, not
+    // here; its 26AS-side gap stays, so a name that earned more than it booked
+    // is still visible under its own name.
+    recon.unmatchedBooks = [];
+    recon.sharedRow = { index: i + 1, of: members.length };
+    rows.push({
+      match: memberMatch, recon, sales,
+      as26Gross: round2(file.summaries
+        .filter((s) => s.kind === m.kind && s.nameKey === m.as26NameKey)
+        .reduce((t, s) => t + s.gross, 0)),
+      includeOtherIncome: false, valueColumns: true,
+    });
+  });
+
+  const restDeductions = groupDeductions.filter((d) => !claimed.has(d.dedIdx));
+  const restSales = pool.filter((s) => !takenSales.has(capacityKey(s)));
+  const otherTotal = round2(otherIncome.reduce((s, x) => s + x.amount, 0));
+  if (restDeductions.length === 0 && restSales.length === 0 && otherTotal === 0) return rows;
+
+  const residueMatch: PartyMatch = {
+    ledgerKeys: match.ledgerKeys, ledgerNames: match.ledgerNames, ledgerName: match.ledgerName,
+    as26NameKey: "", as26Name: "", kind: match.kind, source: match.source,
+  };
+  rows.push({
+    match: residueMatch,
+    recon: {
+      match: residueMatch,
+      booksTax: round2(restDeductions.reduce((s, d) => s + d.tax, 0)),
+      as26Tax: 0,
+      paired: [], combinations: [], ambiguous: 0,
+      unmatchedBooks: restDeductions.map((d) => ({ date: d.date, tax: d.tax, dedIdx: d.dedIdx, ref: d.reference })),
+      unmatchedAs26: [],
+      combinationSearchSkipped: false,
+      lateBookedTax: 0,
+      otherIncome: otherIncome, otherIncomeTotal: otherTotal,
+      sharedRow: { index: members.length + 1, of: members.length, residue: true },
+    },
+    sales: restSales,
+    as26Gross: 0,
+    includeOtherIncome: false, valueColumns: false,
+  });
+  return rows;
+}
+
+/** The Deductors-sheet name of a recon row. A shared-ledger group reports one
+ * row per 26AS name, so the row is named by its own name; its residue row is a
+ * books entry and is named by the shared ledger. */
+export function reconPartyLabel(r: PartyRecon): string {
+  if (r.match.members) return r.match.members.map((m) => m.as26Name).join(" + ");
+  if (r.sharedRow?.residue) return r.match.ledgerName;
+  return r.match.as26Name;
+}
+
+/** The cross-sheet party key: `P<n>` for a plain party, `P<n>.<i>` for the i-th
+ * 26AS name of a shared-ledger group and `P<n>.u` for its unattributed residue
+ * row, so a books entry and a 26AS entry on the two unmatched sheets point at
+ * the same per-name Deductors row. */
+export function reconPartyId(reconIdx: number, row: Pick<PartyRecon, "sharedRow">): string {
+  if (!row.sharedRow) return `P${reconIdx + 1}`;
+  const base = (row.sharedRow.group ?? reconIdx) + 1;
+  return `P${base}.${row.sharedRow.residue ? "u" : String(row.sharedRow.index)}`;
+}
+
 export function analyzeAs26(
   file: As26File, facts: BooksFacts, map: As26Map, ledgerNames: string[],
   opts: { fromDate: string; toDate: string },
@@ -1583,11 +1733,36 @@ export function analyzeAs26(
   /** Books FD-interest entries taxed at ~20% — excluded from totals, reported
    * separately (design §12.4). */
   const fd20All: BankBooksEvent[] = [];
+  // A shared-ledger group expands into one row per 26AS name plus a residue row
+  // for whatever books amount no name claimed (captain 2026-09-30): the
+  // per-deductor figures are carried into the Winman and tax-audit workbooks.
+  // A plain party is a single row over its own recon.
+  const partyRows: As26PartyRow[] = [];
   for (const match of matches) {
+    if (match.shared) { partyRows.push(...sharedPartyRows(file, facts, match, opts.toDate, salesByKey)); continue; }
+    partyRows.push({
+      match, recon: reconcileParty(file, facts, match, opts.toDate),
+      sales: match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []),
+      includeOtherIncome: true, valueColumns: true,
+    });
+  }
+  // Every row of one shared ledger takes the party's id of the group's FIRST
+  // row, so the per-name ids read P2.1 / P2.2 / P2.u however many names there
+  // are, and the residue row never renumbers the group.
+  let sharedGroup = -1;
+  partyRows.forEach((row, i) => {
+    const sr = row.recon.sharedRow;
+    if (!sr) return;
+    if (sr.index === 1) sharedGroup = i;
+    sr.group = sharedGroup;
+  });
+
+  for (const row of partyRows) {
+    const match = row.match;
     const pushedFrom = findings.length;
-    const r = reconcileParty(file, facts, match, opts.toDate);
+    const r = row.recon;
     recons.push(r);
-    const partySales = match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []);
+    const partySales = row.sales;
     const booksTaxableBase = sumSales(partySales, (s) => s.taxable);
     const booksGrossBase = sumSales(partySales, (s) => s.gross);
     const summary = file.summaries.find((s) => s.kind === match.kind && s.nameKey === match.as26NameKey);
@@ -1596,12 +1771,7 @@ export function analyzeAs26(
     // primary name matches reported a fraction of the group's receipts (live:
     // the CMDA group showed 2,61,97,200 for two names totalling 8,34,44,807)
     // and left the value columns blank.
-    const as26Gross = match.shared
-      ? round2([...new Set((match.members ?? []).map((m) => m.as26NameKey))]
-        .reduce((s, nk) => s + file.summaries
-          .filter((x) => x.kind === match.kind && x.nameKey === nk)
-          .reduce((t, x) => t + x.gross, 0), 0))
-      : (summary?.gross ?? 0);
+    const as26Gross = row.as26Gross ?? (summary?.gross ?? 0);
 
     // Totals-only parties (design §12.1): every 26AS section of the party is
     // 194R, or 194A with the operator-marked bank. Their entries are many
@@ -1612,17 +1782,19 @@ export function analyzeAs26(
     const toks = sections.map(sectionToken);
     const bankKeyOf = new Set((map.banks ?? []).map((b) => canonicalKey(b.as26Name)));
     const isBank = toks.some((t) => t === "194a") && bankKeyOf.has(match.as26NameKey);
-    // A shared-ledger group is totals-only by construction (see
-    // reconcileParty): its names have no per-name books side to compare.
-    const totalsOnly = match.shared === true ||
-      (toks.length > 0 && toks.every((t) => t === "194r" || (t === "194a" && bankKeyOf.has(match.as26NameKey))));
+    // A shared-ledger group is split into one row per 26AS name by
+    // `sharedPartyRows`, so it reaches this body as ordinary one-name parties.
+    const totalsOnly = toks.length > 0 && toks.every((t) => t === "194r" || (t === "194a" && bankKeyOf.has(match.as26NameKey)));
     r.totalsOnly = totalsOnly;
 
     // Addendum 10: an income-side ledger credited in the same voucher that
     // debits this party's TDS receivable belongs in the party's gross basis
     // (the 26AS gross includes it). Totals-only parties (banks/194R) keep
     // their own books channel, so the extras are never folded in there.
-    const extras = totalsOnly ? [] : (facts.otherIncome ?? []).filter((x) => match.ledgerKeys.includes(x.partyKey));
+    // The group's other income (a gross-up or a retention credit booked against
+    // the shared ledger) belongs to no one name, so it is routed to the
+    // residue row instead of being taken whole by every member.
+    const extras = totalsOnly || !row.includeOtherIncome ? [] : (facts.otherIncome ?? []).filter((x) => match.ledgerKeys.includes(x.partyKey));
     const otherIncomeTotal = round2(extras.reduce((s, x) => s + x.amount, 0));
     r.otherIncome = extras;
     r.otherIncomeTotal = otherIncomeTotal;
@@ -1675,7 +1847,7 @@ export function analyzeAs26(
     // (sales are not name-tagged, so a per-name split is impossible — the
     // group carries no drill-down rows at all). Only the reading is at group
     // level; the basis label and the delta are the same two figures.
-    if (partySales.length > 0) {
+    if (row.valueColumns && partySales.length > 0) {
       valueCands.push(["taxable", booksTaxable], ["GST-inclusive", booksGross]);
     }
     if (booksInterest > 0) valueCands.push(["interest", booksInterest]);
@@ -1722,7 +1894,7 @@ export function analyzeAs26(
     // 003 — 26AS gross vs books taxable: taxable-only (captain deviation; the
     // GST-inclusive alternative is dropped from this check and re-homesteaded on
     // the Deductors sheet, whose column totals are populated elsewhere).
-    if (!match.shared && as26Gross > 0 && partySales.length > 0) {
+    if (row.valueColumns && as26Gross > 0 && partySales.length > 0) {
       const dTok = Math.abs(round2(as26Gross - booksTaxable));
       if (dTok > AS26_VALUE_TOLERANCE) {
         push(
@@ -1786,27 +1958,10 @@ export function analyzeAs26(
     // cannot produce a books side, so it surfaces as review, not critical.
     if (totalsOnly) {
       const taxDelta = round2(r.as26Tax - compTax);
-      if (match.shared) {
-        // Shared ledger: every member name with its OWN 26AS figures, so the
-        // reader can see which name carries which tax; the books tax is the
-        // ledger's total and is deliberately NOT split between the names.
-        const secLabel = sections.length > 0 ? sections.join(", ") : "no section";
-        const memberList = (match.members ?? [])
-          .map((m) => `${m.as26Name} (26AS tax ${money(m.tax)}, ledger ${m.ledgerNames.join(" + ")})`)
-          .join("; ");
-        const miss = Math.abs(taxDelta) > AS26_TAX_TOLERANCE;
-        // A group whose totals tie needs no finding — the shared mapping is
-        // reported on the Deductors and Mapping sheets and in the markdown.
-        if (miss) {
-          push("as26_totals_mismatch", "critical", as26Label(match), match.kind,
-            summary?.section ?? null, Math.abs(taxDelta),
-            `${count((match.members ?? []).length)} 26AS ${match.kind.toUpperCase()} names stand on the one Tally ` +
-            `ledger ${match.ledgerName}: ${memberList}. The names' 26AS tax totals ${money(r.as26Tax)} against ` +
-            `books tax of ${money(compTax)} on that ledger for the ${secLabel} entries; the books carry no marker of ` +
-            "which name a deduction belongs to, so the tax is not split between them — the totals are the comparison.",
-          );
-        }
-      } else {
+      // A shared-ledger group never reaches here: it is split into one row per
+      // 26AS name (captain 2026-09-30), so a name's own tax gap surfaces under
+      // that name through 001/002/003/007 instead of a group totals wording.
+      {
       const mappingEmpty = !!bankMapEntry &&
         bankMapEntry.interestLedgers.length === 0 && bankMapEntry.fdLedgers.length === 0;
       const taxMiss = !mappingEmpty && Math.abs(taxDelta) > AS26_TAX_TOLERANCE;

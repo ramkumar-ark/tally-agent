@@ -504,26 +504,31 @@ describe("reconcileParty", () => {
 // --- shared-ledger groups: ONE Tally ledger, several 26AS names ---
 
 import { buildBillRows } from "../src/as26-bill.js";
+import { reconPartyId, reconPartyLabel } from "../src/as26.js";
 
 const THIRD_NAME = "Alpha Works Town Office";
 
 describe("shared-ledger group (one ledger, two 26AS names)", () => {
   // The real shape: a party that deducts under a short name and under a
   // departmental one, both landing on a single Tally ledger. Invented names,
-  // CMDA's proportions — the books carry exactly the sum, so nothing is
-  // mismatched and the group must produce no money finding at all.
+  // CMDA's proportions — each name's 26AS tax is 2% of its own receipts, so
+  // each 26AS transaction ties its own books deduction and its own invoice.
+  // The group reports ONE ROW PER 26AS NAME (captain 2026-09-30), each with
+  // the books entries that name's own transactions explain.
   const SHORT = "Alpha Works Agency";
   const DEPT = "Executive Engineer Alpha Division";
   const LEDGER = "Alpha Works Ledger";
   const LK = canonicalKey(LEDGER);
+  const SHORT_TAX = 523944; const DEPT_TAX = 1144952;
+  const SHORT_GROSS = 26197200; const DEPT_GROSS = 57247607;
   const sharedFile = (): As26File => ({
     summaries: [
-      { kind: "tds", name: SHORT, nameKey: canonicalKey(SHORT), section: "194C", taxTotal: 523944, taxClaimed: 0, balanceCf: 0, gross: 2619720 },
-      { kind: "tds", name: DEPT, nameKey: canonicalKey(DEPT), section: "194C", taxTotal: 1144952, taxClaimed: 0, balanceCf: 0, gross: 5724760 },
+      { kind: "tds", name: SHORT, nameKey: canonicalKey(SHORT), section: "194C", taxTotal: SHORT_TAX, taxClaimed: 0, balanceCf: 0, gross: SHORT_GROSS },
+      { kind: "tds", name: DEPT, nameKey: canonicalKey(DEPT), section: "194C", taxTotal: DEPT_TAX, taxClaimed: 0, balanceCf: 0, gross: DEPT_GROSS },
     ],
     transactions: [
-      { kind: "tds", nameKey: canonicalKey(SHORT), date: "20250810", amount: 2619720, tax: 523944, status: "F", bookingDate: null, section: "194C" },
-      { kind: "tds", nameKey: canonicalKey(DEPT), date: "20250914", amount: 5724760, tax: 1144952, status: "F", bookingDate: null, section: "194C" },
+      { kind: "tds", nameKey: canonicalKey(SHORT), date: "20250810", amount: SHORT_GROSS, tax: SHORT_TAX, status: "F", bookingDate: null, section: "194C" },
+      { kind: "tds", nameKey: canonicalKey(DEPT), date: "20250914", amount: DEPT_GROSS, tax: DEPT_TAX, status: "F", bookingDate: null, section: "194C" },
     ],
     skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
   });
@@ -531,14 +536,26 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     { ledger: LEDGER, as26Name: SHORT },
     { ledger: LEDGER, as26Name: DEPT },
   ]};
-  const books = (tax: number): BooksFacts => ({
-    deductions: [{ ledgerKey: LK, kind: "tds" as const, date: "20250901", tax, voucherType: "Journal" }],
-    sales: [],
+  // One books deduction per name (so the 1:1 pairing fires), plus any extra the
+  // 26AS side never explains, and the invoices the names link to.
+  const books = (
+    deductions: Array<[date: string, tax: number]>,
+    sales: Array<{ date: string; ref: string; taxable: number; gross: number }> = [],
+  ): BooksFacts => ({
+    deductions: deductions.map(([date, tax]) => ({
+      ledgerKey: LK, kind: "tds" as const, date, tax, voucherType: "Journal",
+    })),
+    sales: sales.map((s) => ({ ledgerKey: LK, ...s })),
   });
+  const BOTH: Array<[string, number]> = [["20250810", SHORT_TAX], ["20250914", DEPT_TAX]];
+  const INVOICES = [
+    { date: "20250810", ref: "INV-A", taxable: SHORT_GROSS, gross: 30912700 },
+    { date: "20250914", ref: "INV-B", taxable: DEPT_GROSS, gross: 67592200 },
+  ];
   const WINDOW = { fromDate: "20250401", toDate: "20251231" };
 
   it("matchParties merges the names into ONE shared party, each name keeping its own tax", () => {
-    const { matches, gaps } = matchParties(sharedFile(), books(1668896), sharedMap, [LEDGER]);
+    const { matches, gaps } = matchParties(sharedFile(), books(BOTH), sharedMap, [LEDGER]);
     expect(matches).toHaveLength(1);
     const m = matches[0];
     expect(m.shared).toBe(true);
@@ -546,45 +563,103 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
     expect(m.ledgerName).toBe(LEDGER);
     expect(m.as26Name).toBe(SHORT); // the first-inserted name labels the group
     expect(m.members).toEqual([
-      { as26NameKey: canonicalKey(SHORT), as26Name: SHORT, kind: "tds", tax: 523944, ledgerNames: [LEDGER] },
-      { as26NameKey: canonicalKey(DEPT), as26Name: DEPT, kind: "tds", tax: 1144952, ledgerNames: [LEDGER] },
+      { as26NameKey: canonicalKey(SHORT), as26Name: SHORT, kind: "tds", tax: SHORT_TAX, ledgerNames: [LEDGER] },
+      { as26NameKey: canonicalKey(DEPT), as26Name: DEPT, kind: "tds", tax: DEPT_TAX, ledgerNames: [LEDGER] },
     ]);
     // neither name resurfaces as an unmapped gap, and the ledger is consumed
     expect(gaps.filter((g) => g.reason === "unmapped")).toHaveLength(0);
   });
 
-  it("books tax equal to the sum of the names reconciles with zero delta and no finding", () => {
-    const r = analyzeAs26(sharedFile(), books(1668896), sharedMap, [LEDGER], WINDOW);
-    expect(r.recon).toHaveLength(1);
-    expect(r.recon[0].booksTax).toBe(1668896);
-    expect(r.recon[0].as26Tax).toBe(1668896);
-    expect(r.recon[0].totalsOnly).toBe(true);
+  it("each 26AS name is its own row, carrying its own tax, gross and attributed books tax", () => {
+    const r = analyzeAs26(sharedFile(), books(BOTH, INVOICES), sharedMap, [LEDGER], WINDOW);
+    expect(r.recon).toHaveLength(2);
+    const [a, b] = r.recon;
+    expect(a.match.as26Name).toBe(SHORT);
+    expect(a.match.shared).toBeUndefined();
+    expect(a.sharedRow).toEqual({ index: 1, of: 2, group: 0 });
+    expect(a.as26Tax).toBe(SHORT_TAX);
+    expect(a.booksTax).toBe(SHORT_TAX);
+    expect(a.as26GrossValue).toBe(SHORT_GROSS);
+    expect(a.paired).toHaveLength(1);
+    expect(a.unmatchedBooks).toEqual([]);
+    expect(b.match.as26Name).toBe(DEPT);
+    expect(b.sharedRow).toEqual({ index: 2, of: 2, group: 0 });
+    expect(b.as26Tax).toBe(DEPT_TAX);
+    expect(b.booksTax).toBe(DEPT_TAX);
+    expect(b.as26GrossValue).toBe(DEPT_GROSS);
+    // the two rows carry distinct party ids, so the unmatched sheets can point
+    // at either name
+    expect([reconPartyId(0, a), reconPartyId(1, b)]).toEqual(["P1.1", "P1.2"]);
+    expect(reconPartyLabel(a)).toBe(SHORT);
+    expect(r.totals.booksTax).toBe(SHORT_TAX + DEPT_TAX);
+    expect(r.totals.as26Tax).toBe(SHORT_TAX + DEPT_TAX);
     expect(r.findings).toEqual([]);
   });
 
-  it("a shortfall surfaces as 009 naming every member with its own 26AS tax, no guessed split", () => {
-    const r = analyzeAs26(sharedFile(), books(1600000), sharedMap, [LEDGER], WINDOW);
-    const f = r.findings.find((x) => x.check === "as26_totals_mismatch")!;
-    expect(f).toBeTruthy();
-    expect(f.severity).toBe("critical");
-    expect(f.amount).toBe(68896);
-    expect(f.detail).toContain(SHORT);
-    expect(f.detail).toContain(DEPT);
-    expect(f.detail).toMatch(/5,23,944\.00/);   // each name's OWN figure
-    expect(f.detail).toMatch(/11,44,952\.00/);
-    expect(f.detail).toMatch(/16,68,896\.00/);  // the sum the group compares
-    expect(f.detail).toMatch(/not split between them/);
-    for (const x of r.findings) expect(x.detail).not.toMatch(/\d{6,}/);
+  it("each name's value is the invoice its own 26AS transaction links to", () => {
+    const facts = books(BOTH, INVOICES);
+    const r = analyzeAs26(sharedFile(), facts, sharedMap, [LEDGER], WINDOW);
+    const [a, b] = r.recon;
+    expect(a.booksTaxableValue).toBe(SHORT_GROSS);
+    expect(a.booksGrossValue).toBe(30912700);
+    expect(a.valueBasis).toBe("taxable");
+    expect(a.valueDelta).toBe(0);
+    expect(b.booksTaxableValue).toBe(DEPT_GROSS);
+    expect(b.booksGrossValue).toBe(67592200);
+    expect(b.valueBasis).toBe("taxable");
+    expect(b.valueDelta).toBeCloseTo(0, 2);
+    // neither name claims the other's invoice
+    expect(r.findings.filter((f) => f.check === "assessable_value_mismatch")).toEqual([]);
+    expect(r.findings).toEqual([]);
   });
 
-  it("the group is never paired item by item and yields no drill-down rows", () => {
-    const r = analyzeAs26(sharedFile(), books(1668896), sharedMap, [LEDGER], WINDOW);
-    const rec = r.recon[0];
-    expect(rec.paired).toEqual([]);
-    expect(rec.combinations).toEqual([]);
-    expect(rec.unmatchedBooks).toEqual([]);
-    expect(rec.unmatchedAs26).toEqual([]);
-    expect(buildBillRows(r, { deductions: books(1668896).deductions, sales: [] }, sharedFile(), WINDOW)).toEqual([]);
+  it("a name that booked less than it deducted is reported under its OWN name", () => {
+    // DEPT's 26AS tax has no books entry: the group's books total can no longer
+    // hide it behind a matching name.
+    const r = analyzeAs26(sharedFile(), books([["20250810", SHORT_TAX]], INVOICES), sharedMap, [LEDGER], WINDOW);
+    expect(r.recon.slice(0, 2).map((x) => [x.match.as26Name, x.as26Tax, x.booksTax])).toEqual([
+      [SHORT, SHORT_TAX, SHORT_TAX],
+      [DEPT, DEPT_TAX, 0],
+    ]);
+    const f = r.findings;
+    expect(f).toHaveLength(1);
+    expect(f[0].check).toBe("as26_tax_not_in_books");
+    expect(f[0].severity).toBe("critical");
+    expect(f[0].party).toBe(DEPT);
+    expect(f[0].amount).toBe(DEPT_TAX);
+  });
+
+  it("books entries and invoices no 26AS name claimed stay visible on a residue row named by the ledger", () => {
+    const facts = books(
+      [...BOTH, ["20250920", 40000]],
+      [...INVOICES, { date: "20250925", ref: "INV-C", taxable: 1000000, gross: 1180000 }],
+    );
+    const r = analyzeAs26(sharedFile(), facts, sharedMap, [LEDGER], WINDOW);
+    expect(r.recon).toHaveLength(3);
+    const residue = r.recon[2];
+    expect(residue.sharedRow).toEqual({ index: 3, of: 2, residue: true, group: 0 });
+    expect(reconPartyId(2, residue)).toBe("P1.u");
+    expect(reconPartyLabel(residue)).toBe(LEDGER);   // a books entry: named by the ledger
+    expect(residue.match.as26Name).toBe("");
+    expect(residue.as26Tax).toBe(0);
+    expect(residue.booksTax).toBe(40000);
+    expect(residue.unmatchedBooks).toHaveLength(1);
+    expect(residue.unmatchedBooks[0].tax).toBe(40000);
+    // the money still adds up: the two names plus the residue = the ledger's books total
+    expect(r.recon.reduce((s, x) => s + x.booksTax, 0)).toBe(SHORT_TAX + DEPT_TAX + 40000);
+    expect(r.totals.booksTax).toBe(SHORT_TAX + DEPT_TAX + 40000);
+    expect(r.totals.as26Tax).toBe(SHORT_TAX + DEPT_TAX);
+    // the unattributed deduction is reported, on the ledger, not dropped
+    const f = r.findings.filter((x) => x.check === "books_tax_not_in_26as");
+    expect(f).toHaveLength(1);
+    expect(f[0].party).toBe(LEDGER);
+    expect(f[0].amount).toBe(40000);
+    // and it reaches the "Books not in 26AS" sheet under the residue's own id
+    const rows = buildBillRows(r, facts, sharedFile(), WINDOW);
+    const booksRows = rows.filter((x) => x.kind === "booksded");
+    expect(booksRows).toHaveLength(1);
+    expect(booksRows[0].tax).toBe(40000);
+    expect(booksRows[0].reconIdx).toBe(2);
   });
 
   it("the same ledger under a TDS and a TCS name stays two parties (kind is not mixed)", () => {
@@ -600,41 +675,18 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
   });
 
   it("a plain one-to-one map carries no shared/members fields at all", () => {
-    const { matches } = matchParties(sharedFile(), books(1668896), { mappings: [sharedMap.mappings[0]] }, [LEDGER]);
+    const { matches } = matchParties(sharedFile(), books(BOTH), { mappings: [sharedMap.mappings[0]] }, [LEDGER]);
     expect(matches).toHaveLength(1);
     expect(matches[0].shared).toBeUndefined();
     expect("members" in matches[0]).toBe(false);
-  });
-
-  it("the group's 26AS gross sums EVERY member name, and the value columns are filled", () => {
-    // Live CMDA shape: two 194C names on one ledger, 2,61,97,200 and
-    // 5,72,47,607 — the group's gross is their sum, and the books taxable
-    // ties it, so the value delta is a rounding hair rather than blank.
-    const withSales: BooksFacts = {
-      ...books(1668896),
-      sales: [
-        { ledgerKey: LK, date: "20250810", ref: "INV 1", taxable: 4172240, gross: 4923243.2 },
-        { ledgerKey: LK, date: "20250914", ref: "INV 2", taxable: 4172207, gross: 4923204.26 },
-      ],
-    };
-    const r = analyzeAs26(sharedFile(), withSales, sharedMap, [LEDGER], WINDOW);
-    const rec = r.recon[0];
-    expect(rec.as26GrossValue).toBe(2619720 + 5724760);      // 83,44,480, not 26,19,720
-    expect(rec.booksTaxableValue).toBe(8344447);
-    expect(rec.valueBasis).toBe("taxable");
-    expect(rec.valueDelta).toBeCloseTo(-33, 2);
-    // still no drill-down rows and no money finding for the group
-    expect(rec.totalsOnly).toBe(true);
-    expect(rec.unmatchedBooks).toEqual([]);
-    expect(r.findings).toEqual([]);
   });
 
   it("a three-name component, one name owning two ledgers, keeps the whole picture", () => {
     const SECOND = "Alpha Works Head Office";
     const file: As26File = {
       ...sharedFile(),
-      summaries: [...sharedFile().summaries, { kind: "tds", name: THIRD_NAME, nameKey: canonicalKey(THIRD_NAME), section: "194C", taxTotal: 100, taxClaimed: 0, balanceCf: 0, gross: 500 }],
-      transactions: [...sharedFile().transactions, { kind: "tds" as const, nameKey: canonicalKey(THIRD_NAME), date: "20251001", amount: 500, tax: 100, status: "F", bookingDate: null, section: "194C" }],
+      summaries: [...sharedFile().summaries, { kind: "tds", name: THIRD_NAME, nameKey: canonicalKey(THIRD_NAME), section: "194C", taxTotal: 100, taxClaimed: 0, balanceCf: 0, gross: 5000 }],
+      transactions: [...sharedFile().transactions, { kind: "tds" as const, nameKey: canonicalKey(THIRD_NAME), date: "20251001", amount: 5000, tax: 100, status: "F", bookingDate: null, section: "194C" }],
     };
     const map = { mappings: [
       { ledger: LEDGER, as26Name: SHORT },
@@ -642,14 +694,25 @@ describe("shared-ledger group (one ledger, two 26AS names)", () => {
       { ledger: LEDGER, as26Name: DEPT },
       { ledger: LEDGER, as26Name: THIRD_NAME },
     ]};
-    const r = analyzeAs26(file, books(1668996), map, [LEDGER, SECOND], WINDOW);
-    expect(r.recon).toHaveLength(1);
+    const facts = books(
+      [...BOTH, ["20251001", 100]],
+      [...INVOICES, { date: "20251001", ref: "INV-T", taxable: 5000, gross: 5900 }],
+    );
+    const r = analyzeAs26(file, facts, map, [LEDGER, SECOND], WINDOW);
+    expect(r.recon).toHaveLength(3);
+    expect(r.recon.map((x) => [x.match.as26Name, x.as26Tax, x.booksTax, x.sharedRow])).toEqual([
+      [SHORT, SHORT_TAX, SHORT_TAX, { index: 1, of: 3, group: 0 }],
+      [DEPT, DEPT_TAX, DEPT_TAX, { index: 2, of: 3, group: 0 }],
+      [THIRD_NAME, 100, 100, { index: 3, of: 3, group: 0 }],
+    ]);
+    // every row sees the group's ledger pool (both ledgers) so the shared
+    // ledger's entries are available to whichever name explains them
+    expect(r.recon.every((x) => x.match.ledgerKeys)).toBe(true);
     expect(r.recon[0].match.ledgerKeys).toEqual([LK, canonicalKey(SECOND)]);
-    expect(r.recon[0].match.members!.map((m) => m.as26Name)).toEqual([SHORT, DEPT, THIRD_NAME]);
-    // SHORT's own ledgers are the two it was mapped to, not the group's
-    expect(r.recon[0].match.members![0].ledgerNames).toEqual([LEDGER, SECOND]);
-    expect(r.recon[0].as26Tax).toBe(1668996);
-    expect(r.recon[0].booksTax).toBe(1668996);
+    // the group's own member list still records the ledgers each name owns
+    expect(r.recon[0].match.ledgerKeys).toEqual([LK, canonicalKey(SECOND)]);
+    expect(r.totals.booksTax).toBe(SHORT_TAX + DEPT_TAX + 100);
+    expect(r.totals.as26Tax).toBe(SHORT_TAX + DEPT_TAX + 100);
     expect(r.findings).toEqual([]);
   });
 });

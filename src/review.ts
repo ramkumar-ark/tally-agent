@@ -34,6 +34,7 @@ import {
   rekeyDeductionsToDeductor,
   voucherIdentity,
   vouchersFromLedgerRows,
+  reconPartyId,
   AS26_LIVE_ENTRIES_UNAVAILABLE,
   AS26_LIVE_ENTRIES_UNSUPPORTED,
   type BooksDeduction,
@@ -1732,7 +1733,7 @@ export function createSession(
         ...m,
         ledgerNames,
         ledgerName: ledgerNames.join(" + "),
-        as26Name: vault.pseudonym(m.as26Name, "debtor"),
+        as26Name: m.as26Name ? vault.pseudonym(m.as26Name, "debtor") : "",
         // A shared group's member names and their own ledgers are masked
         // element-wise too — the spread above would otherwise carry them out
         // raw inside `members`.
@@ -1840,10 +1841,12 @@ export function createSession(
       return a.tax - b.tax;
     });
     const billRows = sortedRows.map((r) => ({
-      // The cross-sheet party key: `P<n>` in Deductors-sheet order, so this
-      // party's books rows and 26AS rows carry the same id on both unmatched
-      // sheets. Blank only if a hand-built row has no recon index.
-      partyId: typeof r.reconIdx === "number" ? `P${r.reconIdx + 1}` : "",
+      // The cross-sheet party key: `P<n>` in Deductors-sheet order — or
+      // `P<n>.<i>` for the i-th 26AS name of a shared-ledger group, whose rows
+      // are one per name — so this party's books rows and 26AS rows carry the
+      // same id on both unmatched sheets. Blank only if a hand-built row has no
+      // recon index.
+      partyId: typeof r.reconIdx === "number" ? reconPartyId(r.reconIdx, recon[r.reconIdx] ?? {}) : "",
       party: partyOfRow(r),
       date: displayDate(r.date),
       tax: r.tax,
