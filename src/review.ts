@@ -2,7 +2,7 @@ import { buildClassifier, type Classifier, type Overrides } from "./classify.js"
 import { runChecks } from "./checks/index.js";
 import type { Downstream, LedgerVoucherRow, VoucherRow } from "./downstream.js";
 import {
-  analyzeDepreciation, round2,
+  analyzeDepreciation, isAssetRowInScope, round2,
   type AssetRow, type BlockResult, type DepAnalyzeInput, type DepCtx, type ExcludedRow, type MovementRow,
 } from "./depreciation.js";
 import { EMPTY_DEP_OPERATOR, parseDepOperatorFile } from "./depreciation-file.js";
@@ -2735,8 +2735,10 @@ export function createSession(
     // Pass 2: only the ledgers the books do not already explain. The residual
     // is closing - opening + the charge pass 1 already attributed to this
     // ledger; a ledger whose only movement was its own depreciation nets to
-    // nil and is skipped. TALLY_AGENT_DEP_FETCH_ALL=1 disables the skip
-    // (design §5).
+    // nil and its FETCH is skipped. That is a transport optimisation only, not
+    // a scope decision: an idle asset still carries an opening WDV and must be
+    // an asset row, so it is added back below with no rows.
+    // TALLY_AGENT_DEP_FETCH_ALL=1 disables the skip (design §5).
     const openingOf = new Map(opening.rows.map((r) => [canonicalKey(r.name), r.balance] as const));
     const closingOf = new Map(closing.rows.map((r) => [canonicalKey(r.name), r.balance] as const));
     const fetchAll = process.env.TALLY_AGENT_DEP_FETCH_ALL === "1";
@@ -2750,6 +2752,14 @@ export function createSession(
       return Math.abs(residual) > ZERO_TOLERANCE;
     });
     const pass2 = await fetchLedgerRows(company, needFetch, fromDate, toDate);
+
+    // Every asset ledger of the company is an asset row, not only the ones
+    // that moved: an idle ledger contributes its own opening WDV to the block's
+    // allocation denominator and gets its pro-rata share of the Act figure
+    // (design §15). Only a nil-opening, never-moved ledger stays out.
+    const fetched = new Set(needFetch.map(canonicalKey));
+    const inScope = assetLedgers.filter((l) =>
+      isAssetRowInScope(openingOf.get(canonicalKey(l)) ?? 0, fetched.has(canonicalKey(l))));
 
     // The engine's ctx of closures: nothing Tally-shaped crosses here, only
     // what the ctx already carries. Opening block WDV comes from the operator
@@ -2780,7 +2790,7 @@ export function createSession(
           ?.additionalDepreciation ?? false,
     };
     const input: DepAnalyzeInput = {
-      ledgerRows: needFetch.map((l) => ({ ledger: l, rows: rowsByLedger(pass2.rows, l) })),
+      ledgerRows: inScope.map((l) => ({ ledger: l, rows: rowsByLedger(pass2.rows, l) })),
       disposalSignals: disposalLedgers.map((l) => ({ ledger: l, rows: rowsByLedger(pass1.rows, l) })),
       depreciationLedgerDebits,
     };

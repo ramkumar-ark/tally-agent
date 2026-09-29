@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { allocateToAssets, analyzeDepreciation, type BlockResult, type DepCtx } from "../src/depreciation.js";
+import {
+  allocateToAssets, analyzeDepreciation, isAssetRowInScope,
+  type BlockResult, type DepCtx,
+} from "../src/depreciation.js";
 import { EMPTY_DEP_OPERATOR } from "../src/depreciation-file.js";
 import type { LedgerVoucherRow } from "../src/downstream.js";
 
@@ -156,6 +159,75 @@ describe("analyzeDepreciation", () => {
       expect(f.detail).not.toMatch(/\d{6,}/);       // scrubDigits would eat it
       expect(f.detail).not.toMatch(/\b\d{8}\b/);    // a raw YYYYMMDD
     }
+  });
+});
+
+describe("isAssetRowInScope", () => {
+  it("keeps an idle ledger that carries an opening written-down value", () => {
+    expect(isAssetRowInScope(800000, false)).toBe(true);
+  });
+
+  it("keeps a moved ledger whatever its opening", () => {
+    expect(isAssetRowInScope(0, true)).toBe(true);
+  });
+
+  it("leaves out a never-moved ledger with a nil opening", () => {
+    expect(isAssetRowInScope(0, false)).toBe(false);
+    expect(isAssetRowInScope(0.004, false)).toBe(false);
+  });
+});
+
+describe("analyzeDepreciation idle assets", () => {
+  // 2026-09-30 Narayanan rerun: with the FY's depreciation journal deleted, 24
+  // asset ledgers carried an opening balance and no movement at all. They
+  // dropped out of the asset list, so their share of the block's Act
+  // depreciation was piled onto the 53 that did move.
+  const IDLE_GROUPS: Record<string, string> = { "Mixer Plant 2": "Block 15%", "Idle Roller": "Block 15%" };
+  const idleCtx = (over: Partial<DepCtx> = {}): DepCtx => ctxFor({
+    groupOf: (l) => IDLE_GROUPS[l] ?? "",
+    isAssetLedger: (l) => l in IDLE_GROUPS,
+    openingWdv: () => ({ amount: 1800000, source: "book-seed" }),
+    bookOpening: (l) => (l === "Mixer Plant 2" ? 1000000 : 800000),
+    bookClosing: (l) => (l === "Mixer Plant 2" ? 1200000 : 800000),
+    ...over,
+  });
+
+  it("gives an idle asset its pro-rata share of its block's Act depreciation", () => {
+    const r = analyzeDepreciation({
+      ledgerRows: [
+        { ledger: "Mixer Plant 2", rows: [row("20250515", "Machinery Supplier", 200000, "Purc")] },
+        { ledger: "Idle Roller", rows: [] },
+      ],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, idleCtx());
+    const mixer = r.assets.find((a) => a.ledger === "Mixer Plant 2");
+    const idle = r.assets.find((a) => a.ledger === "Idle Roller");
+    expect(idle?.opening).toBeCloseTo(800000, 2);
+    expect(idle?.additionsNet).toBe(0);
+    expect(idle?.actDepreciation).toBeCloseTo(120000, 2);   // 15% of 8,00,000
+    expect(mixer?.actDepreciation).toBeCloseTo(180000, 2);  // 15% of 12,00,000
+  });
+
+  it("leaves the block total unchanged by the idle asset's presence", () => {
+    const withIdle = analyzeDepreciation({
+      ledgerRows: [
+        { ledger: "Mixer Plant 2", rows: [row("20250515", "Machinery Supplier", 200000, "Purc")] },
+        { ledger: "Idle Roller", rows: [] },
+      ],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, idleCtx());
+    const withoutIdle = analyzeDepreciation({
+      ledgerRows: [
+        { ledger: "Mixer Plant 2", rows: [row("20250515", "Machinery Supplier", 200000, "Purc")] },
+      ],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, idleCtx());
+    expect(withIdle.blocks[0].totalDepreciation).toBeCloseTo(withoutIdle.blocks[0].totalDepreciation, 2);
+    expect(withIdle.blocks[0].totalDepreciation).toBeCloseTo(300000, 2);
+    // The whole difference is the allocation: the mover's share drops by
+    // exactly the idle asset's share.
+    expect(withoutIdle.assets[0].actDepreciation - withIdle.assets[0].actDepreciation)
+      .toBeCloseTo(120000, 2);
   });
 });
 

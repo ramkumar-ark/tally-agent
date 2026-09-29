@@ -410,6 +410,21 @@ const FIXED_ASSETS_ROOT = "fixed assets";
 const isNil = (n: number): boolean => Math.abs(n) < 0.005;
 
 /**
+ * Which asset ledgers are ASSET ROWS for the year. A ledger that did not move
+ * in the FY is still an asset of its block: the Act computes on the block, so
+ * the workbook's per-asset column is an allocation over every asset, and
+ * allocating over only the movers silently piles the idle assets' share onto
+ * the movers (measured 2026-09-30 on a real company: 24 idle ledgers carrying
+ * an opening balance dropped out once the FY's depreciation journal was
+ * deleted, and the block totals were right while every credit line was
+ * wrong). A ledger with a NIL opening and no movement is not an asset at all
+ * and stays out, as before.
+ */
+export function isAssetRowInScope(bookOpening: number, moved: boolean): boolean {
+  return moved || !isNil(bookOpening);
+}
+
+/**
  * The whole-review assembly: rate resolution, credit classification,
  * acquisitions, discount netting, block computation, book-charge
  * reconciliation, disposal signals, asset allocation and findings — pure over
