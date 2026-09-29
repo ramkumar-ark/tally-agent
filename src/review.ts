@@ -3,7 +3,7 @@ import { runChecks } from "./checks/index.js";
 import type { Downstream, LedgerVoucherRow, VoucherRow } from "./downstream.js";
 import {
   analyzeDepreciation, isAssetRowInScope, round2,
-  type AssetRow, type BlockResult, type DepAnalyzeInput, type DepCtx, type ExcludedRow, type MovementRow,
+  type AssetRow, type BlockResult, type BlockResidual, type DepAnalyzeInput, type DepCtx, type ExcludedRow, type MovementRow,
 } from "./depreciation.js";
 import { EMPTY_DEP_OPERATOR, parseDepOperatorFile } from "./depreciation-file.js";
 import {
@@ -554,6 +554,8 @@ export interface DepReviewResult {
   findings: DepMaskedFinding[];
   blocks: BlockResult[];
   assets: AssetRow[];
+  /** Blocks whose statutory total their assets' own rates do not sum to. */
+  blockResiduals: BlockResidual[];
   movements: MovementRow[];
   excluded: ExcludedRow[];
   bookCharge: number;
@@ -2835,6 +2837,9 @@ export function createSession(
         counterparty: m.counterparty ? maskDepLedger(m.counterparty) : "",
       })),
       excluded: result.excluded.map((e) => ({ ...e, ledger: maskDepLedger(e.ledger) })),
+      blockResiduals: result.blockResiduals.map((r) => ({
+        ...r, block: maskGroup(r.block), reason: scrubSecrets(maskKnownNames(r.reason, vault)),
+      })),
       bookCharge: result.bookCharge,
       seedSource: result.seedSource,
       assetLedgers: assetLedgers.length,

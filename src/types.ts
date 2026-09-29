@@ -314,7 +314,8 @@ export type DepCheckId =
   | "dep_book_charge_differs" | "dep_block_charge_differs"
   | "dep_book_charge_unreconciled" | "dep_charge_predates_acquisition"
   | "dep_block_extinguished" | "dep_block_wdv_nil"
-  | "dep_additional_depreciation_unclaimed";
+  | "dep_additional_depreciation_unclaimed"
+  | "dep_block_residual_unattributed";
 
 /** Ordinal used to build stable finding ids. Never renumber. */
 export const DEP_CHECK_ORDINAL: Record<DepCheckId, number> = {
@@ -326,6 +327,7 @@ export const DEP_CHECK_ORDINAL: Record<DepCheckId, number> = {
   dep_book_charge_unreconciled: 11, dep_charge_predates_acquisition: 12,
   dep_block_extinguished: 13, dep_block_wdv_nil: 14,
   dep_additional_depreciation_unclaimed: 15,
+  dep_block_residual_unattributed: 16,
 };
 
 export function depFindingId(check: DepCheckId, ordinal: number): string {

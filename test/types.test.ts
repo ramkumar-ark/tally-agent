@@ -102,6 +102,7 @@ describe("DEP- finding space", () => {
       dep_block_extinguished: 13,
       dep_block_wdv_nil: 14,
       dep_additional_depreciation_unclaimed: 15,
+      dep_block_residual_unattributed: 16,
     });
   });
 });

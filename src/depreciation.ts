@@ -28,6 +28,18 @@ export interface DepCtx {
 }
 
 const canon = (s: string): string => s.trim().toLowerCase();
+
+/**
+ * How far the sum of the assets' own figures may sit from the block's
+ * statutory total before it is called a real difference rather than rounding
+ * (captain, 2026-09-30). Each asset's figure is rounded to paise, so n assets
+ * can sum half a paisa each away from the block; a rupee covers a block of
+ * ~200 assets with room to spare, and every genuine block-level item (a
+ * carried-forward s.32(1)(iia) balance, an operator written-down value, a
+ * deduction that spilled past its own asset) is orders of magnitude larger.
+ */
+export const ROUNDING_TOLERANCE = 1;
+
 const isCredit = (row: LedgerVoucherRow): boolean => row.amount < 0;
 
 export const EXPENSE_ROOTS = new Set(["indirect expenses", "direct expenses", "expenses (indirect)", "expenses (direct)"]);
@@ -224,32 +236,140 @@ export interface BlockResult {
 }
 
 /**
- * The Act computes on the BLOCK; asset-wise is therefore an allocation and
- * the workbook says so (design §15). Basis: each asset's own Act-shaped
- * figure, normalised pro-rata so the asset column sums exactly to the
- * statutory block total — including where the block floors at nil or
- * extinguishes and the total is NOT the sum of the parts.
+ * The Act's rate arithmetic, shared by the block (`computeBlock`) and the
+ * per-asset figure (`computeAssetFigure`) so the two can never drift: the full
+ * rate on opening WDV and on additions put to use for 180 days or more, half
+ * the rate on the rest.
  */
-export function allocateToAssets(
-  block: BlockResult, perAsset: Array<{ ledger: string; own: number }>,
-): Map<string, number> {
-  const out = new Map<string, number>();
-  const total = perAsset.reduce((a, b) => a + b.own, 0);
-  if (block.totalDepreciation === 0 || total <= 0) {
-    for (const a of perAsset) out.set(a.ledger, 0);
-    return out;
+export function actOnPools(
+  rate: number, openLeft: number, fullLeft: number, halfLeft: number,
+): number {
+  return (openLeft + fullLeft) * (rate / 100) + halfLeft * (rate / 200);
+}
+
+/**
+ * Take moneys payable off opening WDV first, then full-rate additions, then
+ * half-rate additions — the same order in the block and in each asset. Order
+ * matters only in the band where the deductions reach down into the additions
+ * pools: this ordering rates the surviving pool cheaper to depreciate, which
+ * is taxpayer-conservative. The pools are clamped at nil, so a deduction that
+ * reaches past its own asset's value floors that asset at zero rather than
+ * going negative; the spillover then shows up as the block's residual.
+ */
+function takeDeductions(
+  deductions: number, opening: number, full: number, half: number,
+): { openLeft: number; fullLeft: number; halfLeft: number } {
+  let remaining = deductions;
+  const takeFrom = (pool: number): number => {
+    const take = Math.min(pool, remaining);
+    remaining -= take;
+    return pool - take;
+  };
+  const openLeft = takeFrom(Math.max(0, opening));
+  return { openLeft, fullLeft: takeFrom(full), halfLeft: takeFrom(half) };
+}
+
+export interface AssetFigureInput {
+  /** The block's rate. Never a rate parsed from a ledger name (design §7). */
+  rate: number;
+  /** Book seed + rule-3 debits, which join the opening value at the full rate. */
+  opening: number;
+  acquisitions: Acquisition[];
+  /** Sale / write-off credits on THIS ledger only (design §8 C3/C4, §10). */
+  deductions: number;
+  /** Whether this ledger qualifies under s.32(1)(iia). */
+  additionalEligible: boolean;
+  /** YYYYMMDD: the half-rate test runs against the review's end date. */
+  toDate: string;
+}
+
+export interface AssetFigure {
+  additionsFull: number;
+  additionsHalf: number;
+  deductions: number;
+  normalDepreciation: number;
+  /** This asset's own s.32(1)(iia) figure. A carried-forward balance is a BLOCK item. */
+  additionalDepreciation: number;
+  total: number;
+}
+
+/**
+ * One asset at its OWN rates — the full block rate on its opening WDV and on
+ * each of its acquisitions put to use for 180 days or more, half the rate on
+ * each acquisition under 180 days, and its own sale / write-off credits and
+ * its own netted purchase discounts netted against it and no other ledger.
+ *
+ * This replaced a pro-rata share of the block's statutory total (captain,
+ * 2026-09-30): the share blended every asset's half-rate additions and the
+ * block's netted discounts into one percentage, so a 15%-block pump with
+ * 10,600 of net additions came out at 1,585.12 where the Act says 1,590.00.
+ */
+export function computeAssetFigure(input: AssetFigureInput): AssetFigure {
+  let additionsFull = 0;
+  let additionsHalf = 0;
+  let additional = 0;
+  for (const a of input.acquisitions) {
+    const amount = Math.max(0, a.cost - a.netted);
+    const short = isShortPeriod(a.firstUse, input.toDate);
+    if (short) additionsHalf += amount;
+    else additionsFull += amount;
+    if (input.additionalEligible) {
+      additional += (amount * ADDITIONAL_DEPRECIATION_RATE) / 100 / (short ? 2 : 1);
+    }
   }
-  let assigned = 0;
-  perAsset.forEach((a, i) => {
-    const last = i === perAsset.length - 1;
-    // The last asset absorbs the rounding so the column sums exactly.
-    const share = last
-      ? round2(block.totalDepreciation - assigned)
-      : round2((a.own / total) * block.totalDepreciation);
-    assigned = round2(assigned + share);
-    out.set(a.ledger, share);
-  });
-  return out;
+
+  const pools = takeDeductions(input.deductions, input.opening, additionsFull, additionsHalf);
+  const normal = actOnPools(input.rate, pools.openLeft, pools.fullLeft, pools.halfLeft);
+  return {
+    additionsFull: round2(additionsFull), additionsHalf: round2(additionsHalf),
+    deductions: round2(Math.max(0, input.deductions)),
+    normalDepreciation: round2(normal), additionalDepreciation: round2(additional),
+    total: round2(normal + additional),
+  };
+}
+
+/**
+ * The asset column IS the per-asset figure, so the column's sum is whatever
+ * the assets compute — which must equal the block's statutory total for the
+ * Act to tie out. Where it does not, the difference is returned UNSPREAD as a
+ * residual: the caller states it on its own line (check 16) rather than
+ * pushing it onto an asset that never earned it.
+ *
+ * Two deviations from a perfect tie are possible and both are deliberate:
+ *  - rounding: every asset's own figure is rounded to paise, so a block of n
+ *    assets can sum up to half a paisa per asset away from the block total.
+ *    Within `ROUNDING_TOLERANCE` that is rounding, not a real difference, and
+ *    the last asset absorbs it so the column sums to the rupee — exactly as
+ *    the old pro-rata split did. Above it, a finding is worth raising.
+ *  - a block-level item (an operator written-down value for the block, a
+ *    carried-forward s.32(1)(iia) balance, a deduction that reached past the
+ *    asset it was booked on, s.50), which belongs to no single asset and is
+ *    therefore never given to one.
+ */
+export function attributeBlockToAssets(
+  block: BlockResult, perAsset: Array<{ ledger: string; own: number }>,
+): { shares: Map<string, number>; residual: number } {
+  const shares = new Map(perAsset.map((a) => [a.ledger, round2(a.own)]));
+
+  // A block that floors at nil or extinguishes has no asset-wise figure to
+  // attribute; the statutory total is nil and so is every share and the
+  // residual — nothing is unexplained.
+  if (block.status !== "ok" || block.totalDepreciation === 0) {
+    return { shares: new Map(perAsset.map((a) => [a.ledger, 0])), residual: 0 };
+  }
+
+  const assetsTotal = round2([...shares.values()].reduce((a, b) => a + b, 0));
+  const residual = round2(block.totalDepreciation - assetsTotal);
+  if (Math.abs(residual) <= ROUNDING_TOLERANCE) {
+    // Rounding only: restate the last asset so the column sums to the rupee.
+    const last = perAsset[perAsset.length - 1];
+    if (last) {
+      const others = round2(assetsTotal - (shares.get(last.ledger) ?? 0));
+      shares.set(last.ledger, round2(block.totalDepreciation - others));
+    }
+    return { shares, residual: 0 };
+  }
+  return { shares, residual };
 }
 
 export function computeBlock(input: BlockInput, ctx: DepCtx): BlockResult {
@@ -296,22 +416,9 @@ export function computeBlock(input: BlockInput, ctx: DepCtx): BlockResult {
   }
 
   // Deductions are taken off opening WDV first, then full-rate additions,
-  // then half-rate additions. Order matters only in the band where the
-  // deductions reach down into the additions pools: this ordering rates the
-  // surviving pool cheaper to depreciate, which is taxpayer-conservative.
-  // The half-rate rule attaches to each asset, so the workbook's allocation
-  // is where a per-asset split is shown (see design §15).
-  let remaining = input.deductions;
-  const takeFrom = (pool: number): number => {
-    const take = Math.min(pool, remaining);
-    remaining -= take;
-    return pool - take;
-  };
-  const openLeft = takeFrom(input.openingWdv);
-  const fullLeft = takeFrom(additionsFull);
-  const halfLeft = takeFrom(additionsHalf);
-
-  const normal = (openLeft + fullLeft) * (input.rate / 100) + halfLeft * (input.rate / 200);
+  // then half-rate additions (see `takeDeductions`).
+  const pools = takeDeductions(input.deductions, input.openingWdv, additionsFull, additionsHalf);
+  const normal = actOnPools(input.rate, pools.openLeft, pools.fullLeft, pools.halfLeft);
   const total = normal + additional;
 
   return {
@@ -348,14 +455,45 @@ export interface AssetRow {
   block: string;
   rate: number;
   opening: number;
+  /** additionsFull + additionsHalf, the net cost added this year. */
   additionsNet: number;
+  /** Additions put to use for 180 days or more, at the full rate. */
+  additionsFull: number;
+  /** Additions put to use for under 180 days, at half the rate. */
+  additionsHalf: number;
+  /** This asset's own moneys payable: sale and write-off credits on its ledger. */
+  deductions: number;
+  /** This asset's own s.32(1)(iia) figure; a carried-forward balance is block-level. */
+  additionalDepreciation: number;
   /** YYYYMMDD, or null when the ledger had no acquisition this year. */
   firstUse: string | null;
+  /**
+   * True when the asset HAS additions and EVERY one of them is under 180
+   * days. A mixed asset is false — the two pool columns above say which is
+   * which, so this is a summary, never the whole answer.
+   */
   shortPeriod: boolean;
   actDepreciation: number;
   bookCharge: number;
   difference: number;
   notes: string;
+}
+
+/**
+ * A block total that the assets' own figures do not sum to, and why. The
+ * amount belongs to the block, not to any ledger, so it is stated on its own
+ * line and never spread (captain, 2026-09-30).
+ */
+export interface BlockResidual {
+  block: string;
+  /** The block's statutory Act depreciation for the year. */
+  blockTotal: number;
+  /** What its assets' own rates come to. */
+  assetsTotal: number;
+  /** blockTotal - assetsTotal. */
+  residual: number;
+  /** What the difference is, in words. Never empty when residual is non-zero. */
+  reason: string;
 }
 
 export interface ExcludedRow {
@@ -380,6 +518,8 @@ export interface MovementRow {
 export interface DepResult {
   blocks: BlockResult[];
   assets: AssetRow[];
+  /** Blocks whose statutory total their assets' own figures do not sum to. */
+  blockResiduals: BlockResidual[];
   movements: MovementRow[];
   excluded: ExcludedRow[];
   findings: DepFinding[];
@@ -403,6 +543,7 @@ const SEVERITY: Record<DepCheckId, Severity> = {
   dep_block_extinguished: "warning",
   dep_block_wdv_nil: "warning",
   dep_additional_depreciation_unclaimed: "review",
+  dep_block_residual_unattributed: "review",
 };
 
 const FIXED_ASSETS_ROOT = "fixed assets";
@@ -435,6 +576,7 @@ export function analyzeDepreciation(input: DepAnalyzeInput, ctx: DepCtx): DepRes
   const excluded: ExcludedRow[] = [];
   const movements: MovementRow[] = [];
   const assets: AssetRow[] = [];
+  const blockResiduals: BlockResidual[] = [];
   const push = (
     check: DepCheckId, ledger: string, block: string, amount: number, detail: string,
   ): void => {
@@ -713,33 +855,88 @@ export function analyzeDepreciation(input: DepAnalyzeInput, ctx: DepCtx): DepRes
       );
     }
 
-    // Step 10: each asset's own Act-shaped figure, then the allocation.
+    // Step 10: each asset at its OWN rates (captain, 2026-09-30). The half-rate
+    // test and the deduction order are per ACQUISITION and per LEDGER, so a
+    // block's assets no longer blend one another's half-rate additions or
+    // netted discounts.
     const perAssetOwn = b.assets.map((a) => {
-      const netAdd = a.acquisitions.reduce((acc, acq) => acc + Math.max(0, acq.cost - acq.netted), 0);
+      const ownDeductions = [...a.creditKinds.entries()]
+        .filter(([, k]) => k.kind === "sale" || k.kind === "writeoff")
+        .reduce((acc, [r]) => acc + Math.abs(r.amount), 0);
+      const figure = computeAssetFigure({
+        rate: b.rate, opening: a.ownOpening, acquisitions: a.acquisitions,
+        deductions: ownDeductions,
+        additionalEligible: ctx.additionalDepreciationEligible(a.ledger),
+        toDate: ctx.toDate,
+      });
       const first = a.acquisitions.length > 0
         ? a.acquisitions.reduce((m, acq) => (acq.firstUse < m ? acq.firstUse : m), a.acquisitions[0].firstUse)
         : null;
-      const short = first !== null ? isShortPeriod(first, ctx.toDate) : false;
-      const own = round2(
-        a.ownOpening * (b.rate / 100) + netAdd * (b.rate / 100) * (short ? 0.5 : 1),
-      );
-      return { a, netAdd, first, short, own };
+      return {
+        a, figure, first,
+        // "Every addition is short", not "the first one is": the pool columns
+        // disambiguate a mixed asset, which this flag must not mis-summarise.
+        short: figure.additionsHalf > 0 && figure.additionsFull === 0,
+      };
     });
-    const allocated = allocateToAssets(
+    const attributed = attributeBlockToAssets(
       result,
-      perAssetOwn.map((p) => ({ ledger: p.a.ledger, own: p.own })),
+      perAssetOwn.map((p) => ({ ledger: p.a.ledger, own: p.figure.total })),
     );
+    const assetsTotal = round2(perAssetOwn.reduce((acc, p) => acc + p.figure.total, 0));
+
+    if (!isNil(attributed.residual)) {
+      // Say what the difference IS, and in this order, so a reader can act on
+      // it: a block-level item we can name exactly, then the honest remainder.
+      const parts: string[] = [];
+      let left = attributed.residual;
+      if (!isNil(carry)) {
+        parts.push(
+          `a carried-forward additional depreciation of ${money(carry)} declared on the block belongs to no single ledger`,
+        );
+        left = round2(left - carry);
+      }
+      const openingGap = round2(result.openingWdv - b.assets.reduce((acc, a) => acc + a.ownOpening, 0));
+      if (!isNil(openingGap)) {
+        parts.push(
+          `the block's opening written-down value of ${money(result.openingWdv)} differs from the sum of its assets' book seeds by ${money(openingGap)}`,
+        );
+        left = round2(left - openingGap);
+      }
+      if (!isNil(left)) {
+        parts.push(
+          `a sale or write-off credit that reached past the asset it was booked on, so that asset floors at nil, along with per-asset rounding`,
+        );
+      }
+      const reason = parts.join("; ");
+      blockResiduals.push({
+        block: b.name, blockTotal: result.totalDepreciation,
+        assetsTotal, residual: attributed.residual, reason,
+      });
+      push(
+        "dep_block_residual_unattributed", "", b.name, Math.abs(attributed.residual),
+        `the block's Act depreciation of ${money(result.totalDepreciation)} does not equal the ${money(assetsTotal)} its assets' own rates come to; the difference of ${money(attributed.residual)} is carried on its own line and spread across no asset because ${reason}`,
+      );
+    }
 
     for (const p of perAssetOwn) {
-      const act = round2(allocated.get(p.a.ledger) ?? 0);
+      const act = round2(attributed.shares.get(p.a.ledger) ?? 0);
       const difference = round2(act - p.a.bookCharge);
       const notes: string[] = [];
       if (p.a.rule3Debits > 0) {
         notes.push(`includes ${money(p.a.rule3Debits)} of cost joined to the opening value at the full rate`);
       }
+      if (!isNil(p.figure.additionsHalf) && !isNil(p.figure.additionsFull)) {
+        notes.push(
+          `mixed put-to-use: ${money(p.figure.additionsFull)} at ${b.rate}% and ${money(p.figure.additionsHalf)} at half that rate`,
+        );
+      }
       assets.push({
         ledger: p.a.ledger, block: b.name, rate: b.rate,
-        opening: p.a.ownOpening, additionsNet: round2(p.netAdd),
+        opening: p.a.ownOpening,
+        additionsNet: round2(p.figure.additionsFull + p.figure.additionsHalf),
+        additionsFull: p.figure.additionsFull, additionsHalf: p.figure.additionsHalf,
+        deductions: p.figure.deductions, additionalDepreciation: p.figure.additionalDepreciation,
         firstUse: p.first, shortPeriod: p.short,
         actDepreciation: act, bookCharge: round2(p.a.bookCharge), difference,
         notes: notes.join("; "),
@@ -812,7 +1009,7 @@ export function analyzeDepreciation(input: DepAnalyzeInput, ctx: DepCtx): DepRes
 
   return {
     blocks: [...computedBlocks.values()],
-    assets, movements, excluded, findings,
+    assets, blockResiduals, movements, excluded, findings,
     bookCharge: round2(totalBookCharge),
     seedSource,
   };

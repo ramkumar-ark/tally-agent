@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  allocateToAssets, analyzeDepreciation, isAssetRowInScope,
-  type BlockResult, type DepCtx,
+  analyzeDepreciation, attributeBlockToAssets, computeAssetFigure, isAssetRowInScope,
+  type Acquisition, type BlockResult, type DepCtx,
 } from "../src/depreciation.js";
 import { EMPTY_DEP_OPERATOR } from "../src/depreciation-file.js";
 import type { LedgerVoucherRow } from "../src/downstream.js";
@@ -12,34 +12,100 @@ const block = (over: Partial<BlockResult> = {}): BlockResult => ({
   totalDepreciation: 0, closingWdv: 0, shortTermGain: 0, shortTermLoss: 0, status: "ok", ...over,
 });
 
-describe("allocateToAssets", () => {
-  it("splits the statutory block figure pro-rata to each asset's own computation", () => {
-    const got = allocateToAssets(block({ totalDepreciation: 300 }), [
+const acq = (over: Partial<Acquisition> = {}): Acquisition => ({
+  ledger: "A", firstUse: "20250515", cost: 0, counterparty: "Machinery Supplier",
+  debits: [], netted: 0, ...over,
+});
+
+describe("computeAssetFigure", () => {
+  it("rates each acquisition on its own put-to-use, not the asset's earliest", () => {
+    // 20,000 put to use 2025-05-15 (a full year) and 10,600 on 2026-01-15
+    // (under 180 days before 31-03-2026).
+    const f = computeAssetFigure({
+      rate: 15, opening: 0, additionalEligible: false, toDate: "20260331", deductions: 0,
+      acquisitions: [acq({ cost: 10600, firstUse: "20260115" }), acq({ cost: 20000 })],
+    });
+    expect(f.additionsHalf).toBe(10600);
+    expect(f.additionsFull).toBe(20000);
+    expect(f.total).toBeCloseTo(20000 * 0.15 + 10600 * 0.075, 2);   // 3,795.00
+  });
+
+  it("nets an asset's own discount off that asset's additions", () => {
+    const f = computeAssetFigure({
+      rate: 15, opening: 0, additionalEligible: false, toDate: "20260331", deductions: 0,
+      acquisitions: [acq({ cost: 3290375, netted: 150000 })],
+    });
+    expect(f.additionsFull).toBe(3140375);
+    expect(f.total).toBeCloseTo(471056.25, 2);
+  });
+
+  it("takes its own sale credit off opening first, then the additions pools", () => {
+    const f = computeAssetFigure({
+      rate: 15, opening: 100000, additionalEligible: false, toDate: "20260331", deductions: 150000,
+      acquisitions: [acq({ cost: 100000 })],
+    });
+    // 1,00,000 off the opening, the remaining 50,000 off the full pool.
+    expect(f.total).toBeCloseTo(50000 * 0.15, 2);
+  });
+
+  it("floors at nil when its own credit reaches past its own value", () => {
+    const f = computeAssetFigure({
+      rate: 15, opening: 0, additionalEligible: false, toDate: "20260331", deductions: 50000,
+      acquisitions: [acq({ cost: 30000 })],
+    });
+    expect(f.total).toBe(0);
+  });
+
+  it("adds its own s.32(1)(iia) charge, halved on a short-period addition", () => {
+    const f = computeAssetFigure({
+      rate: 15, opening: 0, additionalEligible: true, toDate: "20260331", deductions: 0,
+      acquisitions: [acq({ cost: 100000 }), acq({ cost: 20000, firstUse: "20260115" })],
+    });
+    expect(f.additionalDepreciation).toBeCloseTo(20000 + 2000, 2);
+  });
+});
+
+describe("attributeBlockToAssets", () => {
+  it("gives each asset its own figure when they tie to the block exactly", () => {
+    const got = attributeBlockToAssets(block({ totalDepreciation: 300 }), [
       { ledger: "A", own: 100 }, { ledger: "B", own: 200 },
     ]);
-    expect(got.get("A")).toBeCloseTo(100, 2);
-    expect(got.get("B")).toBeCloseTo(200, 2);
+    expect(got.shares.get("A")).toBeCloseTo(100, 2);
+    expect(got.shares.get("B")).toBeCloseTo(200, 2);
+    expect(got.residual).toBe(0);
   });
 
-  it("sums EXACTLY to the block total even when the parts do not", () => {
-    const got = allocateToAssets(block({ totalDepreciation: 1000 }), [
+  it("absorts a sub-rupee rounding difference into the last asset and reports none", () => {
+    const got = attributeBlockToAssets(block({ totalDepreciation: 1000 }), [
       { ledger: "A", own: 333.33 }, { ledger: "B", own: 333.33 }, { ledger: "C", own: 333.33 },
     ]);
-    const sum = [...got.values()].reduce((a, b) => a + b, 0);
+    const sum = [...got.shares.values()].reduce((a, b) => a + b, 0);
     expect(sum).toBeCloseTo(1000, 2);
+    expect(got.residual).toBe(0);
   });
 
-  it("gives every asset nil when the block's statutory figure is nil", () => {
-    const got = allocateToAssets(block({ totalDepreciation: 0, status: "extinguished" }), [
+  it("returns a genuine block-level difference UNSPREAD rather than pushing it onto an asset", () => {
+    const got = attributeBlockToAssets(block({ totalDepreciation: 1000 }), [
+      { ledger: "A", own: 400 }, { ledger: "B", own: 400 },
+    ]);
+    expect(got.shares.get("A")).toBe(400);
+    expect(got.shares.get("B")).toBe(400);
+    expect(got.residual).toBe(200);
+  });
+
+  it("gives every asset nil and no residual when the block's statutory figure is nil", () => {
+    const got = attributeBlockToAssets(block({ totalDepreciation: 0, status: "extinguished" }), [
       { ledger: "A", own: 500 }, { ledger: "B", own: 500 },
     ]);
-    expect(got.get("A")).toBe(0);
-    expect(got.get("B")).toBe(0);
+    expect(got.shares.get("A")).toBe(0);
+    expect(got.shares.get("B")).toBe(0);
+    expect(got.residual).toBe(0);
   });
 
-  it("does not divide by zero when no asset has an own figure", () => {
-    const got = allocateToAssets(block({ totalDepreciation: 100 }), [{ ledger: "A", own: 0 }]);
-    expect(got.get("A")).toBe(0);
+  it("does not invent a difference when no asset has an own figure", () => {
+    const got = attributeBlockToAssets(block({ totalDepreciation: 0 }), [{ ledger: "A", own: 0 }]);
+    expect(got.shares.get("A")).toBe(0);
+    expect(got.residual).toBe(0);
   });
 });
 
@@ -192,7 +258,7 @@ describe("analyzeDepreciation idle assets", () => {
     ...over,
   });
 
-  it("gives an idle asset its pro-rata share of its block's Act depreciation", () => {
+  it("gives an idle asset its own rate on its own opening WDV", () => {
     const r = analyzeDepreciation({
       ledgerRows: [
         { ledger: "Mixer Plant 2", rows: [row("20250515", "Machinery Supplier", 200000, "Purc")] },
@@ -208,7 +274,7 @@ describe("analyzeDepreciation idle assets", () => {
     expect(mixer?.actDepreciation).toBeCloseTo(180000, 2);  // 15% of 12,00,000
   });
 
-  it("leaves the block total unchanged by the idle asset's presence", () => {
+  it("leaves the block total AND the mover's own figure unchanged by the idle asset", () => {
     const withIdle = analyzeDepreciation({
       ledgerRows: [
         { ledger: "Mixer Plant 2", rows: [row("20250515", "Machinery Supplier", 200000, "Purc")] },
@@ -224,10 +290,111 @@ describe("analyzeDepreciation idle assets", () => {
     }, idleCtx());
     expect(withIdle.blocks[0].totalDepreciation).toBeCloseTo(withoutIdle.blocks[0].totalDepreciation, 2);
     expect(withIdle.blocks[0].totalDepreciation).toBeCloseTo(300000, 2);
-    // The whole difference is the allocation: the mover's share drops by
-    // exactly the idle asset's share.
-    expect(withoutIdle.assets[0].actDepreciation - withIdle.assets[0].actDepreciation)
-      .toBeCloseTo(120000, 2);
+    // The mover is rated on its own WDV, so adding an idle asset to the block
+    // no longer moves the mover's figure at all (it used to lose the idle
+    // asset's share, because the share was the mover's whole story).
+    expect(withIdle.assets[0].actDepreciation).toBeCloseTo(180000, 2);
+    expect(withoutIdle.assets[0].actDepreciation).toBeCloseTo(180000, 2);
+    expect(withIdle.assets.reduce((a, x) => a + x.actDepreciation, 0)).toBeCloseTo(300000, 2);
+  });
+});
+
+describe("analyzeDepreciation per-asset own rates", () => {
+  // Captain, 2026-09-30: the asset column used to be the block's statutory
+  // total spread pro rata over asset WDV, which blended every asset's
+  // half-rate additions and the block's netted discounts into one percentage.
+  const OWN_GROUPS: Record<string, string> = {
+    "Pump 1HP": "Block 15%", "Mixed Plant": "Block 15%", "Tandem Roller": "Block 15%",
+  };
+  const ownCtx = (bookOpening: Record<string, number> = {}, over: Partial<DepCtx> = {}): DepCtx => {
+    const seed = Object.values(bookOpening).reduce((a, b) => a + b, 0);
+    return ctxFor({
+      groupOf: (l) => OWN_GROUPS[l] ?? "",
+      isAssetLedger: (l) => l in OWN_GROUPS,
+      openingWdv: () => ({ amount: seed, source: "book-seed" }),
+      bookOpening: (l) => bookOpening[l] ?? 0,
+      bookClosing: (l) => bookOpening[l] ?? 0,
+      ...over,
+    });
+  };
+
+  it("computes the 1 HP pump at its own rate: 10,600 net additions at 15% is 1,590.00", () => {
+    const r = analyzeDepreciation({
+      ledgerRows: [{ ledger: "Pump 1HP", rows: [row("20250515", "Machinery Supplier", 10600, "Purc")] }],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, ownCtx());
+    const pump = r.assets.find((a) => a.ledger === "Pump 1HP");
+    expect(pump?.additionsNet).toBe(10600);
+    expect(pump?.actDepreciation).toBe(1590);
+    expect(r.blocks[0].totalDepreciation).toBe(1590);
+    expect(r.blockResiduals).toHaveLength(0);
+  });
+
+  it("splits ONE asset's own additions into its full and half pools", () => {
+    const r = analyzeDepreciation({
+      ledgerRows: [{ ledger: "Mixed Plant", rows: [
+        row("20250515", "Machinery Supplier", 20000, "Purc"),
+        row("20260115", "Machinery Supplier", 10600, "Purc"),
+      ] }],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, ownCtx());
+    const a = r.assets.find((x) => x.ledger === "Mixed Plant");
+    expect(a?.additionsFull).toBe(20000);
+    expect(a?.additionsHalf).toBe(10600);
+    expect(a?.actDepreciation).toBeCloseTo(3795, 2);       // 3,000.00 + 795.00
+    expect(a?.shortPeriod).toBe(false);                     // not EVERY addition is short
+    expect(a?.notes).toMatch(/mixed put-to-use/i);
+    expect(r.blocks[0].totalDepreciation).toBeCloseTo(3795, 2);
+  });
+
+  it("nets an asset's own purchase discount off that asset alone", () => {
+    const r = analyzeDepreciation({
+      ledgerRows: [{ ledger: "Tandem Roller", rows: [
+        row("20250715", "Machinery Supplier", 3290375, "Purc"),
+        row("20250725", "Machinery Supplier", -150000),
+      ] }],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, ownCtx());
+    const t = r.assets.find((a) => a.ledger === "Tandem Roller");
+    expect(t?.additionsNet).toBe(3140375);                  // 32,90,375 less 1,50,000
+    expect(t?.actDepreciation).toBeCloseTo(471056.25, 2);    // 15% of 31,40,375
+  });
+
+  it("makes the asset column sum EXACTLY to the block's statutory total", () => {
+    const r = analyzeDepreciation({
+      ledgerRows: [
+        { ledger: "Pump 1HP", rows: [row("20250515", "Machinery Supplier", 10600, "Purc")] },
+        { ledger: "Mixed Plant", rows: [row("20250515", "Machinery Supplier", 10001, "Purc")] },
+        { ledger: "Tandem Roller", rows: [
+          row("20250715", "Machinery Supplier", 3290375, "Purc"),
+          row("20250725", "Machinery Supplier", -150000),
+        ] },
+      ],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, ownCtx());
+    const assets = r.assets.reduce((a, x) => a + x.actDepreciation, 0);
+    expect(assets).toBe(r.blocks[0].totalDepreciation);
+    expect(r.blockResiduals).toHaveLength(0);
+  });
+
+  it("states a block-level difference on its own line rather than spreading it", () => {
+    // An operator written-down value for the BLOCK belongs to no single asset.
+    const r = analyzeDepreciation({
+      ledgerRows: [
+        { ledger: "Pump 1HP", rows: [row("20250515", "Machinery Supplier", 10600, "Purc")] },
+        { ledger: "Mixed Plant", rows: [row("20250515", "Machinery Supplier", 20000, "Purc")] },
+      ],
+      disposalSignals: [], depreciationLedgerDebits: 0,
+    }, ownCtx({}, {
+      operator: { ...EMPTY_DEP_OPERATOR, openingWdv: [{ block: "Block 15%", rate: 15, amount: 500000 }] },
+      openingWdv: () => ({ amount: 500000, source: "operator" }),
+    }));
+    expect(r.assets.reduce((a, x) => a + x.actDepreciation, 0)).toBeCloseTo(4590, 2);
+    expect(r.blocks[0].totalDepreciation).toBeCloseTo(79590, 2);   // 15% of 5,30,600
+    expect(r.blockResiduals).toHaveLength(1);
+    expect(r.blockResiduals[0].residual).toBeCloseTo(75000, 2);
+    expect(r.blockResiduals[0].reason).toMatch(/written-down value|opening/i);
+    expect(r.findings.map((f) => f.check)).toContain("dep_block_residual_unattributed");
   });
 });
 

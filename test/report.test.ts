@@ -349,6 +349,7 @@ const sampleMaskedResult: MaskedDepResult = {
   }],
   assets: [{
     ledger: "Ledger 7", block: "Block 15%", rate: 15, opening: 0, additionsNet: 1000000,
+    additionsFull: 1000000, additionsHalf: 0, deductions: 0, additionalDepreciation: 0,
     firstUse: "20250515", shortPeriod: false, actDepreciation: 150000,
     bookCharge: 150000, difference: 0, notes: "",
   }],
@@ -373,10 +374,26 @@ describe("depreciationSheets", () => {
     expect(sheets[0].title?.join(" ")).toContain("UNVERIFIED BOOK SEED");
   });
 
-  it("states on the Assets sheet that the split is an allocation", () => {
+  it("states on the Assets sheet that each asset is computed at its own rates", () => {
     const assets = depreciationSheets(sampleMaskedResult)[2];
-    expect(assets.title?.join(" ")).toMatch(/block figure is (the )?statutory/i);
-    expect(assets.title?.join(" ")).toMatch(/allocation/i);
+    expect(assets.title?.join(" ")).toMatch(/own rates/i);
+    expect(assets.title?.join(" ")).toMatch(/spread across no asset/i);
+    expect(assets.title?.join(" ")).not.toMatch(/allocation/i);
+  });
+
+  it("states a block-level difference on its own Assets-sheet line, never on an asset", () => {
+    const sheets = depreciationSheets({
+      ...sampleMaskedResult,
+      blockResiduals: [{
+        block: "Block 15%", blockTotal: 100000, assetsTotal: 90000, residual: 10000,
+        reason: "a block-level written-down value the operator stated for the block",
+      }],
+    });
+    const rows = sheets[2].rows ?? [];
+    const line = rows.find((r) => String(r[2]).match(/not attributable/i));
+    expect(line).toBeTruthy();
+    expect(line?.[10]).toBe(10000);          // the Act depreciation (own rates) column
+    expect(line?.[13]).toMatch(/written-down value/);
   });
 
   it("shows no alternative figure on the Excluded sheet", () => {
@@ -388,7 +405,7 @@ describe("depreciationSheets", () => {
 });
 
 describe("writeDepreciationReport", () => {
-  it("writes the trio with de-masked names, the seed banner and the allocation note", async () => {
+  it("writes the trio with de-masked names, the seed banner and the own-rates note", async () => {
     const vault = createVault();
     const alias = vault.pseudonym("Sample Machinery LLP", "creditor");
     const result: MaskedDepResult = {
@@ -417,7 +434,7 @@ describe("writeDepreciationReport", () => {
     expect(md).toContain("UNVERIFIED BOOK SEED");
     expect(md).toContain("Sample Machinery LLP");
     expect(md).not.toContain("Creditor 1");
-    expect(md).toMatch(/block figure is (the )?statutory/i);
+    expect(md).toMatch(/own rates/i);
     const csv = readFileSync(paths.csvPath, "utf8");
     expect(csv.split("\n")[0]).toBe("id,check,severity,ledger,block,amount,detail");
     expect(csv).toContain("Sample Machinery LLP");

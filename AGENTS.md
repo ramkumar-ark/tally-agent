@@ -252,6 +252,29 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   ledger with a nil TB balance at BOTH ends is not an asset row and gets no
   row: 4 of the 24 candidates on the real company were nil-both-ends, which
   is why 20 rows appear, not 24.
+- **Every asset is computed at its OWN rates; the block total is never spread**
+  (2026-09-30, captain; `computeAssetFigure`/`attributeBlockToAssets`,
+  `src/depreciation.ts`). The old `allocateToAssets` pro-rata'd the block over
+  the assets, which blended one blended rate (14.954% on the reviewed company)
+  into every asset and made each asset-wise difference an artifact of the
+  split. Now: full rate on the asset's own opening WDV, full rate per
+  acquisition put to use ≥180 days and half per acquisition under 180 days
+  (per ACQUISITION, not per ledger — `shortPeriod` is `true` only when every
+  addition is short, and a mixed asset gets a `mixed put-to-use:` note), and the
+  asset's OWN sale/writeoff/discount credits netted against that asset alone.
+  The asset column then sums to the statutory block total by itself.
+- **A block-level item is stated on its own line, never spread**
+  (`attributeBlockToAssets` → `BlockResidual`, the Assets sheet's
+  `Block-level difference — not attributable to any one asset` row, and
+  `dep_block_residual_unattributed`, DEP ordinal **16**). Genuine causes: an
+  operator block opening WDV that is not the sum of the assets' openings,
+  `additionalDepreciationCarryForward`, a credit that reached past the asset it
+  was booked on, s.50, `extinguished`. The ONE exception is rounding:
+  `ROUNDING_TOLERANCE` (one rupee, exported from `src/depreciation.ts` and the
+  single knob) — a residual within it is pure per-asset paise drift, so the
+  LAST asset is restated to `block total − Σ others` and no residual is
+  reported. The import-JSON generator reads the workbook, so a non-ledger row
+  with a non-zero amount is a hard import error there.
 
 ## Sharp edges found implementing the TDS spreadsheet input (2026-09-16)
 

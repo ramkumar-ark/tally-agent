@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { demaskText } from "./mask.js";
 import type { Finding, Severity } from "./types.js";
 import { count, money, displayDate } from "./format.js";
-import { round2, type BlockResult, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
+import { round2, ROUNDING_TOLERANCE, type BlockResult, type BlockResidual, type AssetRow, type MovementRow, type ExcludedRow } from "./depreciation.js";
 import { AS26_VALUE_TOLERANCE } from "./as26.js";
 import type {
   TdsMaskedFinding as TdsCsvFinding,
@@ -344,6 +344,11 @@ export interface MaskedDepResult {
   toDate?: string;
   blocks: BlockResult[];
   assets: AssetRow[];
+  /**
+   * Present from 2026-09-30 (per-asset own rates). Older results predate the
+   * check, so the sheet's residual block is simply empty.
+   */
+  blockResiduals?: BlockResidual[];
   movements: MovementRow[];
   excluded: ExcludedRow[];
   findings: DepMaskedFinding[];
@@ -398,6 +403,39 @@ const blockStatus = (
   if (result.seedSource === "book-seed") return "unverified-seed";
   return "ok";
 };
+
+/**
+ * The Assets sheet's rows: one per asset, plus — only for a block whose
+ * statutory total its assets do not sum to — one line naming that difference
+ * and why, directly after the block's last asset. No residual, no line: a
+ * clean block shows its assets alone.
+ */
+function assetRowsWithResiduals(result: MaskedDepResult): CellValue[][] {
+  const residualByBlock = new Map(
+    (result.blockResiduals ?? []).filter((r) => Math.abs(r.residual) > ROUNDING_TOLERANCE).map((r) => [r.block, r]),
+  );
+  const blockOf = new Map(result.blocks.map((b) => [b.block, b.rate]));
+  const rows: CellValue[][] = [];
+  result.assets.forEach((a, i) => {
+    rows.push([
+      a.block, blockOf.get(a.block) ?? a.rate, a.ledger, a.opening,
+      a.additionsFull, a.additionsHalf, a.deductions, a.additionalDepreciation,
+      a.firstUse ?? null, a.shortPeriod ? "Yes" : "No",
+      a.actDepreciation, a.bookCharge, a.difference, a.notes,
+    ]);
+    const next = result.assets[i + 1];
+    if (next && next.block === a.block) return;
+    const r = residualByBlock.get(a.block);
+    if (!r) return;
+    rows.push([
+      a.block, blockOf.get(a.block) ?? a.rate,
+      "Block-level difference — not attributable to any one asset",
+      null, null, null, null, null, null, "",
+      r.residual, null, null, `${r.reason}. Block total ${money(r.blockTotal)}, assets' own rates ${money(r.assetsTotal)}.`,
+    ]);
+  });
+  return rows;
+}
 
 /**
  * The depreciation workbook, six sheets in §15's order. Masked in, masked
@@ -472,26 +510,28 @@ export function depreciationSheets(result: MaskedDepResult): Sheet[] {
   const assets: Sheet = {
     name: "Assets",
     title: [
-      "The block figure is the statutory one; the asset split is an allocation.",
-      "Per-asset Act depreciation is apportioned pro-rata so the column sums exactly to the block total.",
+      "Every asset is computed at its own rates: the block's full rate on its opening written-down value and on additions put to use for 180 days or more, half the rate on additions under 180 days, with its own sale, write-off and netted purchase discounts netted against that asset alone.",
+      "The asset column therefore sums to the block's statutory total on its own. Where a block-level item stops that from happening, the difference is stated on its own line below the block and is spread across no asset.",
     ],
     columns: [
       textCol("Block", 24),
       { header: "Rate %", width: 8, format: "text" },
       textCol("Asset", 32),
       moneyCol("Opening (book seed)", 18),
-      moneyCol("Additions (net)", 16),
+      moneyCol("Additions ≥ 180 days", 20),
+      moneyCol("Additions < 180 days", 20),
+      moneyCol("Deductions", 14),
+      moneyCol("Additional depreciation", 20),
       dateCol("First-use date"),
-      textCol("Under 180 days", 14),
-      moneyCol("Act depreciation (allocated)", 24),
+      textCol("All additions < 180 days", 16),
+      moneyCol("Act depreciation (own rates)", 24),
       moneyCol("Book charge", 16),
       moneyCol("Difference", 14),
       textCol("Notes", 50),
     ],
-    rows: result.assets.map((a) => [
-      a.block, a.rate, a.ledger, a.opening, a.additionsNet, a.firstUse ?? null,
-      a.shortPeriod ? "Yes" : "No", a.actDepreciation, a.bookCharge, a.difference, a.notes,
-    ]),
+    // A residual line follows the last asset of its block, so the block's
+    // assets and the item that could not be attributed to them read together.
+    rows: assetRowsWithResiduals(result),
   };
 
   const movements: Sheet = {
@@ -560,7 +600,7 @@ function depreciationMarkdown(result: MaskedDepResult): string {
     "",
     `> **${SEED_BANNER[result.seedSource]}**`,
     "",
-    "The block figure is the statutory one; the asset split is an allocation.",
+    "Every asset is computed at its own rates — the block's full rate on its opening written-down value and on additions put to use for 180 days or more, half the rate on additions under 180 days, with its own sale, write-off and netted purchase discounts netted against that asset alone — so the asset column sums to the block's statutory total on its own. A difference that belongs to the block rather than to any asset is stated on its own line and spread across none.",
     "",
     "## Blocks",
     "",
@@ -580,12 +620,22 @@ function depreciationMarkdown(result: MaskedDepResult): string {
     "",
     "## Assets",
     "",
-    "| Asset | Block | First-use date | Under 180 days | Act depreciation (allocated) | Book charge | Difference | Notes |",
-    "|---|---|---|---|---:|---:|---:|---|",
+    "| Asset | Block | First-use date | Additions ≥ 180 days | Additions < 180 days | Deductions | Act depreciation (own rates) | Book charge | Difference | Notes |",
+    "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+  );
+  const residualByBlock = new Map(
+    (result.blockResiduals ?? []).filter((r) => Math.abs(r.residual) > ROUNDING_TOLERANCE).map((r) => [r.block, r]),
   );
   for (const a of result.assets) {
     lines.push(
-      `| ${a.ledger} | ${a.block} | ${a.firstUse === null ? "" : displayDate(a.firstUse)} | ${a.shortPeriod ? "Yes" : "No"} | ${money(a.actDepreciation)} | ${money(a.bookCharge)} | ${money(a.difference)} | ${a.notes} |`,
+      `| ${a.ledger} | ${a.block} | ${a.firstUse === null ? "" : displayDate(a.firstUse)} | ${money(a.additionsFull)} | ${money(a.additionsHalf)} | ${money(a.deductions)} | ${money(a.actDepreciation)} | ${money(a.bookCharge)} | ${money(a.difference)} | ${a.notes} |`,
+    );
+    const next = result.assets[result.assets.indexOf(a) + 1];
+    if (next && next.block === a.block) continue;
+    const r = residualByBlock.get(a.block);
+    if (!r) continue;
+    lines.push(
+      `| **Block-level difference (${r.block})** | ${r.block} |  |  |  |  | **${money(r.residual)}** |  |  | ${r.reason}. Block total ${money(r.blockTotal)}, assets' own rates ${money(r.assetsTotal)}. |`,
     );
   }
   return lines.join("\n");

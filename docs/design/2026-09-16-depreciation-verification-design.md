@@ -798,11 +798,14 @@ artifact because the captain asked for a spreadsheet.
    depreciation, Total Act depreciation, Closing WDV, Book charge, Difference,
    Status (`ok` / `extinguished` / `nil-floor` / `unverified-seed` /
    `incomplete — flagged entries excluded`).
-3. **Assets** — one row per asset ledger: Block, Rate %, Asset, Opening (book
-   seed), Additions (net), First-use date, Under 180 days, Act depreciation
-   (allocated), Book charge, Difference, Notes. The sheet carries a header
-   note: **the block figure is the statutory one; the asset split is an
-   allocation.**
+3. **Assets** — one row per asset ledger, each computed at its own rates
+   (amended 2026-09-30, see below): Block, Rate %, Asset, Opening (book seed),
+   Additions ≥ 180 days, Additions < 180 days, Discounts/credits netted against
+   this asset, Additional depreciation, First-use date, Under 180 days, Act
+   depreciation (own rates), Book charge, Difference, Notes. The sheet's header
+   note states that the asset column sums to the block's statutory total on its
+   own, and that a block-level difference is stated on its own line below the
+   block rather than spread across any asset.
 4. **Movements** — every acquisition debit and every credit actually used,
    with its classification, the rule that fired, and for a netted discount the
    acquisition it was netted against. This is the audit trail for the two
@@ -816,6 +819,14 @@ Number formats: money `#,##,##0.00` so the workbook matches `money()`'s Indian
 grouping; dates `dd-mmm-yyyy`; rates plain.
 
 ### Asset-wise attribution is an allocation, and the workbook says so
+
+> **AMENDED 2026-09-30 — the pro-rata normalisation below is superseded. Each
+> asset is now computed at its own rates and reported as computed; the block's
+> statutory total is no longer spread across the assets.** Read this
+> subsection together with *Amendment (2026-09-30): own rates per asset* at the
+> end of §15. The reasoning below is kept because it records why pro-rata was
+> chosen first and why the captain rejected it; every sentence about spreading
+> and normalisation is historical.
 
 The Act computes on the block. Asset-wise is therefore derived, and the design
 is explicit about the basis.
@@ -860,6 +871,82 @@ Rejected: **keep a real per-asset tax written-down value register.** Rejected
 as out of scope (§1) and as a misreading of the Act — the block is the
 statutory unit, and a per-asset tax value is not a figure the Act recognises.
 
+### Amendment (2026-09-30): own rates per asset
+
+**Captain's ruling.** "The depreciation calculation as per the depreciation
+review differs slightly for each asset… You can take the first asset which is
+the Block 15% 1 HP seven stage submersible pump, It has a net additions of
+10600 And for 15% the depreciation comes to 1590. However the review worksheet
+says that the depreciation is 1585.12." … "yes go ahead and add the per asset
+rate fix."
+
+**Why the old basis was wrong.** The block total (₹1,38,95,367.18) was spread
+pro rata over the assets' own figures (₹9,29,21,204.91) — a blended 14.954% on
+every asset. That blend silently carried the half-rate of under-180-day
+additions and the block's netted discounts into assets that had neither, so
+every asset read a few paise or rupees off its own statutory figure and no
+asset-wise difference could be trusted.
+
+**The basis now in force.** Each asset ledger is computed exactly as if it were
+its own block, and reported as computed:
+
+- the block's full rate on that asset's **own** opening written-down value;
+- the full rate on each acquisition of that asset **put to use for 180 days or
+  more**, half the rate on each acquisition **under 180 days** — decided
+  **per acquisition**, not per asset, so one ledger holding both a long-held
+  and a recent purchase shows both pools (its `Under 180 days` flag is `Yes`
+  only when every one of its additions is short, and the Notes column says
+  `mixed put-to-use: …` when it is not);
+- its **own** sale, write-off and netted purchase discounts netted against
+  **that asset alone** — an asset's deductions are taken against its own
+  opening, then its own full-rate additions, then its own half-rate additions;
+- its own additional depreciation, halved on a short addition, exactly as
+  §11 computes it at block level.
+
+Because each asset is computed on its own pools and its own credits, the asset
+column sums to the block's statutory total **by itself** — nothing is spread,
+and check 8's per-asset difference is now a real comparison rather than an
+artifact of the split. On the reviewed company the tie is exact.
+
+**Where the tie cannot be exact, it is stated, not smoothed.** A genuine
+block-level item — an operator opening WDV that is not the sum of the assets'
+own openings, carried-forward additional depreciation, a credit that reached
+past the asset it was booked on, s.50 flooring, an extinguished block — cannot
+belong to any one asset. Such a difference is left where it is:
+
+- `attributeBlockToAssets` returns it as a `BlockResidual`
+  `{block, blockTotal, assetsTotal, residual, reason}`, spread across **no**
+  asset;
+- the Assets sheet prints one line under that block, `Block-level difference —
+  not attributable to any one asset`, carrying the amount and the reason;
+- the review raises `dep_block_residual_unattributed` (DEP ordinal **16**,
+  severity `review`) naming the block total, the assets' total and the
+  difference.
+
+**Rounding is the one exception, and it is bounded.** Each asset figure is
+rounded to paise, so n assets can each sit half a paisa away from the block. A
+difference of at most `ROUNDING_TOLERANCE` (**one rupee** — a rupee covers
+roughly 200 assets' half-paisa drift, while every genuine block-level item is
+orders of magnitude larger) is pure rounding: the **last** asset in the block
+is restated to `block total − Σ the others`, the column then sums to the rupee,
+and no residual is reported. Anything above the tolerance is a real difference
+and takes the residual path above. `ROUNDING_TOLERANCE` is the single knob and
+lives in `src/depreciation.ts` next to the canonicaliser.
+
+**Tests that carry this** (`test/depreciation-review.test.ts`): the pump
+(10,600 net additions at 15% → exactly 1,590.00, block 1,590.00, no residual);
+a mixed put-to-use asset (20,000 long + 10,600 short in one ledger →
+`additionsFull` 20,000, `additionsHalf` 10,600, 3,795.00, `shortPeriod`
+`false`, `mixed put-to-use` note); a discounted asset (3,290,375 less a
+1,50,000 discount → 3,140,375 net → 4,71,056.25); `Σ assets == block`; and a
+residual that is **stated, not spread** (operator block opening 500,000 vs
+assets 0 → residual 75,000 on its own line with its reason).
+
+**Operational note.** The import-JSON generator reads the workbook, so a
+residual line is a hard error there: a non-ledger row carrying a non-zero
+amount stops the import rather than silently dropping a difference that belongs
+to no asset.
+
 ## 16. Engine, session and tools
 
 **`src/depreciation.ts` — pure, no Tally.** The statutory arithmetic is
@@ -881,9 +968,9 @@ export interface DepCtx {
 }
 ```
 
-Everything in §§6–12 and §15's allocation is a pure function over this: rate
-resolution, credit classification, acquisition grouping, discount netting,
-block computation, s.50, and the asset allocation. **No Tally call appears in
+Everything in §§6–12 and §15's per-asset figures is a pure function over this:
+rate resolution, credit classification, acquisition grouping, discount netting,
+block computation, s.50, and the per-asset computation. **No Tally call appears in
 this module**, so the statutory arithmetic is unit-testable against worked
 examples with nothing live in the loop — which is the whole point, because the
 Act's rules are the part that must be right and the part that does not change
@@ -904,7 +991,9 @@ Worked examples the tests must carry, all invented:
 - A block with value but no asset left, producing a short-term capital loss.
 - New plant at 20% additional depreciation; the same put to use for under 180
   days, taking 10% now with 10% carried forward.
-- An asset-wise allocation across three assets summing exactly to the block.
+- Each asset computed at its own rates across three assets summing exactly to
+  the block; a mixed put-to-use asset; a discounted asset; and a block-level
+  difference reported as a residual rather than spread (2026-09-30 amendment).
 
 **`src/depreciation-file.ts`** — the operator file reader (§13), mirroring
 `src/tds-file.ts` including `EMPTY_DEPRECIATION_OPERATOR`.
@@ -970,9 +1059,11 @@ asset's first-use date — which is the evidence behind §§7, 9, 10, 11 and 12.
 A full-year `tb_depreciation_review` (FY 2025-26) executed end-to-end against
 the live company through the gateway, via a standalone MCP client with a
 900-second timeout chain. Results: 3 blocks (15% / 40% / 10%), 132 asset rows,
-asset-wise allocation summing exactly to the block totals (1,46,77,335.70 across
-blocks), 2 critical findings — one `dep_credit_unclassified` and one
-`dep_disposal_outside_block` — and 6 warnings including `dep_opening_wdv_unverified`
+asset-wise figures summing exactly to the block totals (1,46,77,335.70 across
+blocks) — **this was the pro-rata allocation, superseded 2026-09-30; the sum
+still ties, but each asset is now computed at its own rates** — 2 critical
+findings — one `dep_credit_unclassified` and one `dep_disposal_outside_block` —
+and 6 warnings including `dep_opening_wdv_unverified`
 (no operator file, book seed reported as such), `dep_book_charge_missing` on the
 year's one late acquisition, and `dep_charge_predates_acquisition` consistent
 with the §12 observation that the annual journal predates year end.
