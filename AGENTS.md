@@ -490,6 +490,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   per member, and `as26Markdown` adds a "Shared ledger …" block. `maskReconMatch`
   must pseudonymize `members` element-wise AND `review.ts` must vault those
   names BEFORE the findings sweep runs — the 009 detail quotes them.
+  - **A shared group's 26AS gross is the SUM of every member name's gross**
+    (2026-09-30, `21aa21d`), exactly as its tax already was. `analyzeAs26` reads
+    ONE summary row per party (`summaries.find(s => s.kind === match.kind &&
+    s.nameKey === match.as26NameKey)`), which matches only the *primary* name of
+    a component: live, the CMDA two-name group reported 2,61,97,200 for
+    8,34,44,807 of receipts. A plain party must keep that single-row read; a
+    `shared` match sums over `match.members[].as26NameKey` (deduped,
+    kind-filtered) instead. The group's value basis/delta are then measured
+    against its joint ledger sales pool like any other party — do not re-add a
+    `!match.shared` guard on `valueCands` (it left the columns blank and looked
+    like a catastrophic value miss). Check **003 still skips shared groups** by
+    design §12.1; lifting that is a captain call, not a follow-up from this fix.
 - **Bill-level drill-down shipped 2026-09-24** (`src/as26-bill.ts`, pure;
   wiring/masking in `src/review.ts`; three sheets in `src/report.ts`; design
   doc §11):
