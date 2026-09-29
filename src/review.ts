@@ -1644,6 +1644,13 @@ export function createSession(
         ...(schedule ? { schedule } : {}),
       };
     });
+    // Shared-ledger groups quote every member 26AS name in their finding
+    // detail, so vault those names BEFORE the findings sweep runs (below) —
+    // an un-vaulted name would reach the model unmasked. Each name keeps its
+    // own stable pseudonym, exactly like a party of its own.
+    for (const r of result.recon) {
+      for (const m of r.match.members ?? []) vault.pseudonym(m.as26Name, "debtor");
+    }
     const maskReconMatch = (m: PartyMatch) => {
       // Each ledger keeps its own stable pseudonym (so it matches the rest of
       // the report); the group label joins them, never masks the join as one
@@ -1654,6 +1661,18 @@ export function createSession(
         ledgerNames,
         ledgerName: ledgerNames.join(" + "),
         as26Name: vault.pseudonym(m.as26Name, "debtor"),
+        // A shared group's member names and their own ledgers are masked
+        // element-wise too — the spread above would otherwise carry them out
+        // raw inside `members`.
+        ...(m.members
+          ? {
+            members: m.members.map((x) => ({
+              ...x,
+              as26Name: vault.pseudonym(x.as26Name, "debtor"),
+              ledgerNames: x.ledgerNames.map(pseudoName),
+            })),
+          }
+          : {}),
       };
     };
     const REF_MASK = (ref: string | null): string | null =>

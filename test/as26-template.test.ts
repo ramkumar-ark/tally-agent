@@ -118,19 +118,39 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     });
   });
 
-  it("refuses a ledger mapped twice (even to different 26AS names) citing the row number only", () => {
+  it("accepts one ledger mapped to two 26AS names (a shared-ledger party)", () => {
+    // The real case: a party pays under a short name and a departmental one,
+    // and the books carry both under a single Tally ledger.
+    expect(parseAs26MapTemplate(rawTemplate([
+      ["Alpha Traders", "tds", 523944, "Alpha Ledger"],
+      ["Executive Engineer Alpha Division", "tds", 1144952, "Alpha Ledger"],
+    ]))).toEqual({ mappings: [
+      { ledger: "Alpha Ledger", as26Name: "Alpha Traders" },
+      { ledger: "Alpha Ledger", as26Name: "Executive Engineer Alpha Division" },
+    ], banks: [], creditLedgers: [] });
+  });
+
+  it("round-trips a shared-ledger mapping through the generated template", () => {
+    const shared = { mappings: [
+      { ledger: "Alpha Ledger", as26Name: "Alpha Traders" },
+      { ledger: "Alpha Ledger", as26Name: "Beta Minerals" },
+    ]};
+    const buf = buildAs26MapTemplate({ deductors, map: shared, ledgers: ["Alpha Ledger"] });
+    expect(parseAs26MapTemplate(buf)).toEqual({ ...shared, banks: [], creditLedgers: [] });
+  });
+
+  it("refuses the same ledger AND 26AS name pair twice, citing the row number only", () => {
     let msg = "";
     try {
       parseAs26MapTemplate(rawTemplate([
         ["Alpha Traders", "tds", 1, "Alpha Ledger"],
-        ["Beta Minerals", "tcs", 2, "Alpha Ledger"],
+        ["ALPHA TRADERS", "tds", 1, "Alpha Ledger"],
       ]));
     } catch (e) {
       msg = (e as Error).message;
     }
     expect(msg).toMatch(/as26-map template row 3/);
     expect(msg).not.toContain("Alpha");
-    expect(msg).not.toContain("Beta");
   });
 
   it("refuses a Tally ledger with no 26AS name citing the row number only", () => {

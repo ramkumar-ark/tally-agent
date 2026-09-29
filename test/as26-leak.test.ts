@@ -165,9 +165,11 @@ describe("26AS leak doors", () => {
   it("operator-map errors cite entry indexes only, never values", () => {
     const dir = tempDir("as26-leak-err-");
     const dup = join(dir, "a.json");
+    // The refused case is an exact ledger+name repeat (a ledger may carry
+    // several names, so a shared mapping is legal and must not throw).
     writeFileSync(dup, JSON.stringify({ mappings: [
       { ledger: TANS[0], as26Name: TANS[1] },
-      { ledger: TANS[0], as26Name: TANS[2] },
+      { ledger: TANS[0], as26Name: TANS[1] },
     ]}));
     let msg = "";
     try { loadAs26Map(dup); } catch (e) { msg = (e as Error).message; }

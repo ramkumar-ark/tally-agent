@@ -23,12 +23,25 @@ describe("loadAs26Map", () => {
   it("malformed JSON throws", () => {
     expect(() => loadAs26Map(mapFile("{"))).toThrow(/as26-map/);
   });
-  it("a ledger mapped twice throws citing the entry index, never a value", () => {
+  it("a ledger mapped to two 26AS names is allowed (a shared-ledger party)", () => {
+    const shared = JSON.stringify({ mappings: [
+      { ledger: "Alpha Traders", as26Name: "Alpha Traders" },
+      { ledger: "Alpha Traders", as26Name: "Executive Engineer Alpha Division" },
+    ]});
+    expect(loadAs26Map(mapFile(shared)).mappings).toEqual([
+      { ledger: "Alpha Traders", as26Name: "Alpha Traders" },
+      { ledger: "Alpha Traders", as26Name: "Executive Engineer Alpha Division" },
+    ]);
+  });
+  it("the same ledger AND name pair twice throws citing the entry index, never a value", () => {
     const dup = JSON.stringify({ mappings: [
       { ledger: "Alpha Traders", as26Name: "Alpha Traders" },
-      { ledger: "Alpha Traders", as26Name: "Beta Traders" },
+      { ledger: "Alpha Traders", as26Name: "ALPHA TRADERS" },
     ]});
-    expect(() => loadAs26Map(mapFile(dup))).toThrow(/as26-map entry 2/);
+    let msg = "";
+    try { loadAs26Map(mapFile(dup)); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toMatch(/as26-map entry 2/);
+    expect(msg).not.toContain("Alpha");
   });
   it("repeated 26AS names with different ledgers are allowed", () => {
     const split = JSON.stringify({ mappings: [
@@ -485,6 +498,136 @@ describe("reconcileParty", () => {
     expect(r.unmatchedBooks).toHaveLength(1);
     expect(r.unmatchedBooks[0].date).toBe("20250410");
     expect(r.unmatchedAs26).toHaveLength(0);
+  });
+});
+
+// --- shared-ledger groups: ONE Tally ledger, several 26AS names ---
+
+import { buildBillRows } from "../src/as26-bill.js";
+
+const THIRD_NAME = "Alpha Works Town Office";
+
+describe("shared-ledger group (one ledger, two 26AS names)", () => {
+  // The real shape: a party that deducts under a short name and under a
+  // departmental one, both landing on a single Tally ledger. Invented names,
+  // CMDA's proportions — the books carry exactly the sum, so nothing is
+  // mismatched and the group must produce no money finding at all.
+  const SHORT = "Alpha Works Agency";
+  const DEPT = "Executive Engineer Alpha Division";
+  const LEDGER = "Alpha Works Ledger";
+  const LK = canonicalKey(LEDGER);
+  const sharedFile = (): As26File => ({
+    summaries: [
+      { kind: "tds", name: SHORT, nameKey: canonicalKey(SHORT), section: "194C", taxTotal: 523944, taxClaimed: 0, balanceCf: 0, gross: 2619720 },
+      { kind: "tds", name: DEPT, nameKey: canonicalKey(DEPT), section: "194C", taxTotal: 1144952, taxClaimed: 0, balanceCf: 0, gross: 5724760 },
+    ],
+    transactions: [
+      { kind: "tds", nameKey: canonicalKey(SHORT), date: "20250810", amount: 2619720, tax: 523944, status: "F", bookingDate: null, section: "194C" },
+      { kind: "tds", nameKey: canonicalKey(DEPT), date: "20250914", amount: 5724760, tax: 1144952, status: "F", bookingDate: null, section: "194C" },
+    ],
+    skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+  });
+  const sharedMap = { mappings: [
+    { ledger: LEDGER, as26Name: SHORT },
+    { ledger: LEDGER, as26Name: DEPT },
+  ]};
+  const books = (tax: number): BooksFacts => ({
+    deductions: [{ ledgerKey: LK, kind: "tds" as const, date: "20250901", tax, voucherType: "Journal" }],
+    sales: [],
+  });
+  const WINDOW = { fromDate: "20250401", toDate: "20251231" };
+
+  it("matchParties merges the names into ONE shared party, each name keeping its own tax", () => {
+    const { matches, gaps } = matchParties(sharedFile(), books(1668896), sharedMap, [LEDGER]);
+    expect(matches).toHaveLength(1);
+    const m = matches[0];
+    expect(m.shared).toBe(true);
+    expect(m.ledgerKeys).toEqual([LK]);
+    expect(m.ledgerName).toBe(LEDGER);
+    expect(m.as26Name).toBe(SHORT); // the first-inserted name labels the group
+    expect(m.members).toEqual([
+      { as26NameKey: canonicalKey(SHORT), as26Name: SHORT, kind: "tds", tax: 523944, ledgerNames: [LEDGER] },
+      { as26NameKey: canonicalKey(DEPT), as26Name: DEPT, kind: "tds", tax: 1144952, ledgerNames: [LEDGER] },
+    ]);
+    // neither name resurfaces as an unmapped gap, and the ledger is consumed
+    expect(gaps.filter((g) => g.reason === "unmapped")).toHaveLength(0);
+  });
+
+  it("books tax equal to the sum of the names reconciles with zero delta and no finding", () => {
+    const r = analyzeAs26(sharedFile(), books(1668896), sharedMap, [LEDGER], WINDOW);
+    expect(r.recon).toHaveLength(1);
+    expect(r.recon[0].booksTax).toBe(1668896);
+    expect(r.recon[0].as26Tax).toBe(1668896);
+    expect(r.recon[0].totalsOnly).toBe(true);
+    expect(r.findings).toEqual([]);
+  });
+
+  it("a shortfall surfaces as 009 naming every member with its own 26AS tax, no guessed split", () => {
+    const r = analyzeAs26(sharedFile(), books(1600000), sharedMap, [LEDGER], WINDOW);
+    const f = r.findings.find((x) => x.check === "as26_totals_mismatch")!;
+    expect(f).toBeTruthy();
+    expect(f.severity).toBe("critical");
+    expect(f.amount).toBe(68896);
+    expect(f.detail).toContain(SHORT);
+    expect(f.detail).toContain(DEPT);
+    expect(f.detail).toMatch(/5,23,944\.00/);   // each name's OWN figure
+    expect(f.detail).toMatch(/11,44,952\.00/);
+    expect(f.detail).toMatch(/16,68,896\.00/);  // the sum the group compares
+    expect(f.detail).toMatch(/not split between them/);
+    for (const x of r.findings) expect(x.detail).not.toMatch(/\d{6,}/);
+  });
+
+  it("the group is never paired item by item and yields no drill-down rows", () => {
+    const r = analyzeAs26(sharedFile(), books(1668896), sharedMap, [LEDGER], WINDOW);
+    const rec = r.recon[0];
+    expect(rec.paired).toEqual([]);
+    expect(rec.combinations).toEqual([]);
+    expect(rec.unmatchedBooks).toEqual([]);
+    expect(rec.unmatchedAs26).toEqual([]);
+    expect(buildBillRows(r, { deductions: books(1668896).deductions, sales: [] }, sharedFile(), WINDOW)).toEqual([]);
+  });
+
+  it("the same ledger under a TDS and a TCS name stays two parties (kind is not mixed)", () => {
+    const file = parseAs26Export(buildAs26Fixture());
+    const cross = { mappings: [
+      { ledger: "Kaveri Minerals Trading", as26Name: "Nagar Palika Nagar Bhavan" },
+      { ledger: "Kaveri Minerals Trading", as26Name: "Kaveri Minerals Trading" },
+    ]};
+    const { matches } = matchParties(file, facts([]), cross, ledgers);
+    expect(matches).toHaveLength(2);
+    expect(matches.every((m) => m.shared === undefined)).toBe(true);
+    expect(matches.map((m) => m.kind).sort()).toEqual(["tcs", "tds"]);
+  });
+
+  it("a plain one-to-one map carries no shared/members fields at all", () => {
+    const { matches } = matchParties(sharedFile(), books(1668896), { mappings: [sharedMap.mappings[0]] }, [LEDGER]);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].shared).toBeUndefined();
+    expect("members" in matches[0]).toBe(false);
+  });
+
+  it("a three-name component, one name owning two ledgers, keeps the whole picture", () => {
+    const SECOND = "Alpha Works Head Office";
+    const file: As26File = {
+      ...sharedFile(),
+      summaries: [...sharedFile().summaries, { kind: "tds", name: THIRD_NAME, nameKey: canonicalKey(THIRD_NAME), section: "194C", taxTotal: 100, taxClaimed: 0, balanceCf: 0, gross: 500 }],
+      transactions: [...sharedFile().transactions, { kind: "tds" as const, nameKey: canonicalKey(THIRD_NAME), date: "20251001", amount: 500, tax: 100, status: "F", bookingDate: null, section: "194C" }],
+    };
+    const map = { mappings: [
+      { ledger: LEDGER, as26Name: SHORT },
+      { ledger: SECOND, as26Name: SHORT },
+      { ledger: LEDGER, as26Name: DEPT },
+      { ledger: LEDGER, as26Name: THIRD_NAME },
+    ]};
+    const r = analyzeAs26(file, books(1668996), map, [LEDGER, SECOND], WINDOW);
+    expect(r.recon).toHaveLength(1);
+    expect(r.recon[0].match.ledgerKeys).toEqual([LK, canonicalKey(SECOND)]);
+    expect(r.recon[0].match.members!.map((m) => m.as26Name)).toEqual([SHORT, DEPT, THIRD_NAME]);
+    // SHORT's own ledgers are the two it was mapped to, not the group's
+    expect(r.recon[0].match.members![0].ledgerNames).toEqual([LEDGER, SECOND]);
+    expect(r.recon[0].as26Tax).toBe(1668996);
+    expect(r.recon[0].booksTax).toBe(1668996);
+    expect(r.findings).toEqual([]);
   });
 });
 

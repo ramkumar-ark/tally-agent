@@ -56,6 +56,17 @@ export interface BooksFacts { deductions: BooksDeduction[]; sales: BooksSale[]; 
  * books side. */
 export interface BankInterestMapping { as26Name: string; interestLedgers: string[]; fdLedgers: string[]; }
 
+/** One 26AS name inside a shared-ledger group, with its OWN 26AS figures.
+ * The books side of a shared group is never apportioned between members — a
+ * ledger that backs two names is reported as one party whose 26AS tax is the
+ * sum, and the per-name figures below are the reader's audit trail. */
+export interface SharedMember {
+  as26NameKey: string; as26Name: string; kind: As26Kind;
+  /** The 26AS tax total of this name for the reviewed period. */
+  tax: number;
+  /** The Tally ledgers mapped to THIS name alone, in mapping order. */
+  ledgerNames: string[];
+}
 export interface PartyMatch {
   /** Every Tally ledger mapped to this deductor/collector, canonical keys. */
   ledgerKeys: string[];
@@ -65,6 +76,12 @@ export interface PartyMatch {
   ledgerName: string;
   as26NameKey: string; as26Name: string;
   kind: As26Kind; source: "operator";
+  /** True when two or more 26AS names of one kind share a Tally ledger, so
+   * the party reconciles on TOTALS with no books-side split. Absent (not
+   * false) for a plain one-name party, so one-to-one output is unchanged. */
+  shared?: boolean;
+  /** Every name of a shared group, first-inserted first. Absent otherwise. */
+  members?: SharedMember[];
 }
 export interface As26Gap { kind: As26Kind; nameKey: string; name: string; tax: number; ledger?: string; reason: "unmapped" | "ambiguous" | "ledger-absent" | "name-absent"; }
 
@@ -154,7 +171,68 @@ export function matchParties(
       addLedgerToGroup(group, canonicalKey(l), l);
     }
   }
-  matches.push(...groupsByKey.values());
+  // Shared-ledger components: a Tally ledger legitimately backs more than one
+  // 26AS name (one party paying under a short name and a departmental one).
+  // Such names reconcile as ONE party on totals — the books tax of the shared
+  // ledger against the SUM of the names' 26AS tax — because the books carry
+  // no way to tell which name a single deduction belongs to. Components are
+  // partitioned by kind: a ledger mapped to a TDS and a TCS name stays two
+  // parties, because the books side is filtered by kind and never double counts.
+  // Emission follows groupsByKey insertion order and a component's ledgers
+  // follow first appearance, so a map with no shared ledger is byte-identical.
+  {
+    const keys = [...groupsByKey.keys()];
+    const parent = new Map<string, string>(keys.map((k) => [k, k]));
+    const find = (k: string): string => {
+      let root = k;
+      while (parent.get(root) !== root) root = parent.get(root)!;
+      let cur = k;
+      while (parent.get(cur) !== root) { const next = parent.get(cur)!; parent.set(cur, root); cur = next; }
+      return root;
+    };
+    const union = (a: string, b: string): void => { const ra = find(a); const rb = find(b); if (ra !== rb) parent.set(rb, ra); };
+    const ownerByKindLedger = new Map<string, string>();
+    for (const [k, g] of groupsByKey) {
+      for (const lk of g.ledgerKeys) {
+        const slot = `${g.kind}|${lk}`;
+        const prev = ownerByKindLedger.get(slot);
+        if (prev === undefined) ownerByKindLedger.set(slot, k);
+        else union(prev, k);
+      }
+    }
+    const components = new Map<string, PartyMatch[]>();
+    for (const k of keys) {
+      const root = find(k);
+      const comp = components.get(root);
+      if (comp) comp.push(groupsByKey.get(k)!);
+      else components.set(root, [groupsByKey.get(k)!]);
+    }
+    for (const group of components.values()) {
+      if (group.length === 1) { matches.push(group[0]); continue; }
+      const primary = group[0];
+      const ledgerKeys: string[] = [];
+      const ledgerNames: string[] = [];
+      for (const g of group) {
+        g.ledgerKeys.forEach((lk, i) => {
+          if (ledgerKeys.includes(lk)) return;
+          ledgerKeys.push(lk);
+          ledgerNames.push(g.ledgerNames[i]);
+        });
+      }
+      matches.push({
+        ...primary,
+        ledgerKeys,
+        ledgerNames,
+        ledgerName: ledgerNames.join(" + "),
+        shared: true,
+        members: group.map((g) => ({
+          as26NameKey: g.as26NameKey, as26Name: g.as26Name, kind: g.kind,
+          tax: deductors.get(`${g.kind}|${g.as26NameKey}`)?.tax ?? 0,
+          ledgerNames: [...g.ledgerNames],
+        })),
+      });
+    }
+  }
 
   for (const d of deductors.values()) {
     if (matchedNameKeys.has(`${d.kind}|${d.nameKey}`)) continue;
@@ -210,18 +288,25 @@ export function loadAs26Map(path: string, warn?: (why: string) => void): As26Map
     throw new Error("as26-map: malformed JSON — expected an object with a mappings array");
   }
   const mappings: As26MapEntry[] = [];
-  const seenLedger = new Set<string>();
+  // A ledger may legitimately stand for several 26AS names (one party paying
+  // under two names, a departmental name and a short one). Only an EXACT
+  // repeat — the same ledger against the same name — is a mistake, and it is
+  // refused: it would silently double the name's 26AS tax. The error cites the
+  // entry index only; values are company names.
+  const seenPair = new Set<string>();
   (raw.mappings ?? []).forEach((m, i) => {
     const ledger = typeof m.ledger === "string" ? m.ledger.trim() : "";
     const as26Name = typeof m.as26Name === "string" ? m.as26Name.trim() : "";
     if (!ledger || !as26Name) {
       throw new Error(`as26-map entry ${i + 1}: "ledger" and "as26Name" must both be non-empty strings`);
     }
-    const lk = canonicalKey(ledger);
-    if (seenLedger.has(lk)) {
-      throw new Error(`as26-map entry ${i + 1}: maps a ledger already mapped earlier in the file`);
+    const pair = `${canonicalKey(ledger)}|${canonicalKey(as26Name)}`;
+    if (seenPair.has(pair)) {
+      throw new Error(
+        `as26-map entry ${i + 1}: repeats a ledger and 26AS name pair already mapped earlier in the file`,
+      );
     }
-    seenLedger.add(lk);
+    seenPair.add(pair);
     mappings.push({ ledger, as26Name });
   });
   return { mappings };
@@ -885,6 +970,28 @@ export function linkInvoiceWithCapacity(
 
 export function reconcileParty(file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string): PartyRecon {
   const keySet = new Set(match.ledgerKeys);
+  // Shared-ledger group: two or more 26AS names stand on one Tally ledger, so
+  // the group reconciles on TOTALS only. The books carry no marker of which
+  // name a deduction belongs to, so pairing items between names would be
+  // guesswork: the group sums its ledgers against the sum of its names and
+  // leaves every item unmatched rather than inventing a split.
+  if (match.shared) {
+    const nameKeys = new Set((match.members ?? []).map((m) => m.as26NameKey));
+    const booksTax = round2(facts.deductions
+      .filter((d) => keySet.has(d.ledgerKey) && d.kind === match.kind)
+      .reduce((s, d) => s + d.tax, 0));
+    const rows = file.transactions.filter((t) => t.kind === match.kind && nameKeys.has(t.nameKey));
+    return {
+      match, booksTax,
+      as26Tax: round2(rows.reduce((s, t) => s + t.tax, 0)),
+      paired: [], combinations: [], ambiguous: 0,
+      unmatchedBooks: [], unmatchedAs26: [],
+      combinationSearchSkipped: false,
+      lateBookedTax: round2(rows
+        .filter((t) => t.bookingDate && t.bookingDate > toDate)
+        .reduce((s, t) => s + t.tax, 0)),
+    };
+  }
   const booksItems: ReconItem[] = [];
   facts.deductions.forEach((d, dedIdx) => {
     if (keySet.has(d.ledgerKey) && d.kind === match.kind) {
@@ -1403,8 +1510,10 @@ export function analyzeAs26(
     const toks = sections.map(sectionToken);
     const bankKeyOf = new Set((map.banks ?? []).map((b) => canonicalKey(b.as26Name)));
     const isBank = toks.some((t) => t === "194a") && bankKeyOf.has(match.as26NameKey);
-    const totalsOnly = toks.length > 0 &&
-      toks.every((t) => t === "194r" || (t === "194a" && bankKeyOf.has(match.as26NameKey)));
+    // A shared-ledger group is totals-only by construction (see
+    // reconcileParty): its names have no per-name books side to compare.
+    const totalsOnly = match.shared === true ||
+      (toks.length > 0 && toks.every((t) => t === "194r" || (t === "194a" && bankKeyOf.has(match.as26NameKey))));
     r.totalsOnly = totalsOnly;
 
     // Addendum 10: an income-side ledger credited in the same voucher that
@@ -1455,7 +1564,11 @@ export function analyzeAs26(
     // credited — and the basis is reported next to the delta.
     r.booksInterestValue = booksInterest;
     const valueCands: Array<[string, number]> = [];
-    if (partySales.length > 0) {
+    // A shared-ledger group has no single 26AS gross to compare against — the
+    // names each report their own, and the books sale pool is the ledger's
+    // joint one. Leave the value columns empty rather than measure one name's
+    // gross against the group's books.
+    if (!match.shared && partySales.length > 0) {
       valueCands.push(["taxable", booksTaxable], ["GST-inclusive", booksGross]);
     }
     if (booksInterest > 0) valueCands.push(["interest", booksInterest]);
@@ -1502,7 +1615,7 @@ export function analyzeAs26(
     // 003 — 26AS gross vs books taxable: taxable-only (captain deviation; the
     // GST-inclusive alternative is dropped from this check and re-homesteaded on
     // the Deductors sheet, whose column totals are populated elsewhere).
-    if (as26Gross > 0 && partySales.length > 0) {
+    if (!match.shared && as26Gross > 0 && partySales.length > 0) {
       const dTok = Math.abs(round2(as26Gross - booksTaxable));
       if (dTok > AS26_VALUE_TOLERANCE) {
         push(
@@ -1565,9 +1678,30 @@ export function analyzeAs26(
     // AS26_VALUE_TOLERANCE. A bank marked but mapped with no ledgers at all
     // cannot produce a books side, so it surfaces as review, not critical.
     if (totalsOnly) {
+      const taxDelta = round2(r.as26Tax - compTax);
+      if (match.shared) {
+        // Shared ledger: every member name with its OWN 26AS figures, so the
+        // reader can see which name carries which tax; the books tax is the
+        // ledger's total and is deliberately NOT split between the names.
+        const secLabel = sections.length > 0 ? sections.join(", ") : "no section";
+        const memberList = (match.members ?? [])
+          .map((m) => `${m.as26Name} (26AS tax ${money(m.tax)}, ledger ${m.ledgerNames.join(" + ")})`)
+          .join("; ");
+        const miss = Math.abs(taxDelta) > AS26_TAX_TOLERANCE;
+        // A group whose totals tie needs no finding — the shared mapping is
+        // reported on the Deductors and Mapping sheets and in the markdown.
+        if (miss) {
+          push("as26_totals_mismatch", "critical", match.as26Name, match.kind,
+            summary?.section ?? null, Math.abs(taxDelta),
+            `${count((match.members ?? []).length)} 26AS ${match.kind.toUpperCase()} names stand on the one Tally ` +
+            `ledger ${match.ledgerName}: ${memberList}. The names' 26AS tax totals ${money(r.as26Tax)} against ` +
+            `books tax of ${money(compTax)} on that ledger for the ${secLabel} entries; the books carry no marker of ` +
+            "which name a deduction belongs to, so the tax is not split between them — the totals are the comparison.",
+          );
+        }
+      } else {
       const mappingEmpty = !!bankMapEntry &&
         bankMapEntry.interestLedgers.length === 0 && bankMapEntry.fdLedgers.length === 0;
-      const taxDelta = round2(r.as26Tax - compTax);
       const taxMiss = !mappingEmpty && Math.abs(taxDelta) > AS26_TAX_TOLERANCE;
       const valMiss = isBank && !mappingEmpty && as26Gross > 0 &&
         Math.abs(round2(as26Gross - booksInterest)) > AS26_VALUE_TOLERANCE;
@@ -1587,8 +1721,9 @@ export function analyzeAs26(
             taxMiss
               ? `${head}; ${bits.join(", ")}. These sections reconcile on totals, never bill by bill.`
               : `${head}; ${bits.join(", ")}. The tax totals tie but the interest does not.`,
-          );
+            );
         }
+      }
       }
     }
     // Plain words on skip (addendum 5a): when the bounded item-combination

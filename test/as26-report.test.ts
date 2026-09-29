@@ -133,10 +133,39 @@ describe("tb_26as_review tool", () => {
     expect(res.findings.length).toBeGreaterThanOrEqual(0);
     expect(out).not.toContain("Anand Buildmart");
     const auditText = readFileSync(join(reportDir, "session-20260331T100000Z.jsonl"), "utf8").trim();
-    const entry = JSON.parse(auditText.split("\n").pop()!);
-    expect(entry.tool).toBe("tb_26as_review");
-    expect(entry.args.as26Path).toBe(as26Path);
-    expect(JSON.stringify(entry)).not.toContain("Nagar Palika");
+    const audit = JSON.parse(auditText.split("\n").pop()!);
+    expect(audit.tool).toBe("tb_26as_review");
+    expect(audit.args.as26Path).toBe(as26Path);
+    expect(JSON.stringify(audit)).not.toContain("Nagar Palika");
+  });
+
+  it("a ledger mapped to two 26AS names reconciles as one masked shared party", async () => {
+    const { tools } = harness();
+    const as26Path = join(tempDir("as26-shared-"), "export.xlsm");
+    writeFileSync(as26Path, buildAs26Fixture());
+    const mapPath = join(tempDir("as26-sharedmap-"), "as26-map.json");
+    writeFileSync(mapPath, JSON.stringify({ mappings: [
+      { ledger: "Anand Buildmart Pvt Ltd", as26Name: "Anand Buildmart Pvt Ltd" },
+      { ledger: "Anand Buildmart Pvt Ltd", as26Name: "Nagar Palika Nagar Bhavan" },
+    ]}));
+    const out = await tools.get("tb_26as_review")!({
+      fromDate: "20250401", toDate: "20260331", as26Path, as26MapPath: mapPath, company: "Demo Traders Pvt Ltd",
+      dayBookPath: writeDayBook(),
+    });
+    // One party, not two — and no real name or ledger escapes through the
+    // shared group's members, which the engine keeps raw.
+    expect(out).not.toContain("Anand Buildmart");
+    expect(out).not.toContain("Nagar Palika");
+    const res = JSON.parse(out);
+    const shared = res.recon.filter((r: { match: { shared?: boolean } }) => r.match.shared);
+    expect(shared).toHaveLength(1);
+    expect(shared[0].match.members).toHaveLength(2);
+    expect(shared[0].as26Tax).toBe(18600.15);   // 26AS detail rows of both names
+    expect(shared[0].booksTax).toBe(115000);
+    // the finding names both members by pseudonym, never by value
+    const f = res.findings.find((x: { check: string }) => x.check === "as26_totals_mismatch");
+    expect(f.party).not.toContain("Nagar");
+    expect(f.detail).toMatch(/Debtor \d/);
   });
 });
 
@@ -550,6 +579,69 @@ describe("writeAs26Report — combination sheet (addendum 7 follow-up)", () => {
       expect(cell(comboRows[0], 7)).toBe("D1");
       expect(cell(comboRows[0], 8)).toBe(17107);
       expect(cell(comboRows[0], 12)).toBe("aggregate");
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("writeAs26Report — shared-ledger group", () => {
+  it("names every 26AS name on the ledger with its own tax, on the sheet and in the markdown", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "as26-shared-"));
+    try {
+      const result = {
+        findings: [],
+        gaps: [],
+        totals: { booksTax: 1668896, as26Tax: 1668896, partiesMatched: 1, combinationExplained: 0, ambiguous: 0 },
+        mastersUnavailable: false,
+        groupsUnavailable: false,
+        skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+        counts: { credits: 0, receivableLedgers: ["TDS Receivable"] },
+        bookEvents: [],
+        fd20: [],
+        fdAuto: [],
+        bankParties: [],
+        section194QApplicable: true,
+        recon: [
+          {
+            match: {
+              kind: "tds" as const, nameKey: "nk1", ledgerKeys: ["lk"], ledgerName: "Pseudonym Ledger",
+              as26Name: "Pseudonym One", shared: true,
+              members: [
+                { as26NameKey: "nk1", as26Name: "Pseudonym One", kind: "tds" as const, tax: 523944, ledgerNames: ["Pseudonym Ledger"] },
+                { as26NameKey: "nk2", as26Name: "Pseudonym Two", kind: "tds" as const, tax: 1144952, ledgerNames: ["Pseudonym Ledger"] },
+              ],
+            },
+            booksTax: 1668896, as26Tax: 1668896, paired: [], combinations: [], ambiguous: 0,
+            unmatchedBooks: [], unmatchedAs26: [], combinationSearchSkipped: false, lateBookedTax: 0,
+            totalsOnly: true,
+          },
+        ],
+        billRows: [],
+      } as unknown as As26ReviewResult;
+      const paths = await writeAs26Report({
+        reportDir, company: "Demo Traders Pvt Ltd", fromDate: "20250401", toDate: "20260331",
+        markdown: as26Markdown(result, "Demo Traders Pvt Ltd", "20250401", "20260331"),
+        result, vault: createVault(),
+      });
+      const wb = readWorkbook(readFileSync(paths.workbookPath));
+      const cell = (r: { cells: Map<number, { value: unknown }> }, i: number) => r.cells.get(i)?.value ?? "";
+      const deductors = wb.find((s) => s.name === "Deductors")!;
+      expect(cell(deductors.rows[1], 0)).toBe("Pseudonym One + Pseudonym Two");
+      expect(cell(deductors.rows[1], 2)).toBe(1668896);
+      // The Mapping sheet lists one row per 26AS name, each with its OWN tax.
+      const mapping = wb.find((s) => s.name === "Mapping")!;
+      expect(cell(mapping.rows[1], 0)).toBe("Pseudonym One");
+      expect(cell(mapping.rows[1], 2)).toBe(523944);
+      expect(cell(mapping.rows[2], 0)).toBe("Pseudonym Two");
+      expect(cell(mapping.rows[2], 2)).toBe(1144952);
+      expect(cell(mapping.rows[2], 3)).toBe("Pseudonym Ledger");
+      const md = readFileSync(paths.markdownPath, "utf8");
+      expect(md).toContain("Shared ledger Pseudonym Ledger");
+      expect(md).toContain("Pseudonym One: 26AS tax 5,23,944.00");
+      expect(md).toContain("Pseudonym Two: 26AS tax 11,44,952.00");
+      expect(md).toContain("group total: 26AS tax 16,68,896.00 against books tax 16,68,896.00");
+      expect(md).toContain("not split between the names");
     } finally {
       rmSync(reportDir, { recursive: true, force: true });
     }

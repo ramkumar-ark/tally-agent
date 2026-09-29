@@ -431,12 +431,30 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `new Set(match.ledgerKeys)` and `analyzeAs26` looks sales up with
   `match.ledgerKeys.flatMap(...)` — any new per-party computation must
   aggregate over the whole group, never one ledger. Both loaders keep only
-  `seenLedger`: a repeated 26AS name is fine, a ledger mapped twice (same or
-  different name) — which also catches an exact duplicate row — is refused
-  citing entry/row number only. The reverse (one ledger → many deductors)
-  cannot happen and stays refused. `maskReconMatch` masks `ledgerNames`
+  `seenPair`: a repeated 26AS name is fine, a ledger mapped to SEVERAL names is
+  fine (a shared-ledger group, below), and only an exact ledger+name repeat
+  is refused, citing entry/row number only. `maskReconMatch` masks `ledgerNames`
   element-wise as well as `ledgerName`, so the original-case array never
   escapes through the `...m` spread.
+- **Shared-ledger groups (one Tally ledger, several 26AS names, 2026-09-29):**
+  `matchParties` unions the name groups that share a ledger — as connected
+  components over the bipartite name↔ledger relation, **partitioned by kind**,
+  so a ledger mapped to a TDS and a TCS name stays two parties (the books side
+  is kind-filtered, so no double count). A component with ≥2 names carries
+  `shared: true` + `members[]` (each name's own 26AS tax and ledgers); both
+  fields are ABSENT for a one-to-one party, so existing maps stay byte-identical
+  (emit order = `groupsByKey` insertion order, ledgers in first-appearance
+  order). `reconcileParty` short-circuits for a shared group: it sums the
+  group's deduped ledgers against the SUM of the names' 26AS tax and returns
+  **no** paired/combinations/unmatched items — the books carry no marker of
+  which name a deduction belongs to, so pairing items between names would be
+  guesswork. Hence `totalsOnly` is forced true: no 001/002/003/007/008, no
+  drill-down rows, and the money check is `as26_totals_mismatch` (009, critical
+  only on a real miss) listing every member name with its own tax. The Deductors
+  sheet's party cell joins the member names, the Mapping sheet emits one row
+  per member, and `as26Markdown` adds a "Shared ledger …" block. `maskReconMatch`
+  must pseudonymize `members` element-wise AND `review.ts` must vault those
+  names BEFORE the findings sweep runs — the 009 detail quotes them.
 - **Bill-level drill-down shipped 2026-09-24** (`src/as26-bill.ts`, pure;
   wiring/masking in `src/review.ts`; three sheets in `src/report.ts`; design
   doc §11):

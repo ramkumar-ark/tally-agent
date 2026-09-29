@@ -85,7 +85,7 @@ const instructions = (company: string | undefined, hasLedgers: boolean): Sheet =
       "One row per 26AS deductor/collector name. Type the matching Tally ledger name into the \"Tally ledger\" column. Leave it blank to leave that party unmapped — the reconciliation reports it as a mapping gap and computes no money checks for it.",
     ],
     [
-      "If one 26AS deductor/collector is represented by several Tally ledgers (for example a customer split across a site ledger and a head-office ledger), add another row for it with the SAME \"26AS name\" and pick the next ledger. The reconciliation sums all of them and compares the total against 26AS once, as a single party. The reverse is a mistake and is refused: a Tally ledger may map to only one 26AS name.",
+      "If one 26AS deductor/collector is represented by several Tally ledgers (for example a customer split across a site ledger and a head-office ledger), add another row for it with the SAME \"26AS name\" and pick the next ledger. The reconciliation sums all of them and compares the total against 26AS once, as a single party. The other direction is also allowed: if ONE Tally ledger genuinely backs TWO 26AS names (a party paying under a short name and a departmental one), give each name its own row with the same ledger. Those names then reconcile as one shared party on TOTALS — the ledger's books tax against the SUM of the names' 26AS tax — and are listed with each name's own 26AS figures on the Deductors sheet. The books carry no marker of which name a deduction belongs to, so the tax is never split between the names. Repeating the SAME ledger and 26AS name pair on two rows is a mistake and is refused.",
     ],
     [
       "Privacy: this file carries company and party names. Never paste its rows into chat — pass its path to tb_26as_review as as26MapPath; the file itself is read inside the gateway.",
@@ -220,8 +220,9 @@ export function buildAs26MapTemplate(opts: {
  * Parse a filled mapping template back into the same As26Map the JSON channel
  * yields, so the review merges both sources identically. Blank rows and
  * pre-filled rows whose Tally ledger is still empty are skipped. A 26AS name
- * may repeat (several rows, one ledger each), but a Tally ledger mapped twice
- * refuses, citing the ROW NUMBER only, never a name.
+ * may repeat (several rows, one ledger each) and one ledger may carry several
+ * 26AS names (one row per name); only an exact ledger+name repeat refuses,
+ * citing the ROW NUMBER only, never a name.
  */
 export function parseAs26MapTemplate(buf: Buffer): As26Map {
   const sheets = readWorkbook(buf);
@@ -260,7 +261,11 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
   };
 
   const mappings: As26MapEntry[] = [];
-  const seenLedger = new Set<string>();
+  // A Tally ledger may stand for more than one 26AS name (add one row per
+  // name, same ledger). Only an EXACT repeat of a ledger+name pair is
+  // refused — it would double that name's 26AS tax. Row number only, never a
+  // name.
+  const seenPair = new Set<string>();
   for (const r of sheet.rows.slice(1)) {
     const as26Name = cellText(r, nameCol, "26AS name");
     const ledger = cellText(r, ledgerCol, "Tally ledger");
@@ -271,13 +276,13 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
       );
     }
     if (!ledger) continue; // pre-filled name, not yet mapped
-    const lk = canonicalKey(ledger);
-    if (seenLedger.has(lk)) {
+    const pair = `${canonicalKey(ledger)}|${canonicalKey(as26Name)}`;
+    if (seenPair.has(pair)) {
       throw new Error(
-        `as26-map template row ${r.row}: maps a ledger already mapped earlier in the file`,
+        `as26-map template row ${r.row}: repeats a ledger and 26AS name pair already mapped earlier in the file`,
       );
     }
-    seenLedger.add(lk);
+    seenPair.add(pair);
     mappings.push({ ledger, as26Name });
   }
   const banks = parseBankInterestSheet(sheets);

@@ -1239,6 +1239,27 @@ export function as26Markdown(
   const recon = result.recon;
   const unmatchedBooks = recon.reduce((t, r) => t + r.unmatchedBooks.length, 0);
   const unmatchedAs26 = recon.reduce((t, r) => t + r.unmatchedAs26.length, 0);
+  lines.push("");
+  // Shared-ledger groups: names that stand on ONE Tally ledger. They reconcile
+  // as one party on totals, so list every member name with its own 26AS tax —
+  // otherwise the group row's single total would hide which name carries what.
+  for (const r of recon) {
+    if (!r.match.members) continue;
+    lines.push(
+      `Shared ledger ${r.match.ledgerName} — ${r.match.kind.toUpperCase()}: ` +
+      `${count(r.match.members.length)} 26AS names on one Tally ledger reconcile together on totals.`,
+    );
+    for (const m of r.match.members) {
+      lines.push(
+        `- ${m.as26Name}: 26AS tax ${money(m.tax)}, mapped ledger ${m.ledgerNames.join(" + ")}`,
+      );
+    }
+    lines.push(
+      `- group total: 26AS tax ${money(r.as26Tax)} against books tax ${money(r.booksTax)} on the ledger ` +
+      `(delta ${money(round2(r.booksTax - r.as26Tax))}) — the books do not say which name a deduction belongs to, so the tax is not split between the names.`,
+    );
+    lines.push("");
+  }
   lines.push(
     `Unmatched after reconciliation: ${unmatchedBooks} books entries and ${unmatchedAs26} 26AS rows — see the workbook sheets for the item detail.`,
   );
@@ -1297,7 +1318,12 @@ export async function writeAs26Report(opts: {
       { header: "search skipped", width: 12, format: "text" },
     ],
     rows: opts.result.recon.map((r) => [
-      r.match.as26Name, r.match.kind, r.as26Tax, r.booksTax,
+      // A shared-ledger group is ONE row naming every 26AS name on the ledger;
+      // each name's own 26AS tax is below the group total (Mapping sheet).
+      r.match.members
+        ? r.match.members.map((m) => m.as26Name).join(" + ")
+        : r.match.as26Name,
+      r.match.kind, r.as26Tax, r.booksTax,
       round2(r.booksTax - r.as26Tax),
       r.as26GrossValue ?? null, r.booksTaxableValue ?? null,
       r.booksInterestValue ? r.booksInterestValue : null,
@@ -1333,9 +1359,12 @@ export async function writeAs26Report(opts: {
       { header: "source", width: 10, format: "text" },
     ],
     rows: [
-      ...opts.result.recon.map((r) => [
-        r.match.as26Name, r.match.kind, r.as26Tax, r.match.ledgerName, r.match.source,
-      ]),
+      // A shared-ledger group expands to one row per 26AS name, each with its
+      // OWN 26AS tax and its own mapped ledgers — the sheet doubles as the
+      // operator's correction worksheet for a shared mapping.
+      ...opts.result.recon.flatMap((r) => (r.match.members
+        ? r.match.members.map((m) => [m.as26Name, m.kind, m.tax, m.ledgerNames.join(" + "), r.match.source])
+        : [[r.match.as26Name, r.match.kind, r.as26Tax, r.match.ledgerName, r.match.source]])),
       ...opts.result.gaps.map((g) => [
         g.name, g.kind, g.tax, g.ledger ?? "", g.reason,
       ]),
