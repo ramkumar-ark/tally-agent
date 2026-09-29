@@ -224,6 +224,23 @@ export function deductionEvents(rows: LedgerVoucherRow[], kind: As26Kind): { eve
   return { events, credits };
 }
 
+/** The one mapped deductor among the voucher's own party lines, or null when
+ * none or more than one (2026-09-29). Ambiguity is never resolved by
+ * guessing: the caller keeps today's answer and the event surfaces as an
+ * unmapped gap. */
+function soleMappedDeductorOf(
+  v: VoucherRow,
+  isPartyLedger: (name: string) => boolean,
+  isMappedDeductor: (name: string) => boolean,
+): string | null {
+  const keys = new Set<string>();
+  for (const e of v.entries) {
+    if (!isPartyLedger(e.ledger) || !isMappedDeductor(e.ledger)) continue;
+    keys.add(canonicalKey(e.ledger));
+  }
+  return keys.size === 1 ? [...keys][0] : null;
+}
+
 /** Addendum 9: the deductor behind one receivable-ledger debit.
  *
  * Deduction events are keyed by the row's display counterparty, which is the
@@ -233,14 +250,29 @@ export function deductionEvents(rows: LedgerVoucherRow[], kind: As26Kind): { eve
  * deductor's party. The voucher's own party line is the fallback evidence:
  * it wins only when the counterparty is not itself a party ledger and the
  * party line is one — otherwise the event keeps its counterparty key and
- * surfaces as an unmapped gap, never silently dropped. */
+ * surfaces as an unmapped gap, never silently dropped.
+ *
+ * 2026-09-29: that party line is not always the deductor. A retention-release
+ * journal's `partyLedgerName` is a retention/receivable bucket, which sits
+ * under Sundry Debtors like any party ledger and so won the fallback and
+ * absorbed the whole deduction. When the voucher's own mapped deductor is on
+ * the voucher it wins instead — the party-line fallback is a guess about who
+ * the deduction is for, and the mapped ledger is the operator's answer. */
 export function deductorKey(
   counterparty: string,
   voucherParty: string | null,
   isPartyLedger: (name: string) => boolean,
+  voucher?: VoucherRow,
+  isMappedDeductor?: (name: string) => boolean,
 ): string {
   if (isPartyLedger(counterparty)) return canonicalKey(counterparty);
-  if (voucherParty && isPartyLedger(voucherParty)) return canonicalKey(voucherParty);
+  if (voucherParty && isPartyLedger(voucherParty)) {
+    if (voucher && isMappedDeductor && !isMappedDeductor(voucherParty)) {
+      const mapped = soleMappedDeductorOf(voucher, isPartyLedger, isMappedDeductor);
+      if (mapped) return mapped;
+    }
+    return canonicalKey(voucherParty);
+  }
   return canonicalKey(counterparty);
 }
 
@@ -248,21 +280,37 @@ export function deductorKey(
  * projector keeps the display counterparty (the sheets stay faithful); the
  * join key moves to the voucher party wherever the counterparty is not a
  * party ledger. Events whose voucher cannot be found, or whose voucher party
- * is no party ledger either, keep their key. Returns a new array. */
+ * is no party ledger either, keep their key. Returns a new array.
+ *
+ * `isMappedDeductor` (the 26AS wiring passes the operator map's ledger keys)
+ * is what lets `deductorKey` prefer a mapped deductor over a retention bucket
+ * standing in as the voucher's party line. */
 export function rekeyDeductionsToDeductor(
   deductions: BooksDeduction[],
   vouchers: VoucherRow[],
   isPartyLedger: (name: string) => boolean,
+  isMappedDeductor?: (name: string) => boolean,
 ): BooksDeduction[] {
-  const partyOf = new Map<string, string>();
+  const voucherByIdentity = new Map<string, VoucherRow>();
   for (const v of vouchers) {
     if (v.cancelled) continue;
-    partyOf.set(`${v.date}|${v.voucherType}|${v.voucherNumber}`, v.partyLedgerName);
+    voucherByIdentity.set(
+      voucherIdentity(v.date, v.voucherType, v.voucherNumber),
+      v,
+    );
   }
   return deductions.map((d) => {
-    const party = partyOf.get(`${d.date}|${d.voucherType}|${d.voucherNumber ?? ""}`);
-    if (party === undefined) return d;
-    const key = deductorKey(d.ledgerKey, party || null, isPartyLedger);
+    const v = voucherByIdentity.get(
+      voucherIdentity(d.date, d.voucherType, d.voucherNumber),
+    );
+    if (!v) return d;
+    const key = deductorKey(
+      d.ledgerKey,
+      v.partyLedgerName || null,
+      isPartyLedger,
+      v,
+      isMappedDeductor,
+    );
     return key === d.ledgerKey ? d : { ...d, ledgerKey: key };
   });
 }

@@ -933,6 +933,36 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `length = 0` + re-push the same reference — that empties the array (killed
   6 review/report tests). Guard with `if (rekeyed)` on a nullable.
 
+## Sharp edges found on retention-release journals (2026-09-29)
+
+- A retention-release journal is SIX lines and its internal
+  `Dr Retention / Cr Warranty Liability` transfer is the largest
+  opposite-signed line of the tax row, so `counterpartyOf` named the warranty
+  bucket and `rekeyDeductionsToDeductor` then fell to `partyLedgerName` —
+  which is the retention bucket, itself a Sundry-Debtors ledger that passes
+  `isPartyLedger`. Live: one deductor's whole 45,70,053.00 read as books tax
+  0.00 and was filed against an unmapped retention bucket, inflating 26AS
+  over books and making a 194C shortfall appear where none exists.
+- **Mirror exclusion is OPT-IN (`CounterpartyHint.skipMirroredPairs`), not a
+  change to `counterpartyOf`'s default.** A line mirrored by an equal-amount,
+  opposite-signed line on a DIFFERENT ledger is an internal transfer, and
+  that is exactly what an asset transfer in `classifyMovements`
+  (`src/dep3cd.ts`) is — making it the default would reclassify depreciation
+  transfers. Only `as26Review`'s `projectLedgerRows` call opts in.
+- The mapped-deductor rule fires only where the party-line fallback would
+  have won, requires that party line to be unmapped, and needs EXACTLY ONE
+  mapped party ledger on the voucher (`soleMappedDeductorOf`). Two ⇒ today's
+  answer stands and the event surfaces as an unmapped gap. `isMappedDeductor`
+  is built from `map.mappings` alone — never the Bank Interest sheet, or a
+  bank interest posting would key its receipt to the bank instead of the
+  party.
+- **Live path unfixable gateway-side (documented limitation, 2026-09-29):**
+  `tally_get_ledger_vouchers` returns one display counterparty per row and no
+  voucher composition, so on live runs the warranty/retention attribution
+  stands and the deduction keys to the warranty bucket. Fixing it needs the
+  upstream to expose the voucher's entries per row. The day-book bundle
+  carries them, so the day-book path (now the normal one) is correct.
+
 ## Sharp edges found implementing the 3CD TDS/TCS summary (2026-09-24)
 
 - Design of record: docs/design/2026-09-24-tds-tcs-3cd-design.md. Read it before touching src/tds3cd.ts / src/tcs*.ts.

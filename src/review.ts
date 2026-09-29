@@ -1417,10 +1417,13 @@ export function createSession(
       let rows: Map<string, LedgerVoucherRow[]>;
       if (dayBook) {
         rows = new Map(
-          projectLedgerRows(voucherList, receivable.map((r) => r.name)).map((r) => [
-            canonicalKey(r.ledger),
-            r.rows,
-          ]),
+          projectLedgerRows(voucherList, receivable.map((r) => r.name), {
+            // A retention-release journal's mirrored retention⇄warranty pair
+            // is the largest opposite-sign line of the tax row, so the plain
+            // rule named the warranty ledger and the deduction never reached
+            // the deductor (2026-09-29).
+            skipMirroredPairs: true,
+          }).map((r) => [canonicalKey(r.ledger), r.rows]),
         );
       } else {
         rows = (await fetchLedgerRows(
@@ -1441,6 +1444,13 @@ export function createSession(
       // counterparty is not a party ledger and the party line is one; the
       // live path has no voucher party and is untouched. A party ledger is
       // one parked under Sundry Debtors/Creditors — not merely any asset.
+      // 2026-09-29: the operator's mapped deductors, so a retention bucket
+      // standing in as the voucher's party line cannot win over the real
+      // deductor sitting on the same voucher. Documented limitation: the live
+      // path still attributes a retention-release journal to the warranty
+      // bucket — tally_get_ledger_vouchers carries one display counterparty
+      // per row and no voucher composition, so the pair cannot be recognised
+      // there. Only the day-book bundle has the entries.
       const parentOfDed = new Map<string, string>();
       for (const l of masterPairs) parentOfDed.set(canonicalKey(l.name), l.parent);
       for (const g of groups) parentOfDed.set(canonicalKey(g.name), g.parent);
@@ -1455,8 +1465,11 @@ export function createSession(
         }
         return false;
       };
+      const mappedDeductorKeys = new Set(map.mappings.map((m) => canonicalKey(m.ledger)));
+      const isMappedDeductor = (name: string): boolean =>
+        mappedDeductorKeys.has(canonicalKey(name));
       const rekeyed = dayBook
-        ? rekeyDeductionsToDeductor(deductions, voucherList, isPartyLedger)
+        ? rekeyDeductionsToDeductor(deductions, voucherList, isPartyLedger, isMappedDeductor)
         : null;
       if (rekeyed) {
         deductions.length = 0;

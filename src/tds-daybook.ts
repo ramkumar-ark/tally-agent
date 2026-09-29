@@ -9,6 +9,29 @@ export interface CounterpartyHint {
   isDutyLedger?: (ledger: string) => boolean;
   /** Whether a ledger line is a known TDS party ledger (item 6). */
   isPartyLedger?: (ledger: string) => boolean;
+  /** Whether a same-amount mirrored transfer pair is excluded from the
+   * candidate set (2026-09-29, 26AS retention-release journals). Off by
+   * default: only the TDS-deduction projection opts in, so the display
+   * counterparty every other lane reads is unchanged. */
+  skipMirroredPairs?: boolean;
+}
+
+/** Whether a voucher line is one half of an internal transfer — an
+ * equal-amount, opposite-signed line on a DIFFERENT ledger in the same
+ * voucher. Such a pair (`Dr Retention A/c 5,00,000 / Cr Warranty Liability
+ * A/c 5,00,000`) moves value between the company's own accounts and is the
+ * counterparty of nothing. */
+function isMirroredTransfer(v: VoucherRow, index: number): boolean {
+  const self = v.entries[index];
+  if (!self || Math.abs(self.amount) <= ZERO) return false;
+  return v.entries.some(
+    (e, j) =>
+      j !== index &&
+      Math.abs(e.amount) > ZERO &&
+      Math.sign(e.amount) !== Math.sign(self.amount) &&
+      Math.abs(Math.abs(e.amount) - Math.abs(self.amount)) <= ZERO &&
+      canonicalKey(e.ledger) !== canonicalKey(self.ledger),
+  );
 }
 
 /**
@@ -17,8 +40,17 @@ export interface CounterpartyHint {
  * `Dr Expense / Cr Party (net) / Cr TDS` resolves to the expense ledger here,
  * and the deduction is re-keyed to the deductor later
  * (`rekeyDeductionsToDeductor`, src/as26.ts).
+ *
+ * `hint.skipMirroredPairs` (the TDS-deduction projection) drops an
+ * internal-transfer line from the candidate set. A retention-release journal
+ * lists a mirrored retention⇄warranty pair beside the tax lines and the
+ * customer, and that pair is the largest opposite-sign line — so the plain
+ * rule named the warranty ledger, and the deduction never reached the
+ * deductor (26AS, 2026-09-29). It is opt-in because an asset transfer
+ * (`src/dep3cd.ts`) is exactly such a pair, and there "transfer" IS the
+ * intended answer: the depreciation lane keeps the plain rule.
  */
-export function counterpartyOf(v: VoucherRow, index: number): string {
+export function counterpartyOf(v: VoucherRow, index: number, hint: CounterpartyHint = {}): string {
   const self = v.entries[index];
   if (!self) return "";
   let bestLedger = "";
@@ -27,6 +59,7 @@ export function counterpartyOf(v: VoucherRow, index: number): string {
     if (i === index) return;
     if (Math.abs(e.amount) <= ZERO) return;
     if (Math.sign(e.amount) === Math.sign(self.amount)) return;
+    if (hint.skipMirroredPairs && isMirroredTransfer(v, i)) return;
     if (Math.abs(e.amount) > Math.abs(bestAmount)) {
       bestLedger = e.ledger;
       bestAmount = e.amount;
@@ -96,7 +129,7 @@ export function deducteeCounterpartyOf(
       if (anySign) return anySign;
     }
   }
-  return counterpartyOf(v, index);
+  return counterpartyOf(v, index, hint);
 }
 
 export function projectLedgerRows(
