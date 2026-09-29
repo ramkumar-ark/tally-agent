@@ -1278,3 +1278,43 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - A not-deducted finding now ends with `creditEvidence(...)` (dates and `money()` only, never a
   name, voucher number or PAN) naming the credit that was considered — "no duty credit was found"
   sent the operator hunting a payment the books already held.
+
+## Sharp edges found adding the same-month consolidation (2026-09-29)
+
+- A Tally month-end deduction journal is booked against MANY expense vouchers of
+  the same party in the same month. `allocateSplitCredits` (`src/tds.ts`) now has
+  TWO scopes: the **month** scope (`d.consolidated = "month"`), whose whole-month
+  unpaired set is tried first and is UNBOUNDED — that is what lets one credit clear
+  any N > 4 — and only a partial month falls to the subset search bounded by
+  `CONSOLIDATION_MAX_CANDIDATES` (12); then the existing 30-day **window** scope
+  (`"window"`, `SPLIT_MAX_BOOKINGS` 4) for cross-month credits. Every bound that
+  bites raises `tds_consolidation_search_skipped` (TDS ordinal 19) in plain words
+  with both counts — never a silent skip. An exact 1:1 pairing still wins first.
+- **`TdsReviewResult.consolidations` is the ONLY place a silently covered booking
+  is visible** — a consolidated booking raises no finding at all, so a reviewer
+  learns why it counts as deducted from that list alone (masked pseudonym,
+  `displayDate`, `money()`; `TdsConsolidationSkip` never leaves the engine except
+  as a finding).
+- **A credit's deposit facts are the CREDIT's, never the share's.** Late deposit,
+  deposit mismatch and not-deposited are raised once for `ded.tax` on the credit's
+  primary booking (`creditReported`); the per-share repetition reported **734**
+  late-deposit findings for 65 credits on a real FY. A consolidated credit
+  additionally adds **no s.40(a)(ia) base**: one monthly deposit has to be
+  resolved against the 2026-09-26e month pool first, and a base spread over the
+  month's bills overstates the disallowance when the liability is only a
+  post-threshold excess (194Q read a whole month of purchases as 17.7 cr of
+  not-deposited expenditure).
+- A same-month consolidation is never `tds_late_deducted`: the credit carries the
+  month's BATCH date and a monthly-payment section is not due until the 7th of the
+  month AFTER the booking, so a journal dated inside the booking's own month is
+  not late. Testing `calendarMonths(...) === 0` was too narrow — a 01-Feb bill
+  against a 28-Feb journal reads as one month and still fired.
+- Measured on the Narayanan FY 25-26 day book (2026-09-29): not-deducted 61
+  (₹59,016.23) and short-deducted 16 (₹18,753.99) **do not move** — the
+  2026-09-26e party-month coverage rule already silences the whole-month case, so
+  the new rule's value there is per-booking attribution into `liabilities` plus
+  the `consolidations` list. Late-deducted fell 90 (₹25,32,674.72) → 37
+  (₹16,94,976.00) and 65 consolidations cover 2,177 bookings. Open follow-up
+  (deliberately untouched): the 194Q month pool is all-or-nothing per month, so
+  lump monthly payments against per-party credits leave a short month uncovered
+  and unpooled 194Q credits are still not reported.
