@@ -144,9 +144,10 @@ export function matchParties(
 export interface As26MapEntry { ledger: string; as26Name: string; }
 /** An operator-declared books-side credit (receivable) ledger: the ledger a
  *  customer's TDS/TCS is debited to, and which kind it collects. Declared on
- *  the mapping template's "Credit Ledgers" sheet; when the list is non-empty
- *  it REPLACES the name heuristic below (real books put it under Loans &
- *  Advances with no "receivable" in the name, which the heuristic cannot see). */
+ *  the mapping template's "Credit Ledgers" sheet; a kind it declares REPLACES
+ *  the name heuristic below (real books put it under Loans & Advances with no
+ *  "receivable" in the name, which the heuristic cannot see), while a kind it
+ *  declares nothing for keeps the heuristic. */
 export interface CreditLedgerMapping { ledger: string; kind: As26Kind; }
 export interface As26Map { mappings: As26MapEntry[]; banks?: BankInterestMapping[]; creditLedgers?: CreditLedgerMapping[]; }
 export const EMPTY_AS26_MAP: As26Map = { mappings: [] };
@@ -335,16 +336,17 @@ export function otherIncomeCredits(
 }
 
 /** The books-side credit (receivable) ledgers, from the operator's explicit
- *  list when it has one. Pure: the unknown-name check and the heuristic
- *  fallback belong to the wiring, which owns the ledger masters. */
+ *  list when it has one. Pure: the unknown-name check, the per-kind merge with
+ *  the heuristic, and the masters-absent fallback belong to the wiring, which
+ *  owns the ledger masters. */
 export function declaredCreditLedgers(map: As26Map): CreditLedgerMapping[] {
   return map.creditLedgers ?? [];
 }
 
 /** Receivable ledgers by name heuristic under an asset root; kind by name.
  * None ⇒ empty array — the wiring turns that into a hard operator-facing
- * error rather than a silent zero. The heuristic runs ONLY when the operator
- * declared no credit ledgers; it is never widened to cover a declared list. */
+ * error rather than a silent zero. The heuristic runs for a kind the operator
+ * declared nothing for; it is never widened to cover a declared kind. */
 export function receivableLedgers(
   ledgers: Array<{ name: string; parent: string }>,
   isAssetRoot: (group: string) => boolean,

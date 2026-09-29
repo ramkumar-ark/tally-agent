@@ -48,10 +48,14 @@ every deductor's tax reads as unbooked.
 - Fill the **Credit Ledgers** sheet for those companies: one row per ledger,
   its **TDS/TCS credit ledger** name and its **kind** (`tds` or `tcs`, the
   dropdown). A ledger may be listed only once.
-- A non-empty list is used **exactly as written**; the name rule does not run
-  alongside it. A ledger name that is not in the company's books is refused
-  with an error rather than quietly ignored, so a typo cannot silently empty
-  the books side.
+- A declared ledger is used **exactly as written**, and the name rule does not
+  run for that kind. A ledger name that is not in the company's books is
+  refused with an error rather than quietly ignored, so a typo cannot silently
+  empty the books side.
+- **The sheet overrides per kind, not as a whole.** A company whose TDS sits
+  in `TDS (FY:25-26) A/c` under Loans & Advances but whose TCS sits in a
+  rule-findable `TCS A/c` needs only the TDS row: the TCS kind keeps the name
+  rule. Declare both only when both names defeat the rule.
 - Leave the sheet blank to keep the name rule. The same applies when the
   ledger masters are unavailable: declared names are then taken on trust
   (a note goes to the log), since there is nothing to verify them against.

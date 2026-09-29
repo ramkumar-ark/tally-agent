@@ -469,10 +469,11 @@ export interface As26ReviewResult {
   mastersUnavailable: boolean;
   groupsUnavailable: boolean;
   skipped: As26Result["skipped"];
-  counts: { credits: number; receivableLedgers: string[]; /** Whether the
-   *  books-side credit ledgers came from the operator's Credit Ledgers sheet
-   *  or from the name heuristic. */
-  creditLedgerSource: "map" | "heuristic"; };
+  counts: { credits: number; receivableLedgers: string[]; /** Per kind
+   *  (tds/tcs), whether the books-side credit ledgers came from the
+   *  operator's Credit Ledgers sheet or from the name heuristic — a declared
+   *  kind replaces its own rule only. */
+  creditLedgerSource: Record<As26Kind, "map" | "heuristic">; };
   /** FD-interest books entries taxed at ~20% — not expected in 26AS
    * (design §12.4); party labels masked like the findings'. */
   fd20: Array<{ party: string; date: string; interest: number; tax: number }>;
@@ -1341,13 +1342,18 @@ export function createSession(
     // walked too: a ledger's immediate parent can be a group, not a root.
     const ancestry = [...masterPairs, ...groups];
     const mastersAbsent = mastersUnavailable || masterPairs.length === 0;
-    // The operator's explicit credit (receivable) ledger list wins outright:
-    // real books park it under Loans & Advances with no "receivable" in the
-    // name, which the heuristic below cannot see. Only when the list is empty
-    // or absent does the heuristic run, unchanged.
+    // The operator's explicit credit (receivable) ledger list wins PER KIND:
+    // real books park such a ledger under Loans & Advances with no
+    // "receivable" in the name, which the heuristic below cannot see. A kind
+    // the operator declared nothing for still runs the heuristic unchanged —
+    // declaring the year-scoped TDS ledger must not silently drop a TCS
+    // ledger the rule already finds.
     const declared = declaredCreditLedgers(map);
-    const creditLedgerSource = declared.length > 0 ? "map" : "heuristic";
-    let receivable: Array<{ name: string; kind: As26Kind }>;
+    const receivable: Array<{ name: string; kind: As26Kind }> = [];
+    const creditLedgerSource: Record<As26Kind, "map" | "heuristic"> = {
+      tds: "heuristic",
+      tcs: "heuristic",
+    };
     if (declared.length > 0) {
       if (!mastersAbsent) {
         const known = new Set(masterPairs.map((l) => canonicalKey(l.name)));
@@ -1356,8 +1362,8 @@ export function createSession(
           throw new Error(
             `as26-map: the Credit Ledgers sheet names ${unknown.length} ledger(s) that do not exist in ` +
               `${company ?? "this company"}'s books — the TDS/TCS credit ledger(s) are the asset ledgers a customer ` +
-              "debits when it deducts tax. Fix the name on that sheet, or clear the sheet to fall back to the " +
-              "TDS/TCS Receivable name rule.",
+              "debits when it deducts tax. Fix the name on that sheet, or clear that kind's rows to fall " +
+              "back to the TDS/TCS Receivable name rule for it.",
           );
         }
       } else {
@@ -1365,10 +1371,19 @@ export function createSession(
           "tally-agent: ledger masters unavailable — the Credit Ledgers sheet's names are taken on trust, unverified",
         );
       }
-      receivable = declared.map((d) => ({ name: d.ledger, kind: d.kind }));
-    } else {
-      receivable = receivableLedgers(ancestry, isAssetRoot);
-      if (receivable.length === 0 && mastersAbsent) {
+      for (const d of declared) {
+        receivable.push({ name: d.ledger, kind: d.kind });
+        creditLedgerSource[d.kind] = "map";
+      }
+    }
+    // Every kind the operator did not declare still gets the name rule — and
+    // only its own kinds, so a declared ledger is never re-found by the rule.
+    const undeclaredKinds = (["tds", "tcs"] as const).filter(
+      (k) => creditLedgerSource[k] === "heuristic" && declared.every((d) => d.kind !== k),
+    );
+    if (undeclaredKinds.length > 0) {
+      let heuristic = receivableLedgers(ancestry, isAssetRoot);
+      if (heuristic.length === 0 && mastersAbsent) {
         // Masters absent: the same name heuristic applied to every ledger the
         // period's vouchers themselves touch — the books carry the evidence.
         const names = new Set<string>();
@@ -1376,14 +1391,20 @@ export function createSession(
           if (v.cancelled) continue;
           for (const e of v.entries) names.add(e.ledger);
         }
-        receivable = [...names]
+        heuristic = [...names]
           .filter((n) => /(?:tds|tcs)/.test(canonicalKey(n)) && /receivable/i.test(n))
           .map((n) => ({
             name: n,
             kind: (/tcs/.test(canonicalKey(n)) ? "tcs" : "tds") as As26Kind,
           }));
       }
-      if (receivable.length === 0 && !mastersAbsent) {
+      receivable.push(
+        ...heuristic.filter((h) => (undeclaredKinds as readonly string[]).includes(h.kind)),
+      );
+      // The hard error belongs to the all-heuristic run only: a run that took
+      // at least one declared ledger is verified against the masters, and a
+      // company that books no TCS at all must not be told to name one.
+      if (receivable.length === 0 && declared.length === 0 && !mastersAbsent) {
         throw new Error(
           "no TDS/TCS receivable ledger found under an asset group — name the ledger 'TDS Receivable' (or 'TCS Receivable'), list it on the mapping template's Credit Ledgers sheet, or extend the rule in src/as26.ts",
         );

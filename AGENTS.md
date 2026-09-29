@@ -385,14 +385,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   (`[number]`). `tb_26as_review`'s books dates included.
 - The 26AS books-side credit ledgers are the operator's **Credit Ledgers
   sheet** on the mapping template (`As26Map.creditLedgers`, `CreditLedgerMapping
-  {ledger, kind}`, sheet name `CREDIT_SHEET`). A non-empty list REPLACES the
-  name heuristic entirely and is verified against the ledger masters (an
-  unknown name is a hard error, never dropped); empty/absent keeps the
-  heuristic + its hard error unchanged — never widen the heuristic, the
-  reason it exists is that a real ledger (`TDS (FY:25-26) A/c` under
-  `Loans & Advances (Asset)`) carries no "receivable". `counts.
-  creditLedgerSource` reports which path ran. JSON maps carry no
-  `creditLedgers` (template-only, the `banks` precedent).
+  {ledger, kind}`, sheet name `CREDIT_SHEET`). The override is **PER KIND**:
+  a kind with declared ledgers uses exactly those (verified against the ledger
+  masters — an unknown name is a hard error, never dropped), a kind with none
+  declared still runs the heuristic. Never make it whole-list: declaring only
+  the year-scoped `TDS (FY:25-26) A/c` under `Loans & Advances (Asset)` must
+  not silently drop a `TCS A/c` the rule already finds. The all-heuristic run
+  keeps its hard error; a run that took a declared ledger never raises it (a
+  company that books no TCS at all must not be told to name one). `counts.
+  creditLedgerSource` is `{tds, tcs}`, one `"map"`/`"heuristic"` per kind.
+  JSON maps carry no `creditLedgers` (template-only, the `banks` precedent).
 - `receivableLedgers` is a name heuristic (`(tds|tcs)` + `receivable` under
   an asset root) with a hard operator-facing error when it finds nothing;
   when ledger masters degrade, a voucher-entry name fallback applies. The
