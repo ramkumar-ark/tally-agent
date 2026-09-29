@@ -479,29 +479,42 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `shared: true` + `members[]` (each name's own 26AS tax and ledgers); both
   fields are ABSENT for a one-to-one party, so existing maps stay byte-identical
   (emit order = `groupsByKey` insertion order, ledgers in first-appearance
-  order). `reconcileParty` short-circuits for a shared group: it sums the
-  group's deduped ledgers against the SUM of the names' 26AS tax and returns
-  **no** paired/combinations/unmatched items — the books carry no marker of
-  which name a deduction belongs to, so pairing items between names would be
-  guesswork. Hence `totalsOnly` is forced true: no 001/002/003/007/008, no
-  drill-down rows, and the money check is `as26_totals_mismatch` (009, critical
-  only on a real miss) listing every member name with its own tax. The Deductors
-  sheet's party cell joins the member names, the Mapping sheet emits one row
-  per member, and `as26Markdown` adds a "Shared ledger …" block. `maskReconMatch`
-  must pseudonymize `members` element-wise AND `review.ts` must vault those
-  names BEFORE the findings sweep runs — the 009 detail quotes them.
-  - **A shared group's 26AS gross is the SUM of every member name's gross**
-    (2026-09-30, `21aa21d`), exactly as its tax already was. `analyzeAs26` reads
-    ONE summary row per party (`summaries.find(s => s.kind === match.kind &&
-    s.nameKey === match.as26NameKey)`), which matches only the *primary* name of
-    a component: live, the CMDA two-name group reported 2,61,97,200 for
-    8,34,44,807 of receipts. A plain party must keep that single-row read; a
-    `shared` match sums over `match.members[].as26NameKey` (deduped,
-    kind-filtered) instead. The group's value basis/delta are then measured
-    against its joint ledger sales pool like any other party — do not re-add a
-    `!match.shared` guard on `valueCands` (it left the columns blank and looked
-    like a catastrophic value miss). Check **003 still skips shared groups** by
-    design §12.1; lifting that is a captain call, not a follow-up from this fix.
+  order). **`analyzeAs26` splits a group into one Deductors row per 26AS name**
+    (`sharedPartyRows`, `src/as26.ts`): each member gets a plain one-name
+    `PartyMatch` — its own `as26Name`/`as26NameKey`, the GROUP's `ledgerKeys` so
+    the shared pool is visible, no `shared`/`members` — and
+    `reconcileParty(..., { skipBooks: claimed })` runs against a pool no earlier
+    member consumed, so the 26AS transaction-level pairing IS the attribution
+    (first member wins, the §2026-09-30 combo-reuse discipline; `dedIdx` keeps its
+    original index, which `buildBillRows` needs). `booksTax` is recomputed from
+    exactly the paired/combination entries so none is counted twice, and
+    `unmatchedBooks` is emptied. A member's value is the invoice its own
+    transaction links to (`claimedTdsCapacity` + `linkInvoiceWithCapacity`,
+    first-wins per invoice) and its `as26Gross` is its own summary rows' gross
+    sum — the old "sum the members' gross" special case is now structural (a
+    member row is an ordinary one-name party), which is what fixed the CMDA
+    group reporting 2,61,97,200 for 8,34,44,807 of receipts. Hence no member is
+    `totalsOnly`: 001/002/003/007/008 and the drill-down rows all run per name,
+    and the group's `as26_totals_mismatch` wording is dead.
+  - **The residue row is what the books side keeps honest.** Anything no name
+    claimed (deductions, invoices, other income) becomes one extra row: party
+    cell = the shared LEDGER (books-side naming), `as26Tax` 0, `as26Name` `""`
+    (so `maskReconMatch` needs its blank short-circuit), its entries as
+    `unmatchedBooks` on "Books not in 26AS" and its own 001 finding; no value
+    basis/delta and 003 silent. Σ member rows + residue = the group's books
+    total by construction, so `result.totals` never moves.
+  - **Party ids: `P<n>`, `P<n>.<i>` per name, `P<n>.u` for the residue** —
+    `<n>` is the group's FIRST row, so the residue never renumbers the group.
+    One helper, `reconPartyId(reconIdx, recon)`, feeds BOTH the Deductors sheet
+    (`report.ts`) and `billRows.partyId` (`review.ts`), which is what keeps the
+    two unmatched sheets cross-referencing the per-name rows. Ids after a group
+    shift by one (P3→P4 …): that is positional, not a defect. The Mapping sheet
+    still emits one row per member; `as26Markdown`'s "Shared ledger …" block now
+    prints one line per row plus a group total. `reconcileParty`'s own
+    `match.shared` short-circuit survives ONLY as the direct-call fallback for a
+    hand-built match — never reintroduce it as the engine's answer. Known limit:
+    `buildBillRows` keeps the whole group pool, so a member's V row may link an
+    invoice another member also linked (the "Bill value mismatch" sheet only).
 - **Bill-level drill-down shipped 2026-09-24** (`src/as26-bill.ts`, pure;
   wiring/masking in `src/review.ts`; three sheets in `src/report.ts`; design
   doc §11):
@@ -963,11 +976,13 @@ When updating this file, preserve this bar for all agents and keep entries conci
   registered in `byParty` under EVERY label of its party
   (`labelsOfRow` = own cell + 26AS name + each of its ledgers), so
   `byParty.get(f.party)` resolves whichever side the finding used.
-- The Mapping sheet keeps BOTH names ("26AS name" + "mapped ledger"), and the
-  shared-ledger Deductors row joins member 26AS names with `" + "`: it is the
-  operator's cross-reference / party-level row, not an entry label.
+- The Mapping sheet keeps BOTH names ("26AS name" + "mapped ledger"); a
+  shared-ledger group is no longer ONE joined Deductors row — it is one row per
+  26AS name (plus a residue row), so there is nothing to join.
 - **A `P<n>` party id cross-references the two unmatched sheets (captain
-  2026-09-29).** `P1`, `P2`, … in Deductors-sheet order (`recon` index + 1);
+  2026-09-29).** `P1`, `P2`, … in Deductors-sheet order (`recon` index + 1) —
+  or `P<n>.<i>` / `P<n>.u` inside a shared-ledger group, always through
+  `reconPartyId`, never a hand-built `P${i+1}`;
   `BillRow.reconIdx` carries the index out of `buildBillRows`, `as26Review`
   stamps `partyId`, and the same string sits on the Deductors row, on
   `Books not in 26AS` and on `26AS unmatched` (column B of both). It is the
