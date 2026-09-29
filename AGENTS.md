@@ -1353,3 +1353,29 @@ When updating this file, preserve this bar for all agents and keep entries conci
   (deliberately untouched): the 194Q month pool is all-or-nothing per month, so
   lump monthly payments against per-party credits leave a short month uncovered
   and unpooled 194Q credits are still not reported.
+
+## Sharp edges found fixing the 26AS combination reuse (2026-09-30)
+
+- **One books entry may explain at most ONE 26AS match, of any kind.** `reconcileParty`'s
+  `fitsByTarget` consumption loop (the tier-1/2 pools, whole-pool fallback and the rate-exact
+  capacity fallback all land in that one map) built `gTakenBooks` but never tested a candidate's
+  parts against it, so a journal that fitted two rows was consumed twice. The books side was then
+  explained by a tax the 26AS side counted once and the per-party identity
+  `Σ Books-not-in-26AS − Σ 26AS-unmatched = Deductors delta` broke by exactly that entry's tax
+  (live: 24,256 on Greater Chennai Corporation, which is how the captain found it — the sheets are
+  the tell, not the findings). The loop now resolves each fit's parts to `unmatchedBooks` indices
+  and refuses a fit touching a consumed one; targets walk in 26AS row order (earliest wins) and a
+  refused target stays unmatched together with its exclusive parts. **A new as26 group-matching
+  stage must join the same `gTaken*` discipline**, and `test/as26.test.ts`'s "combo reuse" describe
+  pins the per-party identity against `AS26_TAX_TOLERANCE × (paired + combinations)` — the slack is
+  real: an accepted match may sit one rupee off and the sheets then legitimately miss by one.
+- `as26-bill.ts` needs no change: it folds `r.combinations` into `Set<number>`s keyed by
+  `dedIdx`/`txIdx`, so it inherits the fix and keeps B/D numbering stable.
+- `totalsOnly` parties (design §12.1) carry **no** rows on the two unmatched sheets by design, so
+  a bank `totalsOnly` party never nets to its delta — read the identity only for bill-level
+  parties, and join the sheets on the `P<n>` party id (not the party name: the two sheets name
+  opposite sides).
+- `tb_write_26as_report` refuses in a fresh session ("run tb_26as_review first") — the review and
+  the report write must share one driver session, and a scratch `pause`/narrative file must already
+  exist or the driver waits forever (run it detached; a shell timeout kills the driver and loses
+  the write).
