@@ -1469,7 +1469,7 @@ export async function writeAs26Report(opts: {
       { header: "link basis", width: 14, format: "text" },
     ],
     rows: combinationRows.map(({ r, c }, k) => [
-      `C${k + 1}`, c.side, r.match.as26Name, c.targetId ?? "", c.target.date, c.target.tax,
+      `C${k + 1}`, c.side, r.match.ledgerName, c.targetId ?? "", c.target.date, c.target.tax,
       String(c.parts.length), (c.partIds ?? []).join(", "),
       c.parts.reduce((t, p) => t + p.tax, 0),
       c.invoiceRef ?? "", c.invoiceDate ?? "", c.invoiceTaxable ?? null,

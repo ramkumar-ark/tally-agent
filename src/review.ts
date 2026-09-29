@@ -1665,12 +1665,21 @@ export function createSession(
 
     // --- masking (R-P-5): parties pseudonym, refs Doc N, totals untouched ---
     const isTallyLedger = new Set(masterPairs.map((l) => canonicalKey(l.name)));
+    const ledgerName = (n: string): boolean =>
+      isTallyLedger.has(canonicalKey(n)) || ledgerGroupOf.has(canonicalKey(n));
     const pseudoName = (n: string): string => {
       if (!n) return n;
-      if (isTallyLedger.has(canonicalKey(n))) {
-        return maskLedgerName(n, ledgerGroupOf.get(canonicalKey(n)) ?? "", c, vault);
+      // A party can own several Tally ledgers (a shared ledger, or a 26AS
+      // name split across two ledgers): the engine's party label is then the
+      // " + "-joined form. Mask it element-wise so it equals the sheet's
+      // ledger-name label — one compound pseudonym would not match, and its
+      // stored "real" value would be a masked string, which de-masking on
+      // disk would write out as an alias.
+      if (n.includes(" + ")) {
+        const parts = n.split(" + ");
+        if (parts.every((p) => p && ledgerName(p))) return parts.map((p) => pseudoName(p)).join(" + ");
       }
-      if (ledgerGroupOf.has(canonicalKey(n))) {
+      if (ledgerName(n)) {
         return maskLedgerName(n, ledgerGroupOf.get(canonicalKey(n)) ?? "", c, vault);
       }
       return vault.pseudonym(n, "debtor");
@@ -1686,7 +1695,7 @@ export function createSession(
       });
       return {
         ...f,
-        party: vault.pseudonym(f.party, "debtor"),
+        party: pseudoName(f.party),
         detail: scrubSecrets(maskKnownNames(f.detail, vault)),
         ...(schedule ? { schedule } : {}),
       };
@@ -1780,17 +1789,19 @@ export function createSession(
     // --- bill rows (masking R-P-5): the engine rows pseudonymed like the
     // findings, so every row's party label equals its party's finding label
     // and the row-id pointers below line up. Party labels are the masked
-    // 26AS deductor names (addendum 5a); booksded rows key on a ledger key,
-    // so canonic both label maps and look up either. ---
-    const byLedgerParty = new Map<string, string>(); // canonical ledger key → masked 26AS name
+    // TALLY LEDGER names (the workbook's Deductors sheet is the one place the
+    // 26AS deductor name is shown); booksded rows key on a ledger key, so
+    // canonically key both label maps and look up either. A multi-ledger or
+    // shared group's ledgerName is already the " + "-joined masked form. ---
+    const byLedgerParty = new Map<string, string>(); // canonical ledger key → masked ledger name
     const ledgerOrder = new Map<string, number>();   // canonical ledger key → recon index (min)
     const partyIndex = new Map<string, number>();    // as26NameKey → recon index
-    const partyLabel = new Map<string, string>();    // as26NameKey → masked 26AS name
+    const partyLabel = new Map<string, string>();    // as26NameKey → masked ledger name(s)
     recon.forEach((m, i) => {
       if (!partyIndex.has(m.match.as26NameKey)) partyIndex.set(m.match.as26NameKey, i);
-      if (!partyLabel.has(m.match.as26NameKey)) partyLabel.set(m.match.as26NameKey, m.match.as26Name);
+      if (!partyLabel.has(m.match.as26NameKey)) partyLabel.set(m.match.as26NameKey, m.match.ledgerName);
       for (const k of m.match.ledgerKeys) {
-        byLedgerParty.set(k, m.match.as26Name);
+        byLedgerParty.set(k, pseudoKey(k));
         const prev = ledgerOrder.get(k);
         if (prev === undefined || i < prev) ledgerOrder.set(k, i);
       }
@@ -1899,7 +1910,7 @@ export function createSession(
       if (parts.length > 0) f.detail += ` ${parts.join("; ")}.`;
     }
 
-    const fd20BankLabel = new Map(recon.map((r) => [r.match.as26NameKey, r.match.as26Name]));
+    const fd20BankLabel = new Map(recon.map((r) => [r.match.as26NameKey, r.match.ledgerName]));
     const fd20 = result.fd20.map((e) => ({
       party: fd20BankLabel.get(e.nameKey) ?? pseudoKey(e.nameKey),
       date: displayDate(e.date),

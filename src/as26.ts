@@ -1619,7 +1619,7 @@ export function analyzeAs26(
         const fdInterest = round2(fd20Entries.reduce((s, e) => s + e.interest, 0));
         const fdTax = round2(fd20Entries.reduce((s, e) => s + e.tax, 0));
         fd20All.push(...fd20Entries);
-        push("fd_20pct_tds", "review", match.as26Name, match.kind, summary?.section ?? null, fdTax,
+        push("fd_20pct_tds", "review", match.ledgerName, match.kind, summary?.section ?? null, fdTax,
           `${fd20Entries.length} FD interest entry/entries carry books TDS of approx 20% of the interest ` +
           `(interest ${money(fdInterest)}, tax ${money(fdTax)}): the bank deducted the higher rate, often for a ` +
           "missing PAN, and these entries are not expected to reflect in 26AS. Listed on the 'FD interest 20% TDS' sheet.");
@@ -1665,7 +1665,7 @@ export function analyzeAs26(
       const schedule = capSchedule(partySales.map((s) => ({
         label: s.ref ?? displayDate(s.date), amount: s.gross, date: s.date,
       })));
-      push("books_tax_not_in_26as", "critical", match.as26Name, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
+      push("books_tax_not_in_26as", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessBooks, detail, schedule);
     }
     }
 
@@ -1680,7 +1680,7 @@ export function analyzeAs26(
         `26AS ${match.kind.toUpperCase()} tax of ${money(r.as26Tax)} against books tax of ${money(r.booksTax)}` +
         (latest !== "00000000" ? `; latest booking date ${displayDate(latest)}` : "") +
         (statuses ? `; booking statuses seen: ${statuses}` : "");
-      push("as26_tax_not_in_books", "critical", match.as26Name, match.kind, summary?.section ?? null, excessAs26, detail);
+      push("as26_tax_not_in_books", "critical", match.ledgerName, match.kind, summary?.section ?? null, excessAs26, detail);
     }
     }
 
@@ -1691,7 +1691,7 @@ export function analyzeAs26(
       const dTok = Math.abs(round2(as26Gross - booksTaxable));
       if (dTok > AS26_VALUE_TOLERANCE) {
         push(
-          "assessable_value_mismatch", "warning", match.as26Name, match.kind, summary?.section ?? null,
+          "assessable_value_mismatch", "warning", match.ledgerName, match.kind, summary?.section ?? null,
           dTok,
           `26AS gross receipts of ${money(as26Gross)} against books taxable of ${money(booksTaxable)}: the books taxable is out by ${money(dTok)} (tolerance ${money(AS26_VALUE_TOLERANCE)}). Bill-level value rows, where present, carry the per-invoice detail.`,
         );
@@ -1710,7 +1710,7 @@ export function analyzeAs26(
         ...r.unmatchedAs26.map((i) => ({ label: displayDate(i.date), amount: i.tax, date: i.date })),
       ]);
       push(
-        "unresolved_combination", "review", match.as26Name, match.kind, summary?.section ?? null,
+        "unresolved_combination", "review", match.ledgerName, match.kind, summary?.section ?? null,
         Math.max(sumB, sumA),
         `Totals reconcile within tolerance (${money(r.booksTax)} books against ${money(r.as26Tax)} 26AS) but ` +
         `${r.unmatchedBooks.length} books item(s) and ${r.unmatchedAs26.length} 26AS item(s) stay unexplained` +
@@ -1724,7 +1724,7 @@ export function analyzeAs26(
     // 005 — 26AS credits landed outside the reviewed window
     if (r.lateBookedTax > 0) {
       push(
-        "late_booking", "review", match.as26Name, match.kind, summary?.section ?? null, r.lateBookedTax,
+        "late_booking", "review", match.ledgerName, match.kind, summary?.section ?? null, r.lateBookedTax,
         `${money(r.lateBookedTax)} of 26AS tax was booked after ${displayDate(opts.toDate)} — outside the reviewed window, so books and export totals may reconcile once the window is extended (timing possible).`,
       );
     }
@@ -1735,7 +1735,7 @@ export function analyzeAs26(
     if (!totalsOnly) {
     if (r.booksTax > 0 && partySales.length === 0 && match.kind === "tds") {
       push(
-        "deduction_without_sale", "review", match.as26Name, match.kind, summary?.section ?? null, r.booksTax,
+        "deduction_without_sale", "review", match.ledgerName, match.kind, summary?.section ?? null, r.booksTax,
         "Books carry the deduction but no sale entry exists for this customer in the period — the deduction may sit against a prior-period sale or a receipt (not asserted).",
       );
     }
@@ -1763,7 +1763,7 @@ export function analyzeAs26(
         // A group whose totals tie needs no finding — the shared mapping is
         // reported on the Deductors and Mapping sheets and in the markdown.
         if (miss) {
-          push("as26_totals_mismatch", "critical", match.as26Name, match.kind,
+          push("as26_totals_mismatch", "critical", match.ledgerName, match.kind,
             summary?.section ?? null, Math.abs(taxDelta),
             `${count((match.members ?? []).length)} 26AS ${match.kind.toUpperCase()} names stand on the one Tally ` +
             `ledger ${match.ledgerName}: ${memberList}. The names' 26AS tax totals ${money(r.as26Tax)} against ` +
@@ -1782,13 +1782,13 @@ export function analyzeAs26(
         const head = `26AS ${match.kind.toUpperCase()} ${secLabel} totals: tax ${money(r.as26Tax)}` +
           (as26Gross > 0 ? `, amount paid/credited ${money(as26Gross)}` : "");
         if (mappingEmpty) {
-          push("as26_totals_mismatch", "review", match.as26Name, match.kind, summary?.section ?? null, r.as26Tax,
+          push("as26_totals_mismatch", "review", match.ledgerName, match.kind, summary?.section ?? null, r.as26Tax,
             `${head}. The Bank Interest mapping names this bank but none of its interest income or FD ledgers, ` +
             "so no books totals could be compared; fill the ledger names and re-run.");
         } else {
           const bits = [`books tax total ${money(compTax)}`];
           if (valMiss) bits.unshift(`books interest total ${money(booksInterest)} against`);
-          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", match.as26Name, match.kind,
+          push("as26_totals_mismatch", taxMiss ? "critical" : "warning", match.ledgerName, match.kind,
             summary?.section ?? null, taxMiss ? Math.abs(taxDelta) : Math.abs(round2(as26Gross - booksInterest)),
             taxMiss
               ? `${head}; ${bits.join(", ")}. These sections reconcile on totals, never bill by bill.`

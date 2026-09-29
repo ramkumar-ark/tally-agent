@@ -892,10 +892,21 @@ When updating this file, preserve this bar for all agents and keep entries conci
   unmatched. Combined with the bounded subset search, 11+1 book-journals
   against one 26AS row is the canonical case (B1–B11/D1).
 - `as26Review`'s 5th argument is the MAP PATH STRING, not a parsed map.
-- Findings/billRows/byParty party labels are the **26AS name masked with
-  `vault.pseudonym(_, "debtor")`** everywhere consistently (findings, bill
-  rows, fd20, byLedgerParty) — mixing roles breaks the sheet row-id pointer
-  join. Party cells no longer show the ledger join.
+- Party labels are the **Tally LEDGER name** (masked with `pseudoName`, i.e.
+  `maskLedgerName`), everywhere except the workbook's **Deductors** sheet,
+  whose party cell is the 26AS deductor name (`vault.pseudonym(_, "debtor")`,
+  member names joined by `" + "` for a shared group). Findings, bill rows
+  (B/D/V), fd20, `byLedgerParty` and the Combination matches sheet all carry
+  the ledger name — the row-id pointer join (`byParty`) depends on the
+  findings' label equalling the sheet rows' label, so the two must never
+  diverge. Findings that have no ledger by nature keep naming the 26AS party
+  they report on: `mapping_gap` (`g.ledger ?? g.name`), `export_inconsistent`
+  (`s.name`), `live_rows_unattached`, `fd_ledgers_unassigned`. A party's
+  label is `match.ledgerName` = its ledger names joined by `" + "`, and
+  `pseudoName` masks that form element-wise — never compound-pseudonym it,
+  or de-masking would write an alias out on disk.
+- The Mapping sheet keeps BOTH names ("26AS name" + "mapped ledger"): it is
+  the operator's cross-reference, not a party label.
 - Bank parties report ONE books-tax channel (the operator-mapped events),
   both in check 009 and on the Deductors sheet; value delta picks the
   closest basis (taxable / GST-inclusive / interest) and names it.
