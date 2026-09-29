@@ -383,6 +383,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   session boundary (schedule labels, recon items, book events): a bare
   `YYYYMMDD` string in any outbound string is eaten by `scrubDigits`
   (`[number]`). `tb_26as_review`'s books dates included.
+- The 26AS books-side credit ledgers are the operator's **Credit Ledgers
+  sheet** on the mapping template (`As26Map.creditLedgers`, `CreditLedgerMapping
+  {ledger, kind}`, sheet name `CREDIT_SHEET`). A non-empty list REPLACES the
+  name heuristic entirely and is verified against the ledger masters (an
+  unknown name is a hard error, never dropped); empty/absent keeps the
+  heuristic + its hard error unchanged — never widen the heuristic, the
+  reason it exists is that a real ledger (`TDS (FY:25-26) A/c` under
+  `Loans & Advances (Asset)`) carries no "receivable". `counts.
+  creditLedgerSource` reports which path ran. JSON maps carry no
+  `creditLedgers` (template-only, the `banks` precedent).
 - `receivableLedgers` is a name heuristic (`(tds|tcs)` + `receivable` under
   an asset root) with a hard operator-facing error when it finds nothing;
   when ledger masters degrade, a voucher-entry name fallback applies. The

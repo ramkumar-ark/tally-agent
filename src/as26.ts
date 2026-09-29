@@ -142,7 +142,13 @@ export function matchParties(
 }
 
 export interface As26MapEntry { ledger: string; as26Name: string; }
-export interface As26Map { mappings: As26MapEntry[]; banks?: BankInterestMapping[]; }
+/** An operator-declared books-side credit (receivable) ledger: the ledger a
+ *  customer's TDS/TCS is debited to, and which kind it collects. Declared on
+ *  the mapping template's "Credit Ledgers" sheet; when the list is non-empty
+ *  it REPLACES the name heuristic below (real books put it under Loans &
+ *  Advances with no "receivable" in the name, which the heuristic cannot see). */
+export interface CreditLedgerMapping { ledger: string; kind: As26Kind; }
+export interface As26Map { mappings: As26MapEntry[]; banks?: BankInterestMapping[]; creditLedgers?: CreditLedgerMapping[]; }
 export const EMPTY_AS26_MAP: As26Map = { mappings: [] };
 
 /**
@@ -328,9 +334,17 @@ export function otherIncomeCredits(
   return out;
 }
 
+/** The books-side credit (receivable) ledgers, from the operator's explicit
+ *  list when it has one. Pure: the unknown-name check and the heuristic
+ *  fallback belong to the wiring, which owns the ledger masters. */
+export function declaredCreditLedgers(map: As26Map): CreditLedgerMapping[] {
+  return map.creditLedgers ?? [];
+}
+
 /** Receivable ledgers by name heuristic under an asset root; kind by name.
  * None ⇒ empty array — the wiring turns that into a hard operator-facing
- * error rather than a silent zero. */
+ * error rather than a silent zero. The heuristic runs ONLY when the operator
+ * declared no credit ledgers; it is never widened to cover a declared list. */
 export function receivableLedgers(
   ledgers: Array<{ name: string; parent: string }>,
   isAssetRoot: (group: string) => boolean,
@@ -1240,6 +1254,10 @@ export interface As26Result {
   /** Auto-assigned FD ledgers (addendum 3): audit rows for the workbook —
    * ledger, assigned bank, and which rule fired. Names on disk only. */
   fdAuto: { ledger: string; bank: string; rule: FdRule }[];
+  /** FD ledgers the auto-assignment could not place on any bank. The AS26-011
+   * finding counts them; the workbook's auto-assign sheet NAMES them, so the
+   * operator can act on the count. Names on disk only. */
+  fdUnassigned: string[];
 }
 
 import { as26FindingId, type As26CheckId, type As26Finding, type As26ScheduleRow } from "./types.js";
@@ -1502,13 +1520,13 @@ export function analyzeAs26(
 
   // Addendum 3 — FD ledgers that could not be auto-assigned to any Bank
   // Interest bank: one review finding, counts and amounts only; the ledger
-  // names appear on the workbook's auto-assignment sheet, never here.
+  // names are carried out on the workbook's auto-assignment sheet, never here.
   if (facts.fdAuto && facts.fdAuto.unassigned.length > 0) {
     push("fd_ledgers_unassigned", "review", "FD ledgers (unassigned)", "tds", null, facts.fdAuto.interest,
       `${facts.fdAuto.unassigned.length} fixed-deposit ledger(s) under Deposits (Asset) could not be assigned to any ` +
       `bank on the Bank Interest sheet (interest-side credit ${money(facts.fdAuto.interest)}): neither a distinctive ` +
-      "name token nor a single listed bank resolved them. Listed on the 'FD ledger auto-assign' sheet with the rule " +
-      "that fired for the assigned ones — map them explicitly there if they belong to a bank.");
+      "name token nor a single listed bank resolved them. They are listed by name on the report's 'FD ledger auto-assign' " +
+      "sheet, marked unassigned — map them there if they belong to a bank.");
   }
 
   // 004 — mapping gaps: no money checks ran for these parties
@@ -1567,5 +1585,5 @@ export function analyzeAs26(
     combinationExplained: recons.reduce((s, r) => s + r.combinations.length, 0),
     ambiguous: recons.reduce((s, r) => s + r.ambiguous, 0),
   };
-  return { findings, recon: recons, gaps, totals, skipped: file.skipped, fd20: fd20All, fdAuto: (facts.fdAuto?.rows ?? []).filter((r) => r.bank && r.rule).map((r) => ({ ledger: r.ledger, bank: r.bank as string, rule: r.rule as FdRule })) };
+  return { findings, recon: recons, gaps, totals, skipped: file.skipped, fd20: fd20All, fdAuto: (facts.fdAuto?.rows ?? []).filter((r) => r.bank && r.rule).map((r) => ({ ledger: r.ledger, bank: r.bank as string, rule: r.rule as FdRule })), fdUnassigned: facts.fdAuto?.unassigned ?? [] };
 }

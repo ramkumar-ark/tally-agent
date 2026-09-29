@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { buildWorkbook, type Sheet } from "./xlsx.js";
 import { readWorkbook, type GridRow, type GridSheet } from "./xlsx-read.js";
 import { canonicalKey } from "./key.js";
-import { loadAs26Map, round2, EMPTY_AS26_MAP, type As26Map, type As26MapEntry, type BankInterestMapping } from "./as26.js";
+import { loadAs26Map, round2, EMPTY_AS26_MAP, type As26Map, type As26MapEntry, type BankInterestMapping, type CreditLedgerMapping } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 
 /**
@@ -101,10 +101,14 @@ const instructions = (company: string | undefined, hasLedgers: boolean): Sheet =
       "Banks: some banks deduct TDS on fixed-deposit interest. On the 'Bank Interest' sheet, write one row per ledger — the bank's name exactly as it appears in 26AS, then its interest income ledger and/or FD ledger. Presence on that sheet marks the 26AS name a bank: its 194A entries then reconcile on TOTALS (never bill by bill). Leave the sheet empty if no bank interest is involved.",
     ],
     [
-      "The FD ledger column is OPTIONAL. Fixed-deposit ledgers under the Deposits (Asset) group are detected automatically (an FD token in the ledger name) and assigned to a bank by its name — a distinctive word or short form of the bank's name inside the FD ledger name (e.g. UBI, UB, SBI), or, when the Bank Interest sheet lists exactly one bank, that bank. An explicit FD ledger here still wins. Ledger names appear on the report's 'FD ledger auto-assign' sheet with the rule that fired.",
+      "The FD ledger column is OPTIONAL. Fixed-deposit ledgers under the Deposits (Asset) group are detected automatically (an FD token in the ledger name) and assigned to a bank by its name — a distinctive word or short form of the bank's name inside the FD ledger name (e.g. UBI, UB, SBI), or, when the Bank Interest sheet lists exactly one bank, that bank. An explicit FD ledger here still wins. Ledger names appear on the report's 'FD ledger auto-assign' sheet with the rule that fired; those that could not be assigned are listed there too, marked unassigned.",
+    ],
+    [
+      "TDS/TCS credit ledgers: the asset ledgers a customer DEBITS when it deducts tax from your invoices. Left the sheet empty, the review looks for a 'TDS Receivable'-style name under an asset group — which misses a ledger named e.g. 'TDS (FY:25-26) A/c' under Loans & Advances. If your books name it differently, write it on the 'Credit Ledgers' sheet with its kind (tds or tcs) and the review uses exactly those ledgers, ignoring the name rule. A name that is not a ledger in the books is refused.",
     ],
     ["Worked example (invented names only):"],
     ["Mapping | Sample Builders LLP | tds | 12,000.00 | Sample Builders"],
+    ["Credit Ledgers | TDS Receivable A/c | tds"],
   ],
 });
 
@@ -132,6 +136,34 @@ function bankInterestSheet(ledgers: string[]): Sheet {
       { header: "FD ledger", width: 34, format: "text", ...(validation ? { validation } : {}) },
     ],
     rows: [],
+  };
+}
+
+/** The operator-declared books-side credit (receivable) ledgers: the ledger a
+ *  customer debits when it deducts TDS/TCS, plus which kind it collects. A
+ *  non-empty sheet REPLACES the review's name heuristic (it cannot see a
+ *  ledger parked under Loans & Advances with no "receivable" in its name).
+ *  Pre-filled from the map in force, so re-fill round-trips. */
+export const CREDIT_SHEET = "Credit Ledgers";
+
+function creditLedgerSheet(ledgers: string[], declared: CreditLedgerMapping[]): Sheet {
+  const validation = ledgers.length > 0
+    ? { formula: ledgerRange(ledgers.length + 1) }
+    : undefined;
+  return {
+    name: CREDIT_SHEET,
+    columns: [
+      {
+        header: "TDS/TCS credit ledger",
+        width: 34,
+        format: "text",
+        ...(validation ? { validation } : {}),
+      },
+      // Two values only: short enough for the inline list, which the ledger
+      // range could not be (thousands of names, commas and quotes).
+      { header: "kind", width: 6, format: "text", validation: { list: ["tds", "tcs"] } },
+    ],
+    rows: declared.map((c) => [c.ledger, c.kind]),
   };
 }
 
@@ -179,6 +211,7 @@ export function buildAs26MapTemplate(opts: {
     instructions(opts.company, ledgers.length > 0),
     mapping,
     bankInterestSheet(ledgers),
+    creditLedgerSheet(ledgers, opts.map.creditLedgers ?? []),
     ledgerReferenceSheet(ledgers),
   ]);
 }
@@ -248,7 +281,7 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
     mappings.push({ ledger, as26Name });
   }
   const banks = parseBankInterestSheet(sheets);
-  return { mappings, banks };
+  return { mappings, banks, creditLedgers: parseCreditLedgerSheet(sheets) };
 }
 
 const BANK_TOKENS = {
@@ -323,6 +356,77 @@ function parseBankInterestSheet(sheets: GridSheet[]): BankInterestMapping[] {
     }
   }
   return [...banks.values()];
+}
+
+/** The optional Credit Ledgers sheet: the operator's explicit books-side
+ *  credit (receivable) ledgers, one per row with its kind. A missing sheet is
+ *  normal (the review falls back to its name heuristic). Every error cites
+ *  sheet, row, column letter + header — never a cell value. */
+function parseCreditLedgerSheet(sheets: GridSheet[]): CreditLedgerMapping[] {
+  const sheet = sheets.find((s) => normHeader(s.name) === "creditledgers");
+  if (!sheet) return [];
+  const header: GridRow | undefined = sheet.rows[0];
+  const byHeader = new Map<string, number>();
+  for (const [idx, c] of header?.cells ?? []) {
+    if (typeof c.value !== "string") continue;
+    const k = normHeader(c.value);
+    if (!byHeader.has(k)) byHeader.set(k, idx);
+  }
+  const ledgerCol =
+    byHeader.get("tdstcscreditledger") ??
+    byHeader.get("creditledger") ??
+    byHeader.get("tallyledger") ??
+    byHeader.get("ledger");
+  if (ledgerCol === undefined) {
+    throw new Error(
+      "as26-map template: the 'Credit Ledgers' sheet needs a \"TDS/TCS credit ledger\" header column" +
+        ` — found headers: ${[...byHeader.keys()].join(", ") || "none"}`,
+    );
+  }
+  const kindCol = byHeader.get("kind") ?? byHeader.get("tdstcskind") ?? byHeader.get("type");
+  const out: CreditLedgerMapping[] = [];
+  const seenLedger = new Set<string>();
+  for (const r of sheet.rows.slice(1)) {
+    const cell = (col: number | undefined, headerName: string): string | undefined => {
+      if (col === undefined) return undefined;
+      const c = r.cells.get(col);
+      if (!c || c.value === null || String(c.value).trim() === "") return undefined;
+      if (typeof c.value !== "string") {
+        throw new Error(
+          `as26-map template row ${r.row}, column ${colLetter(col)} (${headerName}) on the Credit Ledgers sheet: cell is numeric — retype it as text`,
+        );
+      }
+      return String(c.value).trim();
+    };
+    const ledger = cell(ledgerCol, "TDS/TCS credit ledger");
+    const kindText = cell(kindCol, "kind");
+    if (!ledger && !kindText) continue;
+    if (!ledger) {
+      throw new Error(
+        `as26-map template row ${r.row} on the Credit Ledgers sheet: "kind" is filled but "TDS/TCS credit ledger" is blank`,
+      );
+    }
+    if (!kindText) {
+      throw new Error(
+        `as26-map template row ${r.row}, column ${colLetter(kindCol ?? 0)} (kind) on the Credit Ledgers sheet: choose tds or tcs`,
+      );
+    }
+    const kind = normHeader(kindText);
+    if (kind !== "tds" && kind !== "tcs") {
+      throw new Error(
+        `as26-map template row ${r.row}, column ${colLetter(kindCol ?? 0)} (kind) on the Credit Ledgers sheet: expected tds or tcs`,
+      );
+    }
+    const lkey = canonicalKey(ledger);
+    if (seenLedger.has(lkey)) {
+      throw new Error(
+        `as26-map template row ${r.row} on the Credit Ledgers sheet: names a ledger already named earlier on the sheet`,
+      );
+    }
+    seenLedger.add(lkey);
+    out.push({ ledger, kind });
+  }
+  return out;
 }
 
 /** The template loader: a missing file degrades to empty with a warning, like the JSON map. */

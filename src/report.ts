@@ -1466,6 +1466,9 @@ export async function writeAs26Report(opts: {
     ],
   };
 
+  // The FD audit sheet carries BOTH outcomes: the unassigned ledgers first
+  // (AS26-011 counts them, so the operator must be able to see which), marked
+  // in the rule column, then each auto-assigned row with the rule that fired.
   const fdAutoSheet: Sheet = {
     name: "FD ledger auto-assign",
     columns: [
@@ -1475,8 +1478,11 @@ export async function writeAs26Report(opts: {
       { header: "rule", width: 12, format: "text" },
     ],
     rows: [
+      ...(opts.result.fdUnassigned ?? []).map((ledger, i) => [
+        `FAS-${i + 1}`, ledger, "unassigned", "unassigned",
+      ]),
       ...(opts.result.fdAuto ?? []).map((a, i) => [
-        `FAS-${i + 1}`, a.ledger, a.bank, a.rule,
+        `FAS-${(opts.result.fdUnassigned?.length ?? 0) + i + 1}`, a.ledger, a.bank, a.rule,
       ]),
     ],
   };

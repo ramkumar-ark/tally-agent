@@ -35,6 +35,29 @@ Excel template, the same way the TDS review takes a filled TDS template.
 4. **Pass the filled file back.** Give its path to `tb_26as_review` as
    `as26MapPath` and re-run. Repeat until the gaps close.
 
+## The TDS/TCS credit ledgers
+
+The books side of a 194C/206CL reconciliation reads the tax a customer
+**deducted** from your ledger — the asset ledger that is debited when TDS or
+TCS is booked. When the sheet is blank the review picks those ledgers by a name
+rule (TDS/TCS + "receivable", under an asset group) and fails loudly if it
+finds none. Plenty of real companies name that ledger something else —
+`TDS (FY:25-26) A/c` under `Loans & Advances (Asset)`, for instance — and then
+every deductor's tax reads as unbooked.
+
+- Fill the **Credit Ledgers** sheet for those companies: one row per ledger,
+  its **TDS/TCS credit ledger** name and its **kind** (`tds` or `tcs`, the
+  dropdown). A ledger may be listed only once.
+- A non-empty list is used **exactly as written**; the name rule does not run
+  alongside it. A ledger name that is not in the company's books is refused
+  with an error rather than quietly ignored, so a typo cannot silently empty
+  the books side.
+- Leave the sheet blank to keep the name rule. The same applies when the
+  ledger masters are unavailable: declared names are then taken on trust
+  (a note goes to the log), since there is nothing to verify them against.
+- This is a template-only input: a JSON mapping file carries party mappings
+  only, like the Bank Interest sheet's bank list.
+
 ## Bank interest (s.194A) and fixed deposits
 
 Some banks/deductors report interest in many small amounts that can never be
@@ -52,9 +75,10 @@ them:
   as a standalone token) inside the FD ledger name, or, when this sheet
   lists exactly one bank, that bank. An explicit FD ledger here still wins.
   The report's **"FD ledger auto-assign"** sheet shows every auto-assigned
-  ledger with the rule that fired; FD ledgers that resolved to no bank
-  raise one review finding (counts and amounts only) — map them explicitly
-  if they belong to a bank.
+  ledger with the rule that fired, and then, listed first and marked
+  *unassigned*, the FD ledgers that resolved to no bank. Those raise one
+  review finding (counts and amounts only) — map them explicitly here if they
+  belong to a bank.
 - **Presence on this sheet is the bank mark.** A 26AS name listed here
   reconciles its 194A entries on **totals** (interest vs 26AS amount, TDS vs
   26AS tax) — never bill by bill, and its entries stay off the "Books not in

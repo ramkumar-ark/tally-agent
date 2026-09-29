@@ -7,6 +7,7 @@ import { readWorkbook } from "../src/xlsx-read.js";
 import {
   as26TemplateFileName,
   buildAs26MapTemplate,
+  CREDIT_SHEET,
   loadAs26MapFile,
   parseAs26MapTemplate,
   templateDeductors,
@@ -70,6 +71,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     expect(parseAs26MapTemplate(buf)).toEqual({
       mappings: [{ ledger: "Alpha Traders Ledger", as26Name: "Alpha Traders" }],
       banks: [],
+      creditLedgers: [],
     });
     const mapping = sheetOf(buf, "Mapping")!;
     const cell = (row: number, col: number) =>
@@ -84,7 +86,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
     ]};
     const buf = buildAs26MapTemplate({ deductors, map: multi, ledgers: ["Alpha Site Ledger", "Alpha Head Office"] });
-    expect(parseAs26MapTemplate(buf)).toEqual({ ...multi, banks: [] });
+    expect(parseAs26MapTemplate(buf)).toEqual({ ...multi, banks: [], creditLedgers: [] });
     const mapping = sheetOf(buf, "Mapping")!;
     const nameAt = (row: number) => mapping.rows[row].cells.get(0)?.value;
     const ledgerAt = (row: number) => mapping.rows[row].cells.get(3)?.value;
@@ -101,7 +103,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     ]))).toEqual({ mappings: [
       { ledger: "Alpha Site Ledger", as26Name: "Alpha Traders" },
       { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
-    ], banks: [] });
+    ], banks: [], creditLedgers: [] });
   });
 
   it("skips fully blank rows and pre-filled rows with no ledger yet", () => {
@@ -109,7 +111,11 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       ["Alpha Traders", "tds", 12000, ""],
       [null, null, null, null],
       ["Beta Minerals", "tcs", 500, "Beta Minerals Ledger"],
-    ]))).toEqual({ mappings: [{ ledger: "Beta Minerals Ledger", as26Name: "Beta Minerals" }], banks: [] });
+    ]))).toEqual({
+      mappings: [{ ledger: "Beta Minerals Ledger", as26Name: "Beta Minerals" }],
+      banks: [],
+      creditLedgers: [],
+    });
   });
 
   it("refuses a ledger mapped twice (even to different 26AS names) citing the row number only", () => {
@@ -185,6 +191,7 @@ describe("loadAs26MapFile", () => {
     expect(loadAs26MapFile(tmpFile("map.xlsx", buf))).toEqual({
       mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }],
       banks: [],
+      creditLedgers: [],
     });
   });
 
@@ -259,6 +266,99 @@ describe("Bank Interest mapping sheet", () => {
   it("an older filled template without the sheet loads unchanged with empty banks", () => {
     expect(parseAs26MapTemplate(rawTemplate([
       ["Alpha Traders", "tds", 1, "Alpha Ledger"],
-    ]))).toEqual({ mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }], banks: [] });
+    ]))).toEqual({
+      mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }],
+      banks: [],
+      creditLedgers: [],
+    });
+  });
+});
+
+// --- the Credit Ledgers sheet: the operator's explicit books-side credit
+// (receivable) ledgers, which replace the name heuristic when filled ---
+
+const CREDIT_COLUMNS = [
+  { header: "TDS/TCS credit ledger" },
+  { header: "kind" },
+];
+const rawCredit = (rows: Array<Array<string | number | null>>): Buffer =>
+  buildWorkbook([
+    { name: "Mapping", columns: MAPPING_COLUMNS, rows: [] },
+    { name: CREDIT_SHEET, columns: CREDIT_COLUMNS, rows },
+  ]);
+
+describe("Credit Ledgers sheet", () => {
+  it("the generated template has the sheet, blank unless a list is already in force", () => {
+    const buf = buildAs26MapTemplate({
+      company: "Sample",
+      deductors: [],
+      map: { mappings: [], creditLedgers: [{ ledger: "TDS Receivable A/c", kind: "tds" }] },
+      ledgers: ["TDS Receivable A/c"],
+    });
+    const sheet = sheetOf(buf, CREDIT_SHEET)!;
+    expect(sheet).toBeDefined();
+    const header = [...sheet!.rows[0].cells.entries()].map(([c, cell]) => `${c}:${cell.value}`).join("|");
+    expect(header).toContain("TDS/TCS credit ledger");
+    expect(header).toContain("kind");
+    // round-trips: what the map holds comes back out of the written file
+    expect(parseAs26MapTemplate(buf).creditLedgers).toEqual([{ ledger: "TDS Receivable A/c", kind: "tds" }]);
+
+    const blank = buildAs26MapTemplate({ deductors: [], map: { mappings: [] }, ledgers: [] });
+    expect(parseAs26MapTemplate(blank).creditLedgers).toEqual([]);
+  });
+
+  it("binds the ledger column to the Ledgers range and the kind to a two-value list", () => {
+    const buf = buildAs26MapTemplate({
+      deductors: [], map: { mappings: [] }, ledgers: ["TDS Receivable A/c", "TCS A/c"],
+    });
+    const xml = entry(buf, "xl/worksheets/sheet4.xml"); // Credit Ledgers is the 4th sheet
+    expect(xml).toContain("<formula1>Ledgers!$A$2:$A$3</formula1>");
+    expect(xml).toContain('<formula1>"tds,tcs"</formula1>');
+  });
+
+  it("reads a hand-filled row, kind case-insensitively, and skips blank rows", () => {
+    const map = parseAs26MapTemplate(rawCredit([
+      ["TDS (FY:25-26) A/c", "TDS"],
+      [null, null],
+      ["TCS Payable A/c", "tcs"],
+    ]));
+    expect(map.creditLedgers).toEqual([
+      { ledger: "TDS (FY:25-26) A/c", kind: "tds" },
+      { ledger: "TCS Payable A/c", kind: "tcs" },
+    ]);
+  });
+
+  it("refuses a blank kind, a ledger named twice, and a numeric cell, citing row/column only", () => {
+    expect(() => parseAs26MapTemplate(rawCredit([["TDS Receivable A/c", ""]])))
+      .toThrow(/row 2.*\(kind\).*choose tds or tcs/);
+    expect(() => parseAs26MapTemplate(rawCredit([
+      ["TDS Receivable A/c", "tds"],
+      ["tds receivable a/c", "tds"],
+    ]))).toThrow(/row 3.*already named earlier/);
+    expect(() => parseAs26MapTemplate(rawCredit([["TDS Receivable A/c", 12345]])))
+      .toThrow(/row 2, column B \(kind\).*numeric/);
+  });
+
+  it("refuses a kind that is neither tds nor tcs, and never echoes the value", () => {
+    let msg = "";
+    try {
+      parseAs26MapTemplate(rawCredit([["TDS Receivable A/c", "cess"]]));
+    } catch (e) { msg = String((e as Error).message); }
+    expect(msg).toMatch(/row 2.*expected tds or tcs/);
+    expect(msg).not.toMatch(/cess/);
+  });
+
+  it("refuses a sheet with no ledger column, naming only the headers it found", () => {
+    const buf = buildWorkbook([
+      { name: "Mapping", columns: MAPPING_COLUMNS, rows: [] },
+      { name: CREDIT_SHEET, columns: [{ header: "notes" }], rows: [["tds"]] },
+    ]);
+    expect(() => parseAs26MapTemplate(buf))
+      .toThrow(/Credit Ledgers' sheet needs a "TDS\/TCS credit ledger" header column.*found headers: notes/);
+  });
+
+  it("a template without the sheet loads with an empty list (heuristic fallback)", () => {
+    const buf = buildWorkbook([{ name: "Mapping", columns: MAPPING_COLUMNS, rows: [] }]);
+    expect(parseAs26MapTemplate(buf).creditLedgers).toEqual([]);
   });
 });

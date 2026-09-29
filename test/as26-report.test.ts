@@ -337,6 +337,36 @@ describe("tb_write_26as_report > FD interest 20% TDS sheet", () => {
   });
 });
 
+describe("tb_write_26as_report > FD ledger auto-assign sheet", () => {
+  it("names the unassigned FD ledgers AS26-011 counts, before the assigned rows", async () => {
+    const session = createSession(fakeDown(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const result = {
+      company: "Demo Traders Pvt Ltd", fromDate: "20250401", toDate: "20260331",
+      findings: [], recon: [], gaps: [], totals: { booksTax: 0, as26Tax: 0, partiesMatched: 0, combinationExplained: 0, ambiguous: 0 },
+      mastersUnavailable: false, groupsUnavailable: false,
+      skipped: { noDate: 0, blankTax: 0, form16BCDE: 0 },
+      counts: { credits: 0, receivableLedgers: [] }, bookEvents: [], billRows: [],
+      fd20: [],
+      fdAuto: [{ ledger: "FD - 100099221 A", bank: "Union Bank of India", rule: "name-match" }],
+      fdUnassigned: ["FD - 100099222", "FD - 100099223"],
+    } as unknown as As26ReviewResult;
+    const paths = await writeAs26Report({
+      reportDir: tempDir("as26-fdauto"), company: "Demo Traders Pvt Ltd",
+      fromDate: "20250401", toDate: "20260331",
+      markdown: "narrative", result, vault: session.vault,
+    });
+    const wb = readWorkbook(readFileSync(paths.workbookPath));
+    const sheet = wb.find((s) => s.name === "FD ledger auto-assign")!;
+    const rows = [...sheet.rows.values()].map((r) => [...r.cells.values()].map((c) => c.value));
+    expect(rows).toEqual([
+      ["row", "FD ledger", "assigned bank", "rule"],
+      ["FAS-1", "FD - 100099222", "unassigned", "unassigned"],
+      ["FAS-2", "FD - 100099223", "unassigned", "unassigned"],
+      ["FAS-3", "FD - 100099221 A", "Union Bank of India", "name-match"],
+    ]);
+  });
+});
+
 describe("writeAs26Report — combination sheet (addendum 7 follow-up)", () => {
   it("matched groups leave the unmatched sheets and show their invoice link", async () => {
     const reportDir = mkdtempSync(join(tmpdir(), "as26-combo-"));

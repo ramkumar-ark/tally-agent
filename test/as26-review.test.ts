@@ -549,3 +549,103 @@ describe("Session.as26Review", () => {
     expect(extra!.ledger).toBeDefined();
   });
 });
+
+// --- the operator's explicit Credit Ledgers list (captain's fix: a books-side
+// credit ledger under Loans & Advances with no "receivable" in its name) ---
+
+/** A company whose credit ledger carries no "receivable" word: the name
+ *  heuristic cannot see it, so only an explicit list can drive the review. */
+const CREDIT_LEDGER = "TDS (FY:25-26) A/c";
+/** Anand Buildmart appears in 26AS under TDS 194C only, so the declared kind
+ *  alone decides whether its books deduction reconciles at all. */
+const CREDIT_PARTY = "Anand Buildmart Pvt Ltd";
+const creditDayBook = (ledger = CREDIT_LEDGER): DayBookInput => ({
+  shape: "bundle", company: "Demo Traders Pvt Ltd",
+  groups: [
+    { name: "Current Assets", parent: "" },
+    { name: "Loans & Advances (Asset)", parent: "Current Assets" },
+    { name: "Sundry Debtors", parent: "Current Assets" },
+    { name: CREDIT_PARTY, parent: "Sundry Debtors" },
+  ],
+  ledgers: [
+    { name: ledger, parent: "Loans & Advances (Asset)" },
+    { name: CREDIT_PARTY, parent: "Sundry Debtors" },
+  ],
+  vouchers: [
+    { date: "20250620", voucherType: "Journal", voucherNumber: "JV/2", partyLedgerName: CREDIT_PARTY, cancelled: false,
+      entries: [{ ledger, amount: 1100 }, { ledger: CREDIT_PARTY, amount: -1100 }] },
+  ],
+  observedFrom: "20250620", observedTo: "20250620", rejected: 0, emptyMonths: [],
+});
+
+const creditMapPath = (ledgers: Array<{ ledger: string; kind: "tds" | "tcs" }>): string => {
+  const dir = mkdtempSync(join(tmpdir(), "as26-review-")); dirs.push(dir);
+  const p = join(dir, "as26-map.xlsx");
+  writeFileSync(p, buildAs26MapTemplate({
+    deductors: [{ name: CREDIT_PARTY, kind: "tds", tax: 1100 }],
+    map: { mappings: [{ ledger: CREDIT_PARTY, as26Name: CREDIT_PARTY }], creditLedgers: ledgers },
+    ledgers: [CREDIT_LEDGER, CREDIT_PARTY],
+  }));
+  return p;
+};
+
+describe("Session.as26Review > operator-declared credit ledgers", () => {
+  const file = parseAs26Export(buildAs26Fixture());
+
+  it("uses exactly the listed ledger, with its declared kind, and skips the name heuristic", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file,
+      creditMapPath([{ ledger: CREDIT_LEDGER, kind: "tds" }]), creditDayBook());
+
+    expect(res.counts.creditLedgerSource).toBe("map");
+    expect(res.counts.receivableLedgers).toHaveLength(1);
+    // the declared kind rides the books side: the debit answers the party's
+    // 194C TDS summary (1100 of books tax against it)
+    expect(res.recon.find((r) => r.match.kind === "tds")?.booksTax).toBe(1100);
+    expect(res.counts.receivableLedgers[0]).toMatch(PSEUDONYM);
+    // the declared ledger's debit became a books deduction
+    expect(res.bookEvents.filter((e) => e.source === "deduction")).toHaveLength(1);
+    const raw = JSON.stringify(res);
+    expect(raw).not.toContain("FY:25-26");
+    expect(raw).not.toContain("Kaveri Minerals");
+  });
+
+  it("keeps a declared TCS ledger on the tcs side of the books", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file,
+      creditMapPath([{ ledger: CREDIT_LEDGER, kind: "tcs" }]), creditDayBook());
+    expect(res.bookEvents.filter((e) => e.source === "deduction")).toHaveLength(1);
+    // a tcs books deduction never answers a tds summary: the party becomes a
+    // mapping gap instead of a reconciled one
+    // a tcs books deduction never answers a tds summary: the 194C recon reads
+    // zero books tax and the deduction is reported as a mapping gap instead
+    expect(res.recon.find((r) => r.match.kind === "tds")?.booksTax).toBe(0);
+    expect(res.gaps.some((g) => g.kind === "tcs" && g.reason === "unmapped")).toBe(true);
+  });
+
+  it("refuses a listed ledger that is not in the books, naming no ledger", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    let msg = "";
+    try {
+      await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file,
+        creditMapPath([{ ledger: "TDS Receivable A/c", kind: "tds" }]), creditDayBook());
+    } catch (e) { msg = String((e as Error).message); }
+    expect(msg).toMatch(/Credit Ledgers sheet names 1 ledger/);
+    expect(msg).not.toMatch(/TDS Receivable A\/c/);
+  });
+
+  it("throws the setup error when the list is empty and the heuristic cannot see the ledger", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    await expect(s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file,
+      creditMapPath([]), creditDayBook())).rejects.toThrow(/no TDS\/TCS receivable ledger found/);
+  });
+
+  it("falls back to the heuristic untouched when the list is absent", async () => {
+    const s = createSession(fake(), EMPTY_OVERRIDES, EMPTY_WRONG_GROUP);
+    const res = await s.as26Review("Demo Traders Pvt Ltd", "20250401", "20260331", file,
+      mapFile('{"mappings":[]}'), creditDayBook("TDS Receivable A/c"));
+    expect(res.counts.creditLedgerSource).toBe("heuristic");
+    expect(res.counts.receivableLedgers).toHaveLength(1);
+    expect(res.bookEvents.filter((e) => e.source === "deduction")).toHaveLength(1);
+  });
+});

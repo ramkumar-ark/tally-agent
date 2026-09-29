@@ -29,6 +29,7 @@ import {
   deductionEvents,
   isFdLedgerName,
   otherIncomeCredits,
+  declaredCreditLedgers,
   receivableLedgers,
   rekeyDeductionsToDeductor,
   voucherIdentity,
@@ -468,13 +469,20 @@ export interface As26ReviewResult {
   mastersUnavailable: boolean;
   groupsUnavailable: boolean;
   skipped: As26Result["skipped"];
-  counts: { credits: number; receivableLedgers: string[] };
+  counts: { credits: number; receivableLedgers: string[]; /** Whether the
+   *  books-side credit ledgers came from the operator's Credit Ledgers sheet
+   *  or from the name heuristic. */
+  creditLedgerSource: "map" | "heuristic"; };
   /** FD-interest books entries taxed at ~20% — not expected in 26AS
    * (design §12.4); party labels masked like the findings'. */
   fd20: Array<{ party: string; date: string; interest: number; tax: number }>;
   /** Auto-assigned FD ledgers (addendum 3), masked; the written workbook
    * de-masks. ledger/bank pseudonymised here, rule as fired. */
   fdAuto: Array<{ ledger: string; bank: string; rule: string }>;
+  /** FD ledgers no bank could be assigned to (addendum 3), masked like the
+   * assigned ones; the workbook's auto-assign sheet lists them by name, so
+   * the AS26-011 count is actionable. Optional: older results lack it. */
+  fdUnassigned?: string[];
   /** Every books evidence row behind the recon, party-pseudonymed: the
    * written report's Books Events sheet (the drill-down the deduction and
    * sale vouchers give the operator). */
@@ -1326,32 +1334,60 @@ export function createSession(
       gstinOf: (ledger) => mastersGstinOf.get(canonicalKey(ledger)) ?? null,
     };
 
+    const map = loadAs26MapFile(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
     const assetRoots = new Set(["current assets", "fixed assets", "misc. expenses (asset)"]);
     const isAssetRoot = (group: string): boolean => assetRoots.has(canonicalKey(group));
     // The parent chain reaches an asset root only when the group tree is
     // walked too: a ledger's immediate parent can be a group, not a root.
     const ancestry = [...masterPairs, ...groups];
-    let receivable = receivableLedgers(ancestry, isAssetRoot);
     const mastersAbsent = mastersUnavailable || masterPairs.length === 0;
-    if (receivable.length === 0 && mastersAbsent) {
-      // Masters absent: the same name heuristic applied to every ledger the
-      // period's vouchers themselves touch — the books carry the evidence.
-      const names = new Set<string>();
-      for (const v of voucherList) {
-        if (v.cancelled) continue;
-        for (const e of v.entries) names.add(e.ledger);
+    // The operator's explicit credit (receivable) ledger list wins outright:
+    // real books park it under Loans & Advances with no "receivable" in the
+    // name, which the heuristic below cannot see. Only when the list is empty
+    // or absent does the heuristic run, unchanged.
+    const declared = declaredCreditLedgers(map);
+    const creditLedgerSource = declared.length > 0 ? "map" : "heuristic";
+    let receivable: Array<{ name: string; kind: As26Kind }>;
+    if (declared.length > 0) {
+      if (!mastersAbsent) {
+        const known = new Set(masterPairs.map((l) => canonicalKey(l.name)));
+        const unknown = declared.filter((d) => !known.has(canonicalKey(d.ledger)));
+        if (unknown.length > 0) {
+          throw new Error(
+            `as26-map: the Credit Ledgers sheet names ${unknown.length} ledger(s) that do not exist in ` +
+              `${company ?? "this company"}'s books — the TDS/TCS credit ledger(s) are the asset ledgers a customer ` +
+              "debits when it deducts tax. Fix the name on that sheet, or clear the sheet to fall back to the " +
+              "TDS/TCS Receivable name rule.",
+          );
+        }
+      } else {
+        console.error(
+          "tally-agent: ledger masters unavailable — the Credit Ledgers sheet's names are taken on trust, unverified",
+        );
       }
-      receivable = [...names]
-        .filter((n) => /(?:tds|tcs)/.test(canonicalKey(n)) && /receivable/i.test(n))
-        .map((n) => ({
-          name: n,
-          kind: (/tcs/.test(canonicalKey(n)) ? "tcs" : "tds") as As26Kind,
-        }));
-    }
-    if (receivable.length === 0 && !mastersAbsent) {
-      throw new Error(
-        "no TDS/TCS receivable ledger found under an asset group — name the ledger 'TDS Receivable' (or 'TCS Receivable') or extend the rule in src/as26.ts",
-      );
+      receivable = declared.map((d) => ({ name: d.ledger, kind: d.kind }));
+    } else {
+      receivable = receivableLedgers(ancestry, isAssetRoot);
+      if (receivable.length === 0 && mastersAbsent) {
+        // Masters absent: the same name heuristic applied to every ledger the
+        // period's vouchers themselves touch — the books carry the evidence.
+        const names = new Set<string>();
+        for (const v of voucherList) {
+          if (v.cancelled) continue;
+          for (const e of v.entries) names.add(e.ledger);
+        }
+        receivable = [...names]
+          .filter((n) => /(?:tds|tcs)/.test(canonicalKey(n)) && /receivable/i.test(n))
+          .map((n) => ({
+            name: n,
+            kind: (/tcs/.test(canonicalKey(n)) ? "tcs" : "tds") as As26Kind,
+          }));
+      }
+      if (receivable.length === 0 && !mastersAbsent) {
+        throw new Error(
+          "no TDS/TCS receivable ledger found under an asset group — name the ledger 'TDS Receivable' (or 'TCS Receivable'), list it on the mapping template's Credit Ledgers sheet, or extend the rule in src/as26.ts",
+        );
+      }
     }
 
     const deductions: BooksDeduction[] = [];
@@ -1418,7 +1454,6 @@ export function createSession(
       ledgerNames = [...names];
     }
 
-    const map = loadAs26MapFile(as26MapPath, (why) => console.error(`tally-agent: ${why}`));
     // Addendum 3: FD ledgers are auto-detected, not hand-mapped — candidates
     // sit under a Deposits (Asset) group AND carry an FD token in the name.
     // Explicit Bank Interest FD rows win. Assignment order: a distinctive
@@ -1763,6 +1798,10 @@ export function createSession(
       bank: pseudoName(a.bank),
       rule: a.rule,
     }));
+    // Unassigned FD ledgers are named in the workbook (de-masked there); here
+    // they carry the same stable ledger pseudonym as every other ledger, so
+    // the vault can resolve them on the way out.
+    const fdUnassignedMasked = (result.fdUnassigned ?? []).map(pseudoName);
     const masked: As26ReviewResult = sweepStrings(
       {
         company: company ?? undefined,
@@ -1775,11 +1814,12 @@ export function createSession(
         mastersUnavailable,
         groupsUnavailable,
         skipped: result.skipped,
-        counts: { credits, receivableLedgers: recLedgers },
+        counts: { credits, receivableLedgers: recLedgers, creditLedgerSource },
         bookEvents,
         billRows,
         fd20,
         fdAuto: fdAutoMasked,
+        fdUnassigned: fdUnassignedMasked,
       },
       vault,
     ) as As26ReviewResult;
