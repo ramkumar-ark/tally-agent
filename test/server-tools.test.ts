@@ -26,10 +26,11 @@ describe("tool surface", () => {
     expect(tools.has("tally_get_ledger")).toBe(false);
   });
 
-  it("exposes exactly the forty-two approved tools", () => {
+  it("exposes exactly the forty-three approved tools", () => {
     const { tools } = harness();
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",
+      "tb_audit_workflow_run",
       "tb_audit_workflow_start",
       "tb_audit_workflow_status",
       "tb_dep3cd_review",

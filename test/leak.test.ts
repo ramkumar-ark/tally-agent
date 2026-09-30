@@ -275,6 +275,7 @@ describe("no secret leaves the gateway", () => {
     });
     expect([...tools.keys()].sort()).toEqual([
       "tb_26as_review",
+      "tb_audit_workflow_run",
       "tb_audit_workflow_start",
       "tb_audit_workflow_status",
       "tb_dep3cd_review",

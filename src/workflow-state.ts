@@ -230,7 +230,7 @@ export function planPass(
       recorded.push({
         id: step.id,
         state: "carried",
-        carriedFrom: lastDirOf(step.id) ?? (reopened ? open.dir : undefined),
+        carriedFrom: lastDirOf(step.id),
       });
       continue;
     }

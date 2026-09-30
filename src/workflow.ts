@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, readdir, rename, readFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import type { ToolRegistrar, ToolsConfig } from "./index.js";
 import type { Session } from "./review.js";
@@ -10,20 +10,39 @@ import {
   WORKFLOW_INPUTS,
   WORKFLOW_STEPS,
   stepById,
+  stepDirName,
   type InputKey,
   type WorkflowParams,
+  type WorkflowStep,
 } from "./workflow-registry.js";
 import {
+  fingerprint,
   inputStatus,
   loadManifest,
   newManifest,
+  planPass,
   saveManifest,
   satisfied,
   stepReadiness,
   type WorkflowInputEntry,
   type WorkflowManifest,
+  type WorkflowPass,
+  type WorkflowStepState,
 } from "./workflow-state.js";
-import { uniquePath } from "./workflow-package.js";
+import {
+  assertInside,
+  autoNarrative,
+  copyNoClobber,
+  countFindings,
+  listDir,
+  renderIndex,
+  summaryJson,
+  uniquePath,
+  workflowFindingsCsv,
+  writeTextFile,
+  type WorkflowCsvFinding,
+} from "./workflow-package.js";
+import type { StepCtx } from "./workflow-registry.js";
 
 /**
  * The three tax-audit workflow tools: tb_audit_workflow_start,
@@ -227,6 +246,17 @@ async function generateInput(
   entry.approved = false;
   entry.reason = undefined;
   entry.status = inputStatus(spec, entry, digest);
+  if (key === "gstWorkingSheet") {
+    // The working-sheet step packages these findings into its pass folder
+    // without regenerating; the tool result is already masked.
+    const ws: WorkflowStepState = m.steps.gst_working_sheet ?? { status: "pending" };
+    m.steps.gst_working_sheet = ws;
+    ws.gstWorksheetFindings = JSON.stringify(
+      Array.isArray((parsed as { findings?: unknown }).findings)
+        ? (parsed as { findings: unknown[] }).findings
+        : [],
+    );
+  }
 }
 
 /** Move a previous generated copy aside so its name is free again. */
@@ -295,8 +325,105 @@ async function runIntake(
   }
 }
 
+/** Absolute-looking strings anywhere in a parsed tool result. */
+const ABS_PATH = /^(\/|[A-Za-z]:\\)/;
+
+function jsonPathStrings(value: unknown, out: string[] = [], depth = 0): string[] {
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "string" && ABS_PATH.test(value) && value.length < 1024) out.push(value);
+    return out;
+  }
+  if (depth > 6) return out;
+  if (Array.isArray(value)) {
+    for (const v of value) jsonPathStrings(v, out, depth + 1);
+    return out;
+  }
+  for (const v of Object.values(value)) jsonPathStrings(v, out, depth + 1);
+  return out;
+}
+
+function progressOf(m: WorkflowManifest, pass: WorkflowPass) {
+  const counts = { done: 0, partial: 0, failed: 0, needsInput: 0, remaining: 0, carried: 0, needsTally: 0 };
+  for (const id of pass.plan) {
+    const st = m.steps[id]?.status ?? "pending";
+    if (st === "done") counts.done++;
+    else if (st === "partial") counts.partial++;
+    else if (st === "failed") counts.failed++;
+    else if (st === "needs-input") counts.needsInput++;
+    else counts.remaining++;
+  }
+  for (const r of pass.recorded ?? []) {
+    if (r.state === "needs-input") counts.needsInput++;
+    else if (r.state === "needs-tally") counts.needsTally++;
+    else if (r.state === "carried") counts.carried++;
+  }
+  return counts;
+}
+
+/** Done steps the pass does not re-run still get their outputs, copied in. */
+async function carryForward(
+  m: WorkflowManifest,
+  passDir: string,
+  pass: WorkflowPass,
+): Promise<void> {
+  for (const r of pass.recorded ?? []) {
+    if (r.state !== "carried") continue;
+    const step = stepById(r.id);
+    if (!step) continue;
+    const index = WORKFLOW_STEPS.findIndex((s) => s.id === r.id);
+    const stepDir = join(passDir, stepDirName(step, index));
+    await mkdir(stepDir);
+    const copied: string[] = [];
+    for (const o of m.steps[r.id]?.outputs ?? []) {
+      if (await exists(o)) copied.push(await copyNoClobber(o, stepDir));
+    }
+    const st: WorkflowStepState = m.steps[r.id] ?? { status: "done" };
+    m.steps[r.id] = { ...st, outputs: copied, lastPass: pass.dir };
+  }
+}
+
+/**
+ * The pass's input snapshot: every used .xlsx/.json input except the huge
+ * or privacy-sensitive ones (day book, 26AS export, Winman TDS summary),
+ * plus inputs.json recording every key's path, digest and status.
+ */
+async function snapshotInputs(m: WorkflowManifest, passDir: string): Promise<void> {
+  const inputsDir = join(passDir, "inputs");
+  await mkdir(inputsDir);
+  const record: Record<string, { path: string; digest: string | null; status: string }> = {};
+  for (const [key, e] of Object.entries(m.inputs)) {
+    if (!e.path) continue;
+    record[key] = { path: e.path, digest: e.digest ?? null, status: e.status };
+    if (key === "dayBook" || key === "as26Export" || key === "winmanTdsSummary") continue;
+    const ext = extname(e.path).toLowerCase();
+    if ((ext === ".xlsx" || ext === ".json") && (await exists(e.path))) {
+      await copyNoClobber(e.path, inputsDir);
+    }
+  }
+  await writeTextFile(join(inputsDir, "inputs.json"), JSON.stringify(record, null, 2));
+}
+
+/** INDEX.md, summary.json for the pass; LATEST.txt for the newest closed pass. */
+async function writeArtifacts(
+  m: WorkflowManifest,
+  wfDir: string,
+  pass: WorkflowPass,
+): Promise<void> {
+  const dir = join(wfDir, pass.dir);
+  await writeTextFile(join(dir, "INDEX.md"), renderIndex(m, pass.n));
+  await writeTextFile(join(dir, "summary.json"), JSON.stringify(summaryJson(m, pass.n), null, 2));
+  const closed = [...m.passes].reverse().find((p) => p.closedAt !== undefined);
+  if (closed) await writeTextFile(join(wfDir, "LATEST.txt"), `${closed.dir}\n`);
+  await saveManifest(wfDir, m);
+}
+
 export function registerWorkflowTools(register: ToolRegistrar, ctx: WorkflowToolCtx): void {
   const { session } = ctx;
+
+  /** workflowId -> the TDS-step fingerprint this process holds a review for. */
+  const tdsCache = new Map<string, string>();
+
+  const noteScrub = (msg: string): string => scrubSecrets(maskKnownNames(msg, session.vault));
 
   register(
     "tb_audit_workflow_start",
@@ -441,7 +568,10 @@ export function registerWorkflowTools(register: ToolRegistrar, ctx: WorkflowTool
 
         for (const k of validKeys(args.accept, "accept")) {
           m.inputs[k].accepted = true;
-          m.inputs[k].status = inputStatus(WORKFLOW_INPUTS[k], m.inputs[k], m.inputs[k].digest);
+          const st = inputStatus(WORKFLOW_INPUTS[k], m.inputs[k], m.inputs[k].digest);
+          // Accepting the generated file AS IS is a valid operator decision
+          // (an empty PF/ESI template needs no edits) — accepted overrides.
+          m.inputs[k].status = st === "generated-unfilled" ? "accepted" : st;
         }
         for (const k of validKeys(args.approve, "approve")) {
           const spec = WORKFLOW_INPUTS[k];
@@ -474,6 +604,392 @@ export function registerWorkflowTools(register: ToolRegistrar, ctx: WorkflowTool
           0,
         );
         return JSON.stringify(workflowView(m, wfDir), null, 2);
+      } catch (e) {
+        throw scrubbed(e, session);
+      }
+    },
+  );
+
+  const indexInRegistry = (id: string): number => WORKFLOW_STEPS.findIndex((s) => s.id === id);
+
+  /** outDir/outPath must sit inside the workflow folder and hold no user input. */
+  const guardTargets = async (
+    m: WorkflowManifest,
+    wfDir: string,
+    toolArgs: Record<string, unknown>,
+  ): Promise<void> => {
+    for (const key of ["outDir", "outPath"]) {
+      const t = toolArgs[key];
+      if (typeof t !== "string") continue;
+      await assertInside(wfDir, t);
+      for (const [k, e] of Object.entries(m.inputs)) {
+        if (e.source !== "user" || !e.path) continue;
+        const rel = relative(resolve(t), e.path);
+        if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+          throw new Error(`refusing to write into ${key}: it contains the user input '${k}'`);
+        }
+      }
+    }
+  };
+
+  /** Executes one planned step; returns its (already persisted) state. */
+  const runStep = async (
+    m: WorkflowManifest,
+    wfDir: string,
+    pass: WorkflowPass,
+    id: string,
+  ): Promise<WorkflowStepState> => {
+    const step = stepById(id)!;
+    const passDir = join(wfDir, pass.dir);
+    const stepDir = await uniquePath(passDir, stepDirName(step, indexInRegistry(id)));
+    await mkdir(stepDir);
+    const toFillDir = join(wfDir, "to-fill");
+    const state: WorkflowStepState = m.steps[id] ?? { status: "pending" };
+    m.steps[id] = state;
+    state.status = "running";
+    state.runningSince = new Date().toISOString();
+    state.runningProcess = ctx.sessionId;
+    state.outputs = [];
+    state.notes = (state.notes ?? []).filter((n) => n.startsWith("interrupted"));
+    state.error = undefined;
+    state.findings = undefined;
+    await saveManifest(wfDir, m);
+
+    const mkCtx = (last: unknown): StepCtx => ({
+      params: m.params,
+      path: (k) => m.inputs[k]?.path,
+      status: (k) => m.inputs[k]?.status,
+      stepDir,
+      toFillDir,
+      last,
+      narrative: (title, result) => autoNarrative(title, result),
+    });
+
+    const markStop = (status: WorkflowStepState["status"]): void => {
+      state.status = status;
+      state.runningProcess = undefined;
+      state.runningSince = undefined;
+      state.lastPass = pass.dir;
+      if (status === "done" || status === "partial") {
+        state.fingerprint = fingerprint(step, m);
+        if (id === "tds") tdsCache.set(m.workflowId, state.fingerprint);
+      }
+    };
+
+    const parsedResults: Array<{ tool: string; parsed: unknown }> = [];
+    let partial = false;
+
+    if (step.custom === "gst_working_sheet") {
+      const entry = m.inputs.gstWorkingSheet;
+      if (!entry?.path || !(await exists(entry.path))) {
+        state.error = noteScrub(
+          "no working sheet present — give a day book and let the workflow generate one, or set it with tb_audit_workflow_status",
+        );
+        markStop("failed");
+        await saveManifest(wfDir, m);
+        return state;
+      }
+      const sheetCopy = await copyNoClobber(entry.path, stepDir);
+      let findings: WorkflowCsvFinding[] = [];
+      try {
+        findings = JSON.parse(state.gstWorksheetFindings ?? "[]") as WorkflowCsvFinding[];
+      } catch {
+        findings = [];
+      }
+      const csvPath = join(stepDir, "gst-working-sheet-findings.csv");
+      await writeTextFile(csvPath, workflowFindingsCsv(findings, session.vault));
+      state.findings = countFindings({ findings });
+      state.outputs = [sheetCopy, csvPath];
+      state.notes = entry.status === "approved" ? [] : ["awaiting approval"];
+      markStop("done");
+      await saveManifest(wfDir, m);
+      return state;
+    }
+
+    if (step.custom === "notds") {
+      const templateEntry = m.inputs.notdsTemplate;
+      const templateUsable =
+        !!templateEntry?.path &&
+        (await exists(templateEntry.path)) &&
+        templateEntry.status !== "generated-unfilled";
+      if (!templateUsable) {
+        if (!templateEntry?.path || !(await exists(templateEntry.path))) {
+          const raw = await ctx.call("tb_write_notds_template", {
+            company: m.params.company,
+            outDir: toFillDir,
+          });
+          const { templatePath } = JSON.parse(raw) as { templatePath: string };
+          const digest = sha256(await readFile(templatePath));
+          templateEntry.path = templatePath;
+          templateEntry.source = "generated";
+          templateEntry.generatedDigest = digest;
+          templateEntry.digest = digest;
+          templateEntry.accepted = false;
+          templateEntry.approved = false;
+          templateEntry.status = inputStatus(WORKFLOW_INPUTS.notdsTemplate, templateEntry, digest);
+        }
+        state.outputs = [templateEntry.path as string];
+        state.notes = [
+          "no-TDS template generated into to-fill — fill it, then call tb_audit_workflow_status (accept notdsTemplate) and run again",
+        ];
+        markStop("needs-input");
+        await saveManifest(wfDir, m);
+        return state;
+      }
+      const tdsFp = fingerprint(stepById("tds")!, m);
+      if (tdsCache.get(m.workflowId) !== tdsFp) {
+        await ctx.call("tb_tds_review", {
+          fromDate: m.params.fromDate,
+          toDate: m.params.toDate,
+          asOnDate: m.params.asOnDate,
+          company: m.params.company,
+          templatePath: m.inputs.tdsTemplate?.path,
+          winmanPath: m.inputs.winmanTdsSummary?.path,
+          dayBookPath: m.inputs.dayBook?.path,
+        });
+        tdsCache.set(m.workflowId, tdsFp);
+        state.notes = [...(state.notes ?? []), "re-ran tb_tds_review (no fresh cache this process)"];
+      } else {
+        state.notes = [...(state.notes ?? []), "reused this process's TDS review"];
+      }
+      let review: unknown;
+      try {
+        review = JSON.parse(await ctx.call("tb_notds_review", { templatePath: templateEntry.path }));
+      } catch (e) {
+        state.error = noteScrub(errMsg(e));
+        markStop("failed");
+        await saveManifest(wfDir, m);
+        return state;
+      }
+      parsedResults.push({ tool: "tb_notds_review", parsed: review });
+      state.findings = countFindings(review);
+      const winmanPath = m.inputs.winmanNotds?.path;
+      if (winmanPath) {
+        try {
+          await ctx.call("tb_write_3cd_notds", { sourcePath: winmanPath, outPath: stepDir });
+        } catch (e) {
+          state.notes = [...(state.notes ?? []), `error in tb_write_3cd_notds: ${noteScrub(errMsg(e))}`];
+          partial = true;
+        }
+      } else {
+        state.notes = [...(state.notes ?? []), "skipped: Winman clause 21(b) workbook not given"];
+        partial = true;
+      }
+      const findingsRows = ((review as { findings?: WorkflowCsvFinding[] }).findings ?? []);
+      const csvPath = join(stepDir, "notds-findings.csv");
+      await writeTextFile(csvPath, workflowFindingsCsv(findingsRows, session.vault));
+      const outs = (await listDir(stepDir)).map((f) => join(stepDir, f));
+      state.outputs = outs.sort();
+      markStop(partial ? "partial" : "done");
+      await saveManifest(wfDir, m);
+      return state;
+    }
+
+    for (const action of step.actions) {
+      const actx = mkCtx(parsedResults[parsedResults.length - 1]?.parsed);
+      const verdict = action.when?.(actx) ?? true;
+      if (verdict !== true) {
+        state.notes = [...(state.notes ?? []), `skipped: ${verdict}`];
+        if (action.kind === "fill") partial = true;
+        continue;
+      }
+      const toolArgs = action.args(actx);
+      try {
+        await guardTargets(m, wfDir, toolArgs);
+        const raw = await ctx.call(action.tool, toolArgs);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = raw;
+        }
+        parsedResults.push({ tool: action.tool, parsed });
+        if (action.kind === "review") state.findings = countFindings(parsed);
+      } catch (e) {
+        const msg = noteScrub(errMsg(e));
+        if (action.kind === "review") {
+          state.error = msg;
+          markStop("failed");
+          await saveManifest(wfDir, m);
+          return state;
+        }
+        state.notes = [...(state.notes ?? []), `error in ${action.tool}: ${msg}`];
+        partial = true;
+      }
+    }
+
+    const outs = (await listDir(stepDir)).map((f) => join(stepDir, f));
+    for (const { tool, parsed } of parsedResults) {
+      for (const p of jsonPathStrings(parsed)) {
+        const rel = relative(stepDir, p);
+        if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) continue;
+        if (!(await exists(p))) continue;
+        const copied = await copyNoClobber(p, stepDir);
+        state.notes = [
+          ...(state.notes ?? []),
+          `${tool} wrote outside the run folder; copied in as ${basename(copied)}`,
+        ];
+        if (!outs.includes(copied)) outs.push(copied);
+      }
+    }
+    state.outputs = outs.sort();
+    markStop(partial ? "partial" : "done");
+    await saveManifest(wfDir, m);
+    return state;
+  };
+
+  register(
+    "tb_audit_workflow_run",
+    "Run ONE planned step of a tax-audit workflow per call and return the next one. Opens the next " +
+      "pass on the first call (carry-forward of done steps, input snapshot), picks the named step or " +
+      "the first still-pending one, writes everything into the pass folder, and rewrites INDEX.md and " +
+      "summary.json after every step. A review failure fails the step (the pass continues on the next " +
+      "call); a report or fill failure leaves the step partial. One step per call keeps each call " +
+      "inside the tool timeout.",
+    {
+      workflowId: z.string().describe("The workflow folder name"),
+      step: z.string().optional().describe("A specific planned step id to run now"),
+      rerun: z.array(z.string()).optional().describe("Step ids to re-run even when done with an unchanged fingerprint"),
+    },
+    async (args) => {
+      try {
+        for (const id of args.rerun ?? []) {
+          if (!stepById(id)) throw new Error(`unknown step id '${id}'`);
+        }
+        const wfDir = join(wfRoot(ctx.cfg), args.workflowId);
+        let m: WorkflowManifest;
+        try {
+          m = await loadManifest(wfDir);
+        } catch {
+          throw new Error(
+            `no workflow '${args.workflowId}' under ${wfRoot(ctx.cfg)} — call tb_audit_workflow_status without an id to list them`,
+          );
+        }
+        let pass = m.passes[m.passes.length - 1];
+        const open = pass !== undefined && pass.closedAt === undefined;
+        if (!open) {
+          if (m.selectedSteps.some((id) => stepById(id)?.live)) {
+            m.tallyReachable = await ctx
+              .call("tb_list_companies", {})
+              .then(() => true)
+              .catch(() => false);
+          }
+          const planned = planPass(m, { rerun: args.rerun });
+          const dirName = `pass-${String(planned.n).padStart(2, "0")}-${stamp()}`;
+          const dir = join(wfDir, dirName);
+          await mkdir(dir);
+          pass = {
+            n: planned.n,
+            dir: dirName,
+            startedAt: new Date().toISOString(),
+            plan: planned.plan,
+            recorded: planned.recorded,
+          };
+          m.passes.push(pass);
+          await carryForward(m, dir, pass);
+          await snapshotInputs(m, dir);
+        } else if (args.rerun?.length) {
+          for (const id of args.rerun) {
+            if (!m.selectedSteps.includes(id)) continue;
+            if (!pass.plan.includes(id)) pass.plan.push(id);
+            pass.recorded = (pass.recorded ?? []).filter((r) => r.id !== id);
+            const st: WorkflowStepState = m.steps[id] ?? { status: "pending" };
+            m.steps[id] = st;
+            if (st.status === "done" || st.status === "partial" || st.status === "failed") {
+              st.status = "pending";
+            }
+          }
+        }
+        for (const id of pass.plan) {
+          const st = m.steps[id];
+          if (st?.status === "running" && st.runningProcess !== ctx.sessionId) {
+            st.status = "pending";
+            st.notes = [...(st.notes ?? []), "interrupted — re-run"];
+            st.outputs = [];
+          }
+        }
+        await saveManifest(wfDir, m);
+
+        if (args.step !== undefined && !pass.plan.includes(args.step)) {
+          const rec = (pass.recorded ?? []).find((r) => r.id === args.step);
+          throw new Error(
+            `step '${args.step}' is not planned for ${pass.dir}` +
+              (rec ? ` (recorded: ${rec.state}${rec.missing ? `: ${rec.missing.join(", ")}` : ""})` : ""),
+          );
+        }
+        // A planned step whose stale status comes from an EARLIER pass (or a
+        // rerun) is here exactly because something changed: normalize it to
+        // pending so it executes and the pass bookkeeping stays honest. A
+        // step already executed in THIS pass (lastPass matches) never re-runs.
+        const runnable = (id: string): boolean => {
+          if ((m.steps[id]?.lastPass ?? undefined) === pass.dir) return false;
+          const st = m.steps[id]?.status ?? "pending";
+          return st === "pending" || st === "partial" || st === "failed" || st === "running";
+        };
+        let pendingId = args.step ?? pass.plan.find(runnable);
+        if (pendingId !== undefined && args.step === undefined) {
+          const st = m.steps[pendingId];
+          if (st?.status === "partial" || st?.status === "failed") st.status = "pending";
+        }
+
+        if (pendingId === undefined) {
+          if (pass.closedAt === undefined) pass.closedAt = new Date().toISOString();
+          await writeArtifacts(m, wfDir, pass);
+          await ctx.audit(
+            "tb_audit_workflow_run",
+            { workflowId: m.workflowId, pass: pass.n, closed: true },
+            0,
+            0,
+          );
+          return JSON.stringify(
+            {
+              workflowId: m.workflowId,
+              pass: pass.n,
+              passClosed: true,
+              passDir: join(wfDir, pass.dir),
+              progress: progressOf(m, pass),
+              step: null,
+              next: null,
+            },
+            null,
+            2,
+          );
+        }
+
+        const stepState = await runStep(m, wfDir, pass, pendingId);
+        const stillPending = pass.plan.some(
+          (id) => (m.steps[id]?.status ?? "pending") === "pending",
+        );
+        if (!stillPending) pass.closedAt = new Date().toISOString();
+        await writeArtifacts(m, wfDir, pass);
+        await ctx.audit(
+          "tb_audit_workflow_run",
+          { workflowId: m.workflowId, step: pendingId, pass: pass.n },
+          (stepState.outputs ?? []).length,
+          0,
+        );
+        return JSON.stringify(
+          {
+            workflowId: m.workflowId,
+            pass: pass.n,
+            passDir: join(wfDir, pass.dir),
+            step: {
+              id: pendingId,
+              status: stepState.status,
+              ...(stepState.findings ? { findings: stepState.findings } : {}),
+              outputs: stepState.outputs ?? [],
+              ...(stepState.notes?.length ? { notes: stepState.notes } : {}),
+              ...(stepState.error ? { error: stepState.error } : {}),
+            },
+            progress: progressOf(m, pass),
+            passClosed: !stillPending,
+            next: stillPending
+              ? (pass.plan.find((id) => (m.steps[id]?.status ?? "pending") === "pending") ?? null)
+              : null,
+          },
+          null,
+          2,
+        );
       } catch (e) {
         throw scrubbed(e, session);
       }

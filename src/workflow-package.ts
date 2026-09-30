@@ -237,7 +237,7 @@ export function renderIndex(m: WorkflowManifest, passN: number): string {
             ? spec.howToGet
             : "provide the file";
         lines.push(
-          `- **${spec?.label ?? key}** — ${where}` +
+          `- **${spec?.label ?? key}** (\`${key}\`) — ${where}` +
             (entry?.path ? ` (at \`${basename(entry.path)}\`)` : "") +
             (spec?.doc ? `; see ${spec.doc}` : "") +
             `; blocks step \`${r.id}\``,
