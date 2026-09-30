@@ -1592,7 +1592,16 @@ When updating this file, preserve this bar for all agents and keep entries conci
   found the two re-ledgerings (`Repairs - Machinery - Service - URD` → `Spares - URD` on
   JAYARAJ's 31,643 bill, and five VRV bills from `Professional Fees - 18%` to
   `Labour Charges Payable-18%`) and dismissed a 1.4-crore GST receivable reclass as
-  out of scope.
+  out of scope. **The instrument is `.scratch/diff-exports.mjs <old> <new>`** (run 15): it
+  keys each voucher by its sorted `ledger|amount` multiset and diffs the multiset OF
+  SIGNATURES WITH COUNTS, never a per-voucher key — vouchers sharing a composition are
+  interchangeable, and a `date|type|number` diff of the same two exports reported 995
+  phantom edits. Two consecutive fresh exports (v14 → v15, 11,466 vouchers, 7,295 distinct
+  compositions each) differ by exactly ONE composition gone and ONE new — the same ₹1,010
+  read `Labour Contract Expenses A/c|1010.00 ;; MURUGAN SILT CATCHPIT A/c|-1010.00`
+  (a `Journal`) and now reads `Cash|1010.00 ;; MURUGAN SILT CATCHPIT A/c|-1010.00`
+  (a `Cash` receipt) — so a real books edit shows up as a PAIR of signatures, and a real
+  re-ledgering shows up as one gone plus one new on the SAME amount.
 - **An operator remap changes the LIMIT STRUCTURE, not just the section name (run 14).**
   `Repairs - Machinery - Service - 18% A/c` moving 194J → 194C took one party from
   ₹13,863 of not-deducted to ₹1,386.30 and produced a NEW ₹465.22 finding for another,
