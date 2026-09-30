@@ -390,6 +390,46 @@ describe("tdsReview", () => {
     expect(JSON.stringify(result)).not.toContain("ABCCS1234A");
   });
 
+  it("rates the deductee from the adopted PAN, so an individual 194-C bill pays 1% (captain 2026-09-30)", async () => {
+    // The adopted PAN must reach the rate table, not only the alias: the
+    // master has no PAN, so before the fix `entityOf` read nothing and the
+    // bill fell back to the 2% standard. A "P" fourth character is an
+    // individual, whose 194-C rate is half the company's.
+    // A master PAN is the client's own data and keeps the rate, so the fix
+    // is only visible on a master with none — exactly the captain's case.
+    const s = mkSession(
+      {
+        "site repairs contract": {
+          source: "ledger-vouchers-report",
+          vouchers: [{ date: "2025-05-10", voucherType: "Purchase", voucherNumber: "P/12", amount: "250000.00", partyLedgerName: "Sample Builders LLP" }],
+        },
+        "sample builders llp": { source: "ledger-vouchers-report", vouchers: [] },
+        "tds contractors": { source: "ledger-vouchers-report", vouchers: [] },
+      },
+      [],
+      JSON.stringify([
+        { name: "Sample Builders LLP", parent: "Sundry Creditors", state: "Karnataka", IsTDSApplicable: "Yes" },
+        { name: "Site Repairs Contract", parent: "Purchase Accounts", IsTDSApplicable: "Yes" },
+        { name: "TDS Contractors", parent: "Duties & Taxes", IsTDSApplicable: "Yes" },
+      ]),
+    );
+    const r = await s.tdsReview(undefined, "20250401", "20260331", "20260331", {
+      ...OPERATOR,
+      parties: [
+        { ledger: "Sample Builders LLP", tdsApplicable: true, transporterDeclaration: false, deducteeFiledReturn: false, winmanName: "Sample Builders (Unit 2)" },
+      ],
+    }, "template", {
+      challans: [],
+      deductees: [{ name: "Sample Builders (Unit 2)", pan: "ABCPH1234P" }],
+      formType: null,
+      skipped: { noSection: 0, noJoin: 0 },
+    });
+    expect(r.winman.panAdopted).toBe(1);
+    // 1% of the 2,50,000 crossing booking, not the 2% standard (5,000).
+    expect(r.totals.notDeducted).toBe(2500);
+    expect(JSON.stringify(r)).not.toContain("ABCPH1234P");
+  });
+
   it("errors citing the Parties row when the template PAN disagrees with the Winman PAN", async () => {
     const s = mkSession({});
     await expect(

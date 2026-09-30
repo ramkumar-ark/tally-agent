@@ -5,7 +5,12 @@
  *   morphology only); FB 2025 memo Cl.51–62. Thresholds C1 (secondary).
  * - 194J: FB 2025 memo Cl.51–62.
  * - 194-I: s.194-I text (rates, FA 2009); Captain instruction 2026-09-26 (Addendum 26m):
- *   FY aggregate ₹6,00,000 per party per year, no per-month test.
+ *   FY aggregate ₹6,00,000 per party per year, no per-month test. Captain instruction
+ *   2026-09-30: no deduction while the party's cumulative FY bookings are within that
+ *   aggregate; the crossing booking carries the cumulative to date (`cumulativeOnCross`).
+ *   Captain instruction 2026-09-30 (second half): that annual-cumulative reading is the
+ *   rule for EVERY annual-aggregate section, so `cumulativeOnCross` is set on 194C, 194J,
+ *   194A and 194H as well — 194Q and 194T excepted, as the captain stated.
  * - 194A: s.194A text; FB 2025 memo. Rate confirm C2 ("rates in force").
  * - 194H: F(No.2)B 2024 memo Cl.57.
  * - 194Q: s.194Q text; only the amount after crossing (captain's C8).
@@ -21,6 +26,24 @@ export interface TdsLawEntry {
   rates: { standard: number; noPan?: number; pan4thChar?: Record<string, number> };
   threshold: { single?: number; aggregate?: number; perMonth?: number };
   wholeYearOnCross: boolean;
+  /**
+   * Annual aggregate, liability at the crossing (194-I(a) / 194-I(b),
+   * captain instruction 2026-09-30). A booking is not liable while the
+   * party's cumulative FY bookings for the section are within the aggregate;
+   * the booking AT WHICH the cumulative crosses carries the whole cumulative
+   * to date (earlier bookings included) and every later booking carries its
+   * own full gross. The section's year-total tax is therefore unchanged — the
+   * rule only stops the pre-crossing bookings being reported on their own.
+   * A party that never crosses is never liable and raises nothing.
+   * The captain's instruction of 2026-09-30 is SECTION-NEUTRAL: it applies to
+   * EVERY section whose threshold is an annual aggregate — 194C, 194-I(a),
+   * 194-I(b), 194J, 194A and 194H all carry this flag. A per-bill `single`
+   * limit is tested independently and still makes a single large booking
+   * liable on its own whatever the aggregate has done (194C's ₹30,000). 194Q
+   * deliberately keeps its own "only the amount beyond the crossing" rule, and
+   * 194T is timing-only and never rate-recomputed.
+   */
+  cumulativeOnCross?: boolean;
   /**
    * Timing-only (194T, design of record table L163): the section is
    * deposit/interest-monitored, never rate-recomputed. Its deductee is a
@@ -40,7 +63,8 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.02, noPan: 0.2, pan4thChar: { P: 0.01, H: 0.01, C: 0.02, F: 0.02 } },
     threshold: { single: 30000, aggregate: 100000 },
     wholeYearOnCross: true,
-    confirm: "C1: threshold figures (30000/100000) are secondary; confirm",
+    cumulativeOnCross: true,
+    confirm: "C1: threshold figures (30000/100000) are secondary; confirm. Captain instruction 2026-09-30: the s.194C(5) aggregate limit is an annual cumulative, exactly as for 194-I — a booking before the crossing is not charged, the crossing booking carries the cumulative booked to that date, and a single bill above the per-bill limit stays liable on its own",
   },
   {
     section: "194J",
@@ -48,6 +72,7 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.1, noPan: 0.2, pan4thChar: { P: 0.1, H: 0.1, C: 0.02, F: 0.02 } },
     threshold: { aggregate: 50000 },
     wholeYearOnCross: true,
+    cumulativeOnCross: true,
   },
   {
     section: "194-I(a)",
@@ -55,6 +80,7 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.02, noPan: 0.2 },
     threshold: { aggregate: 600000 },
     wholeYearOnCross: true,
+    cumulativeOnCross: true,
     confirm: "Captain instruction 2026-09-26 (Addendum 26m): FY aggregate ₹6,00,000 per party per year, no per-month test",
   },
   {
@@ -63,6 +89,7 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.1, noPan: 0.2 },
     threshold: { aggregate: 600000 },
     wholeYearOnCross: true,
+    cumulativeOnCross: true,
     confirm: "Captain instruction 2026-09-26 (Addendum 26m): FY aggregate ₹6,00,000 per party per year, no per-month test",
   },
   {
@@ -71,6 +98,7 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.1, noPan: 0.2 },
     threshold: { aggregate: 10000 },
     wholeYearOnCross: true,
+    cumulativeOnCross: true,
     confirm: "C2: 10% is the rates-in-force figure; confirm",
   },
   {
@@ -79,6 +107,7 @@ export const TDS_SECTIONS: readonly TdsLawEntry[] = [
     rates: { standard: 0.02, noPan: 0.2 },
     threshold: { aggregate: 20000 },
     wholeYearOnCross: true,
+    cumulativeOnCross: true,
   },
   {
     section: "194Q",
@@ -143,11 +172,21 @@ export function calendarMonths(from: string, to: string): number {
   return (yearOf(to) - yearOf(from)) * 12 + (monthOf(to) - monthOf(from)) + 1;
 }
 
-/** Rule 30(2)–(3): 7th of the following month; March deductions due 30 April. */
+/**
+ * Rule 30(2)–(3): 7th of the following month; March deductions due 30 April.
+ *
+ * December needs no special case: `mkDate` rolls the year itself, so
+ * `mkDate(y, 12, 7, 1)` is 07-January of the NEXT year. The December branch
+ * this replaces passed month 1 *with* the overflow and so produced
+ * 07-February of the SAME year — a due date ten months in the past, which
+ * made every December deduction read as a late deposit (28 false
+ * tds_late_deposit rows on 06-Jan-2026 deposits; captain 2026-09-30).
+ */
 export function depositDue(deduction: string): string {
   const y = yearOf(deduction);
   const m = monthOf(deduction);
-  return m === 12 ? mkDate(y, 1, 7, 1) : m === 3 ? `${y}0430` : mkDate(y, m, 7, 1);
+  if (m === 3) return `${y}0430`;
+  return mkDate(y, m, 7, 1);
 }
 
 /** Rule 31A(1)–(2) statement due dates for FY 25-26 (24Q/26Q/27Q). */

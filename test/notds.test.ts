@@ -188,7 +188,7 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
   it("excludes a compliant deducted-and-deposited booking (deposit inside the due window)", () => {
     const { out, rows } = project(
       [
-        { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250705", "P/12", 5000, "Bank Alpha")] },
+        { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250705", "PMT/3", 5000, "Bank Alpha")] },
       ],
       [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
     );
@@ -228,7 +228,7 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
   it("includes a short-deducted booking, and a within-tolerance deduction is not short", () => {
     const expense = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
     const { rows } = project(
-      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -4998, partyA)] }],
+      [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -4998, partyA)] }],
       expense,
     );
     expect(rows).toHaveLength(1);
@@ -239,7 +239,7 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
     // 4999 is within the 1.0 tolerance of the 5000 liability: not short, and
     // deposited on time ⇒ compliant ⇒ no candidate.
     const within = project(
-      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -4999, partyA), row("20250705", "P/12", 4999, "Bank Alpha")] }],
+      [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -4999, partyA), row("20250705", "PMT/3", 4999, "Bank Alpha")] }],
       expense,
     );
     expect(within.rows).toEqual([]);
@@ -251,7 +251,7 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
     // undeducted expense: 5,000 shortfall / 2% = 2,50,000, with TDS done and
     // deposited at 0 (no tax was deducted on that portion).
     const { rows } = project(
-      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250705", "P/12", 5000, "Bank Alpha")] }],
+      [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250705", "PMT/3", 5000, "Bank Alpha")] }],
       [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 500000, partyA)] }],
     );
     expect(rows).toHaveLength(1);
@@ -260,7 +260,7 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
 
   it("includes a deducted-but-never-deposited booking with tdsDeposited 0", () => {
     const { rows } = project(
-      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] }],
+      [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] }],
       [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }],
     );
     expect(rows).toHaveLength(1);
@@ -269,18 +269,18 @@ describe("booksCandidates (clause 21(b) candidate rows)", () => {
 
   it("excludes a late-but-deposited booking: a late deposit is a s.201(1A) interest finding, not a clause 21(b) row (2026-09-26 005)", () => {
     const expense = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
-    // depositDue(20250628) = 20250707 (Rule 30): the 15-Aug deposit is late,
+    // depositDue(20250605) = 20250707 (Rule 30): the 15-Aug deposit is late,
     // but the tax was deposited — the review raises tds_late_deposit (interest)
     // and no not_deducted/short/not_deposited finding, so the engine collects
     // no clause 21(b) row (the sheets reconcile to the review).
     const { rows } = project(
-      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] }],
+      [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250815", "PMT/3", 5000, "Bank Alpha")] }],
       expense,
     );
     expect(rows).toEqual([]);
     // The same books with the deposit one day inside the window are compliant too.
     const onTime = project(
-      [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250707", "P/12", 5000, "Bank Alpha")] }],
+      [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250707", "PMT/3", 5000, "Bank Alpha")] }],
       expense,
     );
     expect(onTime.rows).toEqual([]);

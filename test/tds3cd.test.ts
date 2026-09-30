@@ -47,7 +47,7 @@ const events194c = (): ReturnType<typeof analyzeTds> => {
     { ledger: expenseLedger, rows: [row("20250510", "PU/C", 250000, certParty), row("20250510", "PU/P", 250000, plainParty)] },
   ];
   const dutyRows: TdsLedgerRows[] = [
-    { ledger: dutyLedger, rows: [row("20250628", "PU/C", -7500, certParty), row("20250815", "PU/C", 7500, certParty), row("20250628", "PU/P", -5000, plainParty), row("20250815", "PU/P", 5000, plainParty)] },
+    { ledger: dutyLedger, rows: [row("20250605", "JV/C", -7500, certParty), row("20250815", "PMT/C", 7500, certParty), row("20250605", "JV/P", -5000, plainParty), row("20250815", "PMT/P", 5000, plainParty)] },
   ];
   return analyzeTds(dutyRows, expenseRows, [], ctx);
 };

@@ -2161,23 +2161,37 @@ export function createSession(
     // and Winman PAN disagreeing after compaction is a hard error citing the
     // Parties row — never a value.
     let panAdopted = 0;
-    if (winman) {
-      for (const p of operator.parties) {
-        if (!p.winmanName) continue;
-        const declared = p.winmanName.trim();
-        const hit = winman.deductees.find((x) => x.name === declared);
-        if (!hit?.pan) continue;
-        if (p.pan && p.pan !== hit.pan) {
-          throw new Error(
-            `template Parties row ${p.panRow ?? "?"}, column C (PAN): the cell disagrees with the Winman export's PAN — retype the PAN (text column) or fix the export`,
-          );
-        }
-        if (!p.pan) panAdopted += 1;
-        panAliasOf.set(canonicalKey(p.ledger), vault.pseudonym(hit.pan, "tax_id"));
-        // The operator/Winman PAN takes precedence over a GSTIN-derived one,
-        // so the rate no longer rests on the GSTIN.
-        panDerived.delete(canonicalKey(p.ledger));
+    for (const p of operator.parties) {
+      const hit = p.winmanName && winman
+        ? winman.deductees.find((x) => x.name === p.winmanName!.trim())
+        : undefined;
+      if (p.pan && hit?.pan && p.pan !== hit.pan) {
+        throw new Error(
+          `template Parties row ${p.panRow ?? "?"}, column C (PAN): the cell disagrees with the Winman export's PAN — retype the PAN (text column) or fix the export`,
+        );
       }
+      // The operator's own Parties PAN and the adopted Winman PAN are the same
+      // fact, and it must reach `panOf` as well as the alias (2026-09-30): the
+      // PAN's 4th character IS the deductee type, so a PAN that stopped at the
+      // alias left `entityOf` null and the section's standard rate in force —
+      // s.194C 2% on an individual whose Winman PAN is a P PAN. Nothing about
+      // the rate may rest on the alias alone.
+      //
+      // It fills a GAP, never overrides: a master PAN that is not GSTIN-derived
+      // is the client's own master data and keeps the rate (a return-sourced
+      // PAN must not re-rate a master-classified deductee). A GSTIN-derived
+      // PAN is exactly what the operator's declaration supersedes, as the
+      // `panDerived` delete below always intended.
+      const known = hit?.pan ?? p.pan ?? null;
+      if (!known) continue;
+      if (!p.pan && hit?.pan) panAdopted += 1;
+      const k = canonicalKey(p.ledger);
+      if (!panOf.has(k) || panDerived.has(k)) {
+        panOf.set(k, known);
+        panDerived.delete(k);
+      }
+      panAliasOf.set(k, vault.pseudonym(known, "tax_id"));
+      panDerived.delete(k);
     }
     // Party→master resolution is a hot path: `analyzeTds` calls these closures
     // per booking, so a linear `masters.find` here was tens of millions of
@@ -2323,7 +2337,8 @@ export function createSession(
     const transporterDeclared = (party: string): boolean => ops(party)?.transporterDeclaration ?? false;
     const deducteeFiledReturn = (party: string): boolean => ops(party)?.deducteeFiledReturn ?? false;
     // The deductee type is the PAN's 4th character (item 8) — including a
-    // PAN derived from the GSTIN, since panOf already holds both. The full
+    // PAN derived from the GSTIN and one the operator or the Winman export
+    // declared, since panOf holds all three. The full
     // statutory alphabet P/H/C/F/A/B/T/L/J/G feeds the rate table; a letter
     // a section's table does not name falls back to that section's standard
     // rate inside rateFor. The Tally master's tdsDeducteeType field is no

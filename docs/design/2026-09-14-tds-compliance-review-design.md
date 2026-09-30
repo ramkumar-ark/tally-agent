@@ -208,9 +208,14 @@ interest (i), not the finding.
   which never fires for a normal booking and made every real booking
   invisible — see `AGENTS.md`)*; a
   *payment/advance* = a Dr row on that party ledger; a *deduction* = a Cr row
-  to a duty ledger joined to the booking by `voucherNumber` when both
-  periodic reports name it, else date+counterparty in the same month (±30
-  days); a *deposit* = a Dr row to the duty ledger matched to the deduction
+  to a duty ledger joined to the booking when both periodic reports name the
+  **same voucher number on the same date** — number *and* date, never number
+  alone *(amended 2026-09-30, inbox 016: Tally numbers each voucher type in
+  its own series, so "P/12" is a bill of the year and also a journal of the
+  year; a number-only join paired a ₹462 credit of 31-Jan-2026 to a bill of
+  09-Jun-2025 and reported it as tax deducted eight months late)* — else
+  date+counterparty in the same month (±30 days); a *deposit* = a Dr row to
+  the duty ledger matched to the deduction
   credit by date+amount (the operator challan month, if present, is
   authoritative; a book-vs-file difference is `tds_deposit_mismatch`,
   tolerance ₹1 — the `GST_TOLERANCE` philosophy at a TDS-sized figure).

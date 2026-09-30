@@ -4,13 +4,20 @@ import type { LedgerVoucherRow, VoucherRow } from "../src/downstream.js";
 import { projectLedgerRows } from "../src/tds-daybook.js";
 import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
 import { TDS_CHECK_ORDINAL, tdsFindingId } from "../src/types.js";
+import { depositDue } from "../src/tds-law.js";
 
 /**
  * A fictional ledger universe, in no way copied from live books. The worked
  * example from the TDS brainstorm carries the exact figures: a
- * 2,50,000 bill at 2% = 5,000 tax, booked 10-May-2025, deducted 28-Jun-2025,
- * deposited 15-Aug-2025.
+ * 2,50,000 bill at 2% = 5,000 tax, booked 10-May-2025 on Purchase P/12,
+ * deducted 05-Jun-2025, deposited 15-Aug-2025.
  * Interest (i) 1% x 2 months = 100; interest (ii) 1.5% x 3 months = 225.
+ *
+ * The duty credit and the deposit each sit on their OWN voucher (Journal
+ * JV/7, Payment PMT/3), never on the bill's P/12: Tally numbers each voucher
+ * type in its own space, so a number is a voucher only together with its date
+ * (inbox 016, `sameVoucher` in src/tds.ts). Where a test wants the credit to
+ * pair to the bill, it pairs by the 30-day month window like a real book.
  */
 
 const dutyLedger = "TDS Contractors";
@@ -110,37 +117,46 @@ describe("TDS event model", () => {
 
   it("recognizes a deduction: a duty-ledger credit with the deductee counterparty", () => {
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.deductions).toEqual([
-      expect.objectContaining({ date: "20250628", party: partyA, tax: 5000, section: "194C" }),
+      expect.objectContaining({ date: "20250605", party: partyA, tax: 5000, section: "194C" }),
     ]);
   });
 
   it("recognizes a deposit: a duty-ledger debit matched to the deduction by date and amount", () => {
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250815", "PMT/3", 5000, "Bank Alpha")] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(out.events.deposits).toEqual([
       expect.objectContaining({ date: "20250815", tax: 5000, section: "194C" }),
     ]);
   });
 
-  it("joins deductions by voucherNumber when both reports name it, else by month and counterparty (30 days)", () => {
+  it("joins a deduction only on a voucher the two reports share on the SAME date, else by month and counterparty (30 days)", () => {
     const ctx = tdsCtx();
-    // Named voucher on both sides: joined despite the date gap.
-    const joined = run(ctx, [
+    // Number and date agreeing: the duty line genuinely sits on the bill's own
+    // voucher, so it joins.
+    const own = run(ctx, [
+      { ledger: dutyLedger, rows: [row("20250510", "P/12", -5000, partyA)] },
+    ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
+    expect(own.events.deductions).toEqual([
+      expect.objectContaining({ joinedTo: "P/12", date: "20250510" }),
+    ]);
+    // The number ALONE is not a voucher (inbox 016): Tally numbers each
+    // voucher type separately, so a Journal repeating a Purchase number on
+    // another day must not claim that bill — and 82 days is past the 30-day
+    // month window, so nothing else joins it either.
+    const numberOnly = run(ctx, [
       { ledger: dutyLedger, rows: [row("20250731", "P/12", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
-    expect(joined.events.deductions).toEqual([
-      expect.objectContaining({ joinedTo: "P/12", date: "20250731" }),
-    ]);
-    // Unnamed on one side: same month and counterparty, within 30 days.
+    expect(numberOnly.events.deductions.every((d) => !d.booking)).toBe(true);
+    // Its own voucher number: same month and counterparty, within 30 days.
     const fallback = run(ctx, [
-      { ledger: dutyLedger, rows: [row("20250528", "ADV-9", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(fallback.events.deductions).toEqual([
-      expect.objectContaining({ joinedTo: "P/12", date: "20250528" }),
+      expect.objectContaining({ joinedTo: "P/12", date: "20250605" }),
     ]);
     // Counterparty mismatch never joins.
     const noGuess = run(ctx, [
@@ -208,9 +224,12 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     expect(out.findings).toEqual([]);
   });
 
-  it("applies whole-year liability on aggregate crossing: sub-threshold bookings both liable", () => {
+  it("applies cumulative-limit liability on aggregate crossing: one row for the crossing booking", () => {
     // Six 20,000 bookings = 1,20,000 aggregate, past the 1,00,000 aggregate;
-    // each is below the 30,000 single threshold, but the whole year is liable.
+    // each is below the 30,000 single threshold, so only the booking that
+    // carries the year over the limit is liable, and it carries the whole
+    // cumulative (captain 2026-09-30: the s.194C(5) aggregate is an annual
+    // cumulative, exactly as for 194-I).
     const out = run(
       tdsCtx(),
       [],
@@ -218,7 +237,7 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
         row(`2025051${i}`, `P/${i}`, 20000, partyA)) }],
     );
     const found = ofCheck(out, "tds_not_deducted");
-    expect(found).toHaveLength(6);
+    expect(found).toHaveLength(1);
     expect(found.reduce((a, f) => a + f.amount, 0)).toBe(2400); // 1,20,000 x 2%
   });
 
@@ -313,9 +332,10 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
     expect(out.findings.some((f) => f.section === "194Q")).toBe(false);
   });
 
-  it("a wholeYear section (194C) still makes every booking liable once the aggregate crosses", () => {
-    // Six 20,000 bookings: aggregate 1,20,000 crosses the 1,00,000 threshold,
-    // so the whole year is liable even though each is below the single limit.
+  it("a cumulative-limit section (194C) makes only the crossing booking liable", () => {
+    // Six 20,000 bookings: aggregate 1,20,000 crosses the 1,00,000 threshold
+    // on the last one, so that booking carries the whole cumulative and the
+    // five before it are inside the limit (captain 2026-09-30).
     const out = run(
       tdsCtx(),
       [],
@@ -323,8 +343,22 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
         row(`2025051${i}`, `P/${i}`, 20000, partyB)) }],
     );
     const found = ofCheck(out, "tds_not_deducted");
-    expect(found).toHaveLength(6);
+    expect(found).toHaveLength(1);
     expect(found.reduce((a, f) => a + f.amount, 0)).toBe(2400);
+  });
+
+  it("a single bill above the 194C per-bill limit is liable before any crossing", () => {
+    // 40,000 on its own is past the 30,000 single limit, so it is chargeable
+    // on its own even though the year's aggregate never reaches 1,00,000
+    // (captain 2026-09-30).
+    const out = run(tdsCtx(), [], [{
+      ledger: expenseLedger,
+      rows: [row("20250510", "P/1", 40000, partyB), row("20250520", "P/2", 20000, partyB)],
+    }]);
+    const found = ofCheck(out, "tds_not_deducted");
+    expect(found).toHaveLength(1);
+    expect(found[0].amount).toBe(800); // 40,000 x 2%, not the 60,000 cumulative
+    expect(ofCheck(out, "tds_threshold_crossed")).toEqual([]);
   });
 
   it("rates: PAN 4th char P/H at 1% for 194C, entity C/F at 2%", () => {
@@ -358,9 +392,9 @@ describe("TDS thresholds, rates and the 194Q crossing exception", () => {
 
 describe("TDS late-deduction findings and interest (i)/(ii)", () => {
   it("flags a deduction after the deductible date with the interest (i) schedule row", () => {
-    // The worked example: booked 10-May (deductible), deducted 28-Jun (deduction).
+    // The worked example: booked 10-May (deductible), deducted 05-Jun (deduction).
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_late_deducted");
     expect(found).toEqual([
@@ -368,13 +402,13 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
     ]);
     const schedule = found[0].schedule ?? [];
     expect(schedule).toEqual([
-      expect.objectContaining({ kind: "i", amount: 100, from: "20250510", to: "20250628" }),
+      expect.objectContaining({ kind: "i", amount: 100, from: "20250510", to: "20250605" }),
     ]);
   });
 
   it("the deductible date pulls earlier when an advance precedes the booking", () => {
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }], [
       { ledger: partyA, rows: [{ ...row("20250420", "P/03", 250000, "Bank Alpha"), voucherType: "Advance" }] },
     ]);
@@ -391,14 +425,14 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
 
   it("computes late-deduction (i) interest by default (2026-09-26r inbox 067)", () => {
     const out = run(tdsCtx(undefined, { lateDeductionInterest: true }), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_late_deducted")).toHaveLength(1);
   });
 
   it("omits late-deduction (i) interest, its finding and its payable when disabled (2026-09-26r inbox 067)", () => {
     const out = run(tdsCtx(undefined, { lateDeductionInterest: false }), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_late_deducted")).toEqual([]);
     expect(out.totals.interestI).toBe(0);
@@ -490,7 +524,7 @@ describe("TDS late-deduction findings and interest (i)/(ii)", () => {
 describe("TDS deposit checks", () => {
   it("flags a deduction with no deposit debit by asOnDate as tds_not_deposited", () => {
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_not_deposited");
     expect(found).toEqual([
@@ -499,22 +533,22 @@ describe("TDS deposit checks", () => {
   });
 
   it("flags a deposit after the Rule 30 due date with the interest (ii) schedule row", () => {
-    // Worked example: deducted 28-Jun, deposited 15-Aug: 1.5% x 3 = 225.
+    // Worked example: deducted 05-Jun, deposited 15-Aug: 1.5% x 3 = 225.
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250815", "P/12", 5000, "Bank Alpha")] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250815", "PMT/3", 5000, "Bank Alpha")] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const found = ofCheck(out, "tds_late_deposit");
     expect(found).toEqual([
       expect.objectContaining({ amount: 5000, severity: "warning" }),
     ]);
     expect(found[0].schedule).toEqual([
-      expect.objectContaining({ kind: "ii", amount: 225, from: "20250628", to: "20250815" }),
+      expect.objectContaining({ kind: "ii", amount: 225, from: "20250605", to: "20250815" }),
     ]);
   });
 
   it("keeps a deposit on time (7th next month) out of the findings", () => {
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250707", "P/12", 5000, "Bank Alpha")] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250707", "PMT/3", 5000, "Bank Alpha")] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_late_deposit")).toEqual([]);
     expect(ofCheck(out, "tds_not_deposited")).toEqual([]);
@@ -526,7 +560,7 @@ describe("TDS deposit checks", () => {
       challans: [{ section: "194C", forMonth: "2025-06", depositDate: "20250915" }],
     };
     const out = run(tdsCtx(op), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA), row("20250702", "P/12", 5000, "Bank Alpha")] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA), row("20250702", "PMT/3", 5000, "Bank Alpha")] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_deposit_mismatch").length).toBe(1);
   });
@@ -562,7 +596,7 @@ describe("TDS statement checks (234E, 271H)", () => {
       statements: [{ form: "26Q", quarter: "Q2", filedDate: "20251015", tdsAmount: 5000 }],
     };
     const out = run(tdsCtx(op), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_statement_late")).toEqual([]);
     expect(ofCheck(out, "tds_statement_late")).toEqual([]);
@@ -582,7 +616,7 @@ describe("TDS exposure findings and the s.201(1) proviso", () => {
   it("states the not-deposited s.40(a)(ia) exposure at 30% of the expenditure, not of the tax", () => {
     const op: OperatorFile = { ...stdOperator };
     const out = run(op ? tdsCtx(op) : tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     // The tax was deducted but never deposited (no deposit rows): the
     // disallowance rides the expenditure, not the 5,000 tax.
@@ -605,7 +639,7 @@ describe("TDS exposure findings and the s.201(1) proviso", () => {
     };
     const ctx = tdsCtx(op, { deducteeFiledReturn: (p) => p === partyA });
     const out = run(ctx, [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const late = ofCheck(out, "tds_late_deducted");
     expect(late).toHaveLength(1);
@@ -646,15 +680,27 @@ describe("TDS master-gap findings", () => {
     expect(gaps).toEqual([expect.objectContaining({ severity: "review" })]);
   });
 
-  it("names the cross month and the whole-year or 194Q-only rule as tds_threshold_crossed", () => {
+  it("names the cross month and the cumulative-limit rule as tds_threshold_crossed", () => {
     const out = run(tdsCtx(), [], [{
       ledger: expenseLedger,
       rows: [1, 2, 3, 4, 5, 6].map((i) => row(`2025051${i}`, `P/${i}`, 20000, partyA)),
     }]);
     const found = ofCheck(out, "tds_threshold_crossed");
     expect(found).toHaveLength(1);
-    expect(found[0].detail).toContain("whole year");
+    expect(found[0].detail).toContain("liable on the crossing booking itself");
     expect(found[0].severity).toBe("review");
+  });
+
+  it("dates a December deduction's Rule 30 due date into the following January", () => {
+    // 7th of the following month, and December rolls the YEAR (captain
+    // 2026-09-30: a December-2025 deduction is due 07-Jan-2026, never
+    // 07-Feb-2025). March is the other rollover rule: 30 April.
+    expect(depositDue("20251220")).toBe("20260107");
+    expect(depositDue("20250120")).toBe("20250207");
+    expect(depositDue("20251231")).toBe("20260107");
+    expect(depositDue("20250320")).toBe("20250430");
+    expect(depositDue("20250331")).toBe("20250430");
+    expect(depositDue("20250410")).toBe("20250507");
   });
 });
 
@@ -711,7 +757,7 @@ describe("section attribution from the expense ledger (revision 2)", () => {
 
   it("(e) payments carry no section and still feed the earlier-of timing rule", () => {
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }], [
       { ledger: partyA, rows: [{ ...row("20250420", "P/03", 250000, "Bank Alpha") }] },
     ]);
@@ -728,7 +774,7 @@ describe("section attribution from the expense ledger (revision 2)", () => {
       ],
     };
     const out = run(tdsCtx(op), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], []);
     expect(out.events.deductions).toEqual([]);
     const gaps = ofCheck(out, "tds_master_gap").filter((f) => f.deductee === dutyLedger);
@@ -737,7 +783,7 @@ describe("section attribution from the expense ledger (revision 2)", () => {
 
   it("(g) a party marked N produces no events and no findings where Y would", () => {
     const rows = [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }];
-    const duty = [{ ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] }];
+    const duty = [{ ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] }];
     // Session-level filters model tdsParties; at the engine the party is
     // simply absent from tdsParties when the operator says N.
     const withY = run(tdsCtx(), duty, rows);
@@ -780,11 +826,16 @@ describe("section attribution from the expense ledger (revision 2)", () => {
     expect(bySection.find((t) => t.section === "194C")?.gross).toBe(250000);
     expect(bySection.find((t) => t.section === "194-I(b)")?.gross).toBe(700000);
     // And each booking is critical on its own section threshold: the contract
-    // on the 194C aggregate, the rent on its own per-month threshold (the
-    // year 7,00,000 exceeds the 50,000 x 12 cap so the monthly rule is live
-    // — 2026-09-26k) — separate buckets, point 5 end to end.
+    // on the 194C aggregate, the rent on the 194-I(b) FY aggregate of
+    // 6,00,000 (captain 2026-09-30) — separate buckets, point 5 end to end.
+    // The 1,00,000 June rent is inside the annual limit and reports nothing;
+    // the 07-Oct booking is where the cumulative crosses it and carries the
+    // whole 7,00,000 as its base.
     const notDeducted = ofCheck(out, "tds_not_deducted");
-    expect(notDeducted.map((f) => f.section)).toEqual(["194C", "194-I(b)", "194-I(b)"]);
+    expect(notDeducted.map((f) => [f.section, f.amount])).toEqual([
+      ["194C", 5000],
+      ["194-I(b)", 70000],
+    ]);
   });
 });
 
@@ -821,7 +872,7 @@ describe("2026-09-26 addendum regressions", () => {
   it("labels statement findings with the quarter, never the first party", () => {
     const op: OperatorFile = { ...stdOperator, statements: [] };
     const out = run(tdsCtx(op), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -5000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -5000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     const missing = ofCheck(out, "tds_statement_missing");
     expect(missing.length).toBeGreaterThan(0);
@@ -879,7 +930,7 @@ describe("2026-09-26 addendum regressions", () => {
     // Item 6: s.271C covers failure to deduct whole or part. 3,000 deducted
     // against a 5,000 liability leaves a 2,000 shortfall on its own.
     const out = run(tdsCtx(), [
-      { ledger: dutyLedger, rows: [row("20250628", "P/12", -3000, partyA)] },
+      { ledger: dutyLedger, rows: [row("20250605", "JV/7", -3000, partyA)] },
     ], [{ ledger: expenseLedger, rows: [row("20250510", "P/12", 250000, partyA)] }]);
     expect(ofCheck(out, "tds_exposure_271c")[0].amount).toBe(2000);
   });
@@ -1054,7 +1105,7 @@ describe("2026-09-26c regressions", () => {
     expect(out.events.deductions).toHaveLength(0);
   });
 
-  it("(3) the 194-I aggregate threshold (600,000) makes the crossed year's whole bookings liable", () => {
+  it("(3) the 194-I annual limit (600,000) makes only the crossing booking and later ones liable", () => {
     const op: OperatorFile = {
       ...EMPTY_TDS_OPERATOR,
       sections: [{ ledger: "Machinery Rent", section: "194-I(a)" }],
@@ -1071,11 +1122,14 @@ describe("2026-09-26c regressions", () => {
     ];
     const out = run(tdsCtx(op), [], expense);
     const nd = ofCheck(out, "tds_not_deducted");
-    expect(nd.map((f) => f.section)).toEqual(["194-I(a)", "194-I(a)", "194-I(a)"]);
-    expect(nd.map((f) => f.amount)).toEqual([4000, 4000, 5000]); // 2% x 200000, 2% x 200000, 2% x 250000
+    // The two bills inside the annual limit report nothing; the crossing bill
+    // carries the whole 6,50,000 booked to that date (captain 2026-09-30).
+    expect(nd.map((f) => f.section)).toEqual(["194-I(a)"]);
+    expect(nd.map((f) => f.amount)).toEqual([13000]);
+    expect(nd[0].detail).toContain("6,50,000.00");
     const crossed = ofCheck(out, "tds_threshold_crossed");
     expect(crossed).toHaveLength(1);
-    expect(crossed[0].detail).toContain("the whole year's amounts are liable");
+    expect(crossed[0].detail).toContain("liable on the crossing booking itself");
   });
 });
 
@@ -1097,8 +1151,8 @@ describe("2026-09-26d party-month coverage", () => {
       {
         ledger: "Machinery Rent",
         rows: [
-          row("20250510", "P/41", 400000, partyA), // month 750000 > perMonth 50000 → 8000
-          row("20250520", "P/42", 350000, partyA), // → 7000
+          row("20250510", "P/41", 400000, partyA), // inside the 6,00,000 annual limit
+          row("20250520", "P/42", 350000, partyA), // cumulative 7,50,000 crosses it
         ],
       },
     ];
@@ -1128,7 +1182,7 @@ describe("2026-09-26d party-month coverage", () => {
     expect(ofCheck(out2, "tds_not_deposited")).toEqual([]);
   });
 
-  it("credits short of the month's liability leave the uncovered bookings flagged", () => {
+  it("credits short of the month's liability leave the uncovered amount flagged", () => {
     const op: OperatorFile = {
       ...EMPTY_TDS_OPERATOR,
       sections: [
@@ -1140,8 +1194,8 @@ describe("2026-09-26d party-month coverage", () => {
       {
         ledger: "Machinery Rent",
         rows: [
-          row("20250510", "P/41", 400000, partyA),
-          row("20250520", "P/42", 350000, partyA),
+          row("20250510", "P/41", 400000, partyA), // inside the 6,00,000 annual limit
+          row("20250520", "P/42", 350000, partyA), // cumulative 7,50,000 → crosses
         ],
       },
     ];
@@ -1158,10 +1212,23 @@ describe("2026-09-26d party-month coverage", () => {
       },
     ];
     const out = run(tdsCtx(op), duty, expense, party);
-    const nd = ofCheck(out, "tds_not_deducted");
-    expect(nd).toHaveLength(1);
-    expect(nd[0].amount).toBe(7000);
-    expect(nd[0].section).toBe("194-I(a)");
+    // The month's 15,000 is not fully covered. Since inbox 016 the 8,000 credit
+    // is a duty credit dated AFTER the crossing bill, so it settles that bill
+    // backwards (captain 2026-09-30): a LATE DEDUCTION of the 8,000 that is
+    // late, plus a SHORT DEDUCTION of the 7,000 residue — never a
+    // not-deducted finding, which would understate the books: the money was
+    // deducted, it was simply deducted late.
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
+    const late = ofCheck(out, "tds_late_deducted");
+    expect(late).toEqual([expect.objectContaining({ amount: 8000, section: "194-I(a)" })]);
+    // Interest (i) runs from the bill's own deductible date to the credit.
+    expect(late[0].schedule).toEqual([
+      expect.objectContaining({ kind: "i", amount: 80, from: "20250520", to: "20250525" }),
+    ]);
+    const short = ofCheck(out, "tds_short_deducted");
+    expect(short).toEqual([expect.objectContaining({ amount: 7000, section: "194-I(a)" })]);
+    expect(out.totals.notDeducted).toBe(0);
+    expect(out.totals.shortDeducted).toBe(7000);
   });
 
   it("unresolved (null-section) duty credits never cover a month", () => {
@@ -1177,8 +1244,8 @@ describe("2026-09-26d party-month coverage", () => {
       {
         ledger: "Machinery Rent",
         rows: [
-          row("20250510", "P/41", 400000, partyA), // month 700000 > perMonth 50000
-          row("20250520", "P/42", 300000, partyA), // → 8000 + 6000 liable
+          row("20250510", "P/41", 400000, partyA), // inside the annual limit → no tax
+          row("20250520", "P/42", 300000, partyA), // cumulative 7,00,000 → carries it
         ],
       },
     ];
@@ -1197,8 +1264,9 @@ describe("2026-09-26d party-month coverage", () => {
       },
     ];
     const out = run(tdsCtx(op), duty, expense, party);
-    // the credit is unresolved → ledger-level TDS-012 and no coverage
-    expect(ofCheck(out, "tds_not_deducted")).toHaveLength(2);
+    // the credit is unresolved → ledger-level TDS-012 and no coverage; only
+    // the crossing bill owes tax, so only it is flagged.
+    expect(ofCheck(out, "tds_not_deducted")).toHaveLength(1);
     expect(ofCheck(out, "tds_master_gap")).toHaveLength(1);
   });
 });
@@ -1328,6 +1396,12 @@ describe("2026-09-26e/f deposit coverage + nearest bill", () => {
   it("an uncovered remainder still fires tds_not_deposited", () => {
     const dep = [{ ledger: "TDS Machinery", rows: [row("20250530", "P/47", 10000, "Bank A/c")] }];
     const out = run(tdsCtx(covOp), [...covDuty, ...dep], covExpense, covParty);
+    // Only the 20-May bill owes tax (the 10-May bill is inside the 6,00,000
+    // annual limit, captain 2026-09-30), so the month's need is 15,000 and the
+    // 10,000 lump covers only part of it. Both 7,500 credits report: one sits
+    // on the liable bill, and the other is a real deduction booked against the
+    // pre-crossing bill, so its deposit question runs even though that bill
+    // owes no tax (firstmate 2026-09-30).
     expect(ofCheck(out, "tds_not_deposited")).toHaveLength(2);
     expect(out.events.deductions.every((d) => !d.depositCovered)).toBe(true);
   });
@@ -1341,6 +1415,9 @@ describe("2026-09-26e/f deposit coverage + nearest bill", () => {
   it("a deposit beyond the Rule 30 window never covers the month", () => {
     const dep = [{ ledger: "TDS Machinery", rows: [row("20250715", "P/47", 50000, "Bank A/c")] }];
     const out = run(tdsCtx(covOp), [...covDuty, ...dep], covExpense, covParty);
+    // Both 7,500 credits are uncovered — the July deposit is past the Rule 30
+    // window — so one reports on the liable bill and one on the pre-crossing
+    // bill it was booked against (firstmate 2026-09-30).
     expect(ofCheck(out, "tds_not_deposited")).toHaveLength(2);
   });
 });
@@ -1490,9 +1567,10 @@ describe("2026-09-26g by-voucher amount-tiebreak", () => {
     const party = [{ ledger: partyA, rows: [{ ...row("20250430", "B/8", -950000, "Machinery Rent"), voucherType: "Purchase" }] }];
     const out = run(tdsCtx(op), duty, expense, party);
     expect(out.events.deductions.find((d) => d.tax === 19000)!.booking?.gross).toBe(950000);
-    expect(ofCheck(out, "tds_short_deducted")).toEqual([]); // the 19,000 credit covers the whole liability
-    // the 6,600 credit is not paired with any booking; with no deposit it is not a non-deposit either
-    expect(out.events.deductions.find((d) => d.tax === 6600)!.booking).toBeUndefined();
+    // The in-voucher 6,600 still wins the bill (2026-09-26g) and is now short
+    // of the bill's liability, which the 194-I annual limit makes the whole
+    // 9,50,000 booked to that date (captain 2026-09-30) — 19,000 payable.
+    expect(ofCheck(out, "tds_short_deducted").map((f) => f.amount)).toEqual([12400]);
   });
 });
 
@@ -1519,8 +1597,9 @@ describe("2026-09-26m 194-I aggregate threshold + 194Q month matching", () => {
     expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
   });
 
-  it("rent for the year above 6,00,000 makes the party liable on the whole year", () => {
-    // Exceeding ₹6,00,000 makes whole year liable.
+  it("rent for the year above 6,00,000 makes the crossing booking carry the year", () => {
+    // Exceeding ₹6,00,000 makes the whole cumulative liable, on the booking
+    // that carries it (captain 2026-09-30).
     const expense = [
       {
         ledger: "Machinery Rent",
@@ -1532,11 +1611,12 @@ describe("2026-09-26m 194-I aggregate threshold + 194Q month matching", () => {
     ];
     const out = run(tdsCtx(rentOp), [], expense);
     const nd = ofCheck(out, "tds_not_deducted");
-    expect(nd.map((f) => f.amount)).toEqual([6000, 7000]); // 2% of 300,000 and 350,000
+    expect(nd.map((f) => f.amount)).toEqual([13000]); // 2% of 6,50,000, on the 20-Jun bill
+    expect(nd[0].detail).toContain("6,50,000.00");
     const crossed = ofCheck(out, "tds_threshold_crossed");
     expect(crossed).toHaveLength(1);
     expect(crossed[0].detail).toContain("crossed the threshold in 20-Jun-2025");
-    expect(crossed[0].detail).toContain("the whole year's amounts are liable");
+    expect(crossed[0].detail).toContain("liable on the crossing booking itself");
   });
 
   const qOp: OperatorFile = {

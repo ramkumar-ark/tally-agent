@@ -204,19 +204,22 @@ describe("TDS split allocation (2026-09-29)", () => {
   });
 
   it("names the competing credit in the finding when a booking is still left uncovered", () => {
-    // 400,000 + 160,000 = 560,000, but the journal pays 560,050: the two
-    // bills are uncovered and the finding must carry the evidence instead of
-    // sending the operator after a payment the books already hold.
+    // The journal pays 4,00,000, which is the first bill's own liability
+    // (2% of 2,00,00,000) to the rupee, so nothing is banked as an excess and
+    // the second bill is a real gap. The finding must carry the evidence
+    // instead of sending the operator after a payment the books already hold.
+    // (A journal that pays MORE than a bill's liability no longer leaves a gap:
+    // the excess carries forward to the later bill — captain 2026-09-30.)
     const out = run(
       ctx(),
-      [credit("20260215", "J/9", 560050)],
-      [bill("20260130", "P/1", 20000000), bill("20260301", "P/2", 8000000)],
+      [credit("20260225", "J/9", 400000)],
+      [bill("20260210", "P/1", 20000000), bill("20260320", "P/2", 8000000)],
     );
     const findings = of(out, "tds_not_deducted");
     expect(findings.length).toBeGreaterThan(0);
     for (const f of findings) {
       expect(f.detail).toContain("Evidence considered:");
-      expect(f.detail).toContain("15-Feb-2026");
+      expect(f.detail).toContain("25-Feb-2026");
       // No name, no PAN — only dates and money.
       expect(f.detail).not.toContain(party);
       expect(f.detail).not.toContain("Pan of");
@@ -401,12 +404,25 @@ describe("TDS same-month consolidation (2026-09-29)", () => {
     );
     expect(out.events.deductions[0].shares).toBeUndefined();
     expect(out.consolidations).toEqual([]);
+    // The month rule still never reaches across the boundary — no share, no
+    // consolidation. What changed since inbox 016 is only the REPORTING of the
+    // older unpaid bills: the 6,00,000 journal's excess settles them backwards,
+    // oldest first, so each is what it really is — a LATE deduction of 1,00,000
+    // carrying s.201(1A)(i) interest — not a missing deduction the books never
+    // made (captain 2026-09-30). The unpaired February bill the ordinary 1:1
+    // walk still pairs keeps its own credit and its own excess.
     const unpaired = of(out, "tds_not_deducted");
-    expect(unpaired).toHaveLength(5);
-    // All three January bookings are among them: the month rule never reached
-    // across the month boundary, and the credit went to one February bill by
-    // the ordinary walk rather than to any group of them.
-    expect(unpaired.filter((f) => f.detail.includes("-Jan-2026"))).toHaveLength(3);
+    expect(unpaired).toEqual([]);
+    const late = of(out, "tds_late_deducted");
+    // Six: the February bill the walk paired 1:1 is itself a late deduction of
+    // its own 1,00,000, and the journal's excess settles the five before it.
+    expect(late.map((f) => f.amount)).toEqual([100000, 100000, 100000, 100000, 100000, 100000]);
+    // Three of them are the January bills, which the month rule could not
+    // reach and the ordinary walk could not reach either; the other three are
+    // the February bills — the one the walk paired 1:1 and the two the
+    // journal's excess reached back over.
+    expect(late.filter((f) => f.detail.includes("-Jan-2026"))).toHaveLength(3);
+    expect(late.filter((f) => f.detail.includes("-Feb-2026"))).toHaveLength(3);
   });
 
   it("does not consolidate a same-month sum that misses the tolerance", () => {

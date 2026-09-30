@@ -47,8 +47,8 @@ const row = (date: string, voucher: string, amount: number, counterparty: string
 });
 
 // Each party: a 2,50,000 bill on 10-May-2025 (crosses 194C's aggregate
-// threshold, whole-year liable), the duty credit deducted late on 28-Jun,
-// deposited late on 15-Aug. Certificate party at 3% (7,500), plain at 2%
+// threshold, whole-year liable), the duty credit deducted late on 05-Jun on
+// its own Journal voucher, deposited late on 15-Aug. Certificate party at 3% (7,500), plain at 2%
 // (5,000). Interest (i) 1% x 2 months; interest (ii) 1.5% x 3 months.
 const expenseRows: TdsLedgerRows[] = [
   {
@@ -64,10 +64,10 @@ const dutyRows: TdsLedgerRows[] = [
   {
     ledger: dutyLedger,
     rows: [
-      row("20250628", "PU/C", -7500, certParty),
-      row("20250815", "PU/C", 7500, certParty),
-      row("20250628", "PU/P", -5000, plainParty),
-      row("20250815", "PU/P", 5000, plainParty),
+      row("20250605", "JV/C", -7500, certParty),
+      row("20250815", "PMT/C", 7500, certParty),
+      row("20250605", "JV/P", -5000, plainParty),
+      row("20250815", "PMT/P", 5000, plainParty),
     ],
   },
 ];

@@ -1399,6 +1399,177 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `subsequentChallanId`** (one challan covering several deductions of a section — the two 194T partners —
   has its single interest counted once; `section|depositDate` is only the fallback key).
 
+## Sharp edges found fixing the 194-I annual limit (2026-09-30)
+
+- **194-I's ₹6,00,000 limit is a CUMULATIVE test, not a whole-year switch**
+  (`TdsLawEntry.cumulativeOnCross`, `src/tds-law.ts`; `stampLiabilities`, `src/tds.ts`). The old
+  `wholeYearOnCross` flag set `liableBase = b.gross` for *every* booking once the year ever crossed, so a
+  party whose first bills sat inside the limit was reported not-deducted on them. Now the crossing
+  **booking index** (`crossIdx`, -1 = never crosses) decides: pre-crossing bookings get `liableBase 0`,
+  the crossing booking gets the whole running `cumulative`, later bookings their own gross. The
+  `crossIdx < 0` guard is load-bearing — without it `i > crossIdx` is true for every booking and a
+  never-crossing party becomes fully liable. The **index** is required, not `agg.crossDate`: several
+  bookings can share the crossing date and only the later one carries the crossing. 194-C keeps plain
+  `wholeYearOnCross` (its 1,00,000 aggregate really does make the whole year's bills liable), and the
+  year-total tax (`totals.bySection`) is unchanged — only the *rows* moved.
+- **A not-deducted row on the crossing booking quotes the cumulative, and its clause-21(b) `gross` is
+  the liable base, not `b.gross`** (the 194Q `liability / rate` precedent). Detail reads "…payable on the
+  6,89,000.00 booked to this date, including the earlier bookings within the annual limit, but no duty
+  credit was found."
+- **The crossing booking owes the cumulative LESS the tax the books already deducted on that
+  party's earlier bookings of the year** (firstmate inbox 010, 2026-09-30; pass 2 of
+  `analyzeTds`). `preCrossTax` = `round2(Σ taxPaidOn over bookings.slice(0, crossIdx))`, where
+  `taxPaidOn` is the share tax when the credit is a consolidation share and `ded.tax`
+  otherwise; at `i === crossIdx` the liability becomes `round2(Math.max(0, base - preCrossTax))`.
+  Pass 2 computes its **own** `crossIdx` (the `before` loop that used to sit there was DEAD —
+  its `!agg.crossed` guard can never fire once pass 1 set the field — and `before` was unused),
+  which is what keeps the index aligned with the walk below it. Measured: the 194-I(b) rent
+  party deducts 10% on all eleven bills; the old code charged its 05-Feb crossing Rs 66,000
+  against a single Rs 6,000 credit and invented a Rs 60,000 short-deducted. Netting the ten
+  earlier Rs 6,000 credits leaves Rs 6,000 payable, which the 05-Feb credit covers exactly.
+  The same netting corrected the 194-I(a) crossing finding from Rs 13,780 to Rs 800 (its
+  Rs 12,980 credit is booked against a pre-crossing bill) and made that party exact —
+  Rs 44,660 due − Rs 43,560 credited = Rs 1,100 = its two reported findings.
+- **A silent booking (zero liability) that carries a joined credit still runs the
+  credit-keyed checks** (firstmate 2026-09-30). The walk head is now
+  `const found = deductionOf(b); const base = round2((b.rateApplied ?? 0) * (b.liable ?? 0));
+  if (base <= TDS_TOLERANCE && !found) continue; const silent = base <= TDS_TOLERANCE;` — the
+  194C(6) transporter branch and the `liabilities.push` row are gated on `!silent`, while
+  late-deduction, Rule 30 late-deposit, deposit-mismatch and not-deposited all still run on
+  the credit. A deduction is a fact about the books, not about whether the bill it pays was
+  chargeable. This restored four late-deposit and five late-deduction findings that the
+  silence fix had dropped, and it is why the warning count rises while the critical count
+  falls. `deductionOf`/`taxPaidOn` exist so the netting can read credits of bookings the walk
+  skips.
+- **An amount match must be settled before the date walk** (`pairExactAmounts`, `src/tds.ts`, run from
+  `joinEvents` before the by-voucher/nearest-date pass; it returns immediately when `stamped` is off).
+  The 2026-09-26g tiebreak only looked at the *current* booking's candidates, so an earlier booking could
+  take by date a credit that was the later booking's exact liability — the 20-Aug 194-C crossing bill
+  claimed a 1,967 credit owed to the 30-Aug bill. Pairs are claimed strongest-match-first: same-voucher
+  pairs, then smallest `|tax − liability|` (so an approximate match can never steal an exact one's
+  credit), then dates; each booking and each credit once. Blast radius is real — it also *reveals* a
+  previously hidden 194-Q late-deposit.
+- **An operator/Winman PAN must reach `panOf`, not just `panAliasOf`** (`src/review.ts` §8.4). `rateFor`
+  reads `panOf` (via `entityOf`), so a PAN adopted from the Winman return through the template's
+  `winmanName` was invisible to the rate table and a 194-C *individual* paid the 2% standard. The
+  precedence is deliberate: the adopted PAN fills a **gap** — it sets `panOf` only when the key is
+  absent or was GSTIN-derived, never over a real master PAN (the client's own master data keeps the
+  rate, and a GSTIN-derived PAN is exactly what the operator declaration supersedes). `panDerived` is
+  deleted in both branches, so the "(PAN derived from GSTIN)" note disappears.
+- **`cumulativeOnCross` is SECTION-NEUTRAL (captain 2026-09-30, second half).** The annual-cumulative
+  reading is the rule for EVERY section whose threshold is an annual aggregate — the flag now sits on
+  **194C, 194-I(a), 194-I(b), 194J, 194A and 194H**; 194Q keeps its own "only the amount beyond the
+  crossing" rule (`max(0, min(gross, cumulative - aggregate))`) and 194T stays timing-only. A per-bill
+  `single` limit is tested INDEPENDENTLY and still makes one large booking liable whatever the
+  aggregate has done (194C's ₹30,000 — a ₹41,000 April bill against a non-crossing aggregate is still
+  reported at 2%). On the reviewed company 194-C went 31 → 13 not-deducted findings with the total
+  RISING (₹9,779.07 → ₹11,787.46) and 194-J 7 → 5, because a crossing row now carries the year to
+  date; 194A/194H raise nothing on that book, which is an honest "nothing to report", not a no-op bug.
+- **The netting must be applied BEFORE the silence test** (`src/tds.ts` pass 2). `liability` is
+  `i === crossIdx ? max(0, base - preCrossTax) : base`, and only THEN is `silent = liability <=
+  TDS_TOLERANCE` tested — netting after the gate raises a **zero-amount `tds_not_deducted`** on a
+  crossing bill whose cumulative is fully covered by earlier voluntary deductions.
+- **`depositDue`'s December special case read the year backwards** (`src/tds-law.ts`). It passed
+  month **1** *with* the `monthOverflow` (`mkDate(y, 1, 7, 1)`), and `mkDate` does the rolling itself,
+  so a December deduction came out due **07-February of the same year** — ten months in the past. Every
+  December deduction then read as a late deposit: 28 false `tds_late_deposit` rows (₹8,11,543.00) on
+  06-Jan-2026 deposits that were a day EARLY. `mkDate(y, m, 7, 1)` already rolls the year, so the fix
+  is to DELETE the special case; March's `${y}0430` stands. `depositDue` is the single due-date source
+  (`src/tds.ts` + `src/tds3cd.ts`), so one change covers late-deposit, not-deposited and 3CD interest.
+- **An over-deduction is a BANK, not a second liability** (captain 2026-09-30, third point;
+  `excessBank` in pass 2 of `analyzeTds`, `src/tds.ts`). A bill's credit **above that bill's
+  own liability** is not that bill's business — it is a credit against a later bill of the
+  same party, section and year, and the engine now banks it and spends it oldest-first
+  (`fromBank = Math.min(excessBank, base)` before the silence test, `excessBank +=
+  max(0, dedTax - liability)` after). The `crossIdx`/crossing netting it replaced was the
+  one-booking special case of exactly this; **never reinstate a per-crossing net** — the bank
+  covers it and the two would double-count. The captain's measured case: 194-C, 55,764 booked
+  15-Oct with 4,354 deducted 16-Oct (the whole year's 2% in advance), 1,61,917.20 booked
+  26-Dec with no credit, year 2,17,681.20 → 4,353.62. v7 reported 3,238.34, v8 reported
+  nothing, v9 reports **1,114.90** (4,353.62 less the 3,238.72 of the advance that belongs to
+  December rather than to October). 194-I(a) is untouched by the bank — the SRP party still
+  reconciles exactly at 44,660 − 43,560 = **1,100** — because its 12,980 already sat on a
+  pre-crossing bill whose own liability was 0.
+- **`tds_late_deducted` interest is charged on the amount DUE, not on the credit**
+  (`dueAtDate = Math.min(dedTax, liability)`, `src/tds.ts` pass 2). The same captain's case:
+  4,354 paid 16-Oct against a 15-Oct bill owing 1,115.28 — run 8 charged interest (i) on
+  4,354, run 9 on **1,115.28** (Rs 11.15 for one month). An advance payment is not "paid
+  late", and the tax it over-paid belongs to a later booking, which is charged interest from
+  that booking's own due date. `dueAtDate <= TDS_TOLERANCE` also silences the row entirely
+  when nothing was due by the deductible date (a booking inside an annual limit, or one the
+  bank already covered): that is what removed 10 of the 24 194-Q lateness rows, and the 194-Q
+  and 194-C credit-based `shareOn` interest paths must be checked the same way if they are
+  ever extended to an excess.
+- **The crossing booking must not re-charge what an earlier bill already owed**
+  (`chargedSoFar`, pass 2 of `analyzeTds`; firstmate 2026-09-30). The cumulative-limit path charged the
+  crossing the FULL year-to-date tax, which includes the liability an earlier booking was charged on its
+  own account — under s.194C(5) a single bill over Rs 30,000 is chargeable whatever the aggregate does.
+  The captain's case: a 15-Oct bill of 55,764 charged 1,115.28 on its own account, and the 26-Dec crossing
+  then charged the whole 4,353.62 that includes it, so run 9 reported 1,114.90 on a party that paid
+  everything. **`b.liable` at the crossing is the cumulative GROSS** — net `rate × b.liable`, never
+  `b.liable` directly, or you subtract tax from gross and 20 tests fail. The invariant this restores,
+  worth pinning per party/section/year: statutory tax charged across a party's bookings equals the tax on
+  the year's liable base exactly, and reported not/short-deducted equals `max(0, due − deducted)`.
+- **The three reconciliation gaps a 375-party sweep found are CLOSED (run 11, 2026-09-30, inbox
+  016)** — see the "backward settlement" and "voucher identity" bullets below. The sweep
+  instrument still is: patch `dist/tds.js` with a
+  `process.env.TDS_RECON` block immediately before its `    return {` at the END of `analyzeTds`
+  (where `aggs`, `liabilities`, `events.deductions` and the pushed `findings` are in scope), dump
+  `yearDue` computed WITH the `chargedSoFar` netting (a plain `Σ rate×b.liable` double-counts a
+  single-limit bill and invents ~19 false violations), then restore `dist/` with `npm run build`.
+  The honest identity is the ENGINE's own: `max(0, Σ liabilities[].liability − Σ credits)` vs
+  `Σ not_deducted + short_deducted`. On the real book that leaves 13 of 375 aggs out by >₹1,
+  all accounted for: 2 × 194T (timing-only, never reports), 9 under `SHORT_DEDUCTION_MIN`,
+  one ₹1.21 rounding, and one genuine (a 194-C party's ₹202 credit of 31-Jul-2025 has no bill
+  inside the 30-day pairing window, so its credit sum overstates what is spendable).
+- **The carry-forward is BIDIRECTIONAL within the year (run 11).** The bank is a LIST of
+  unspent credit (`pool: {ded; date; remaining}[]` in pass 2's plan phase, which replaced
+  v10's `excessBank` scalar), not a running figure in date order. After the forward pass it is
+  offered again to EARLIER unpaid bookings of the same deductee+section+FY, oldest open first,
+  and a booking settled that way is reported as `tds_late_deducted` (interest (i) from its own
+  deductible date to the credit date), never as not-deducted. Two invariants: a booking may
+  never take back a rupee its OWN credit banked (`if (row.ownTax >= row.base) continue` in the
+  forward pass — without it the captain's inbox-014 case reports 1,114.90 on a party that paid
+  everything), and a credit dated BEFORE a booking is an advance, never a late deduction
+  (`e.date >= row.b.date`). 194Q settles at MONTH grain the same way (`QSlot`/`qpool` in the
+  194Q block): a month's excess settles the oldest earlier uncovered month, never a same-or-
+  earlier one. A back-settled booking is barred from the whole deposit chain (`if (!ded)
+  continue`) — the credit's deposit facts and its 40(a)(ia) base are already reported on its own
+  primary booking, and re-running them would double-count. **Known limit: a per-booking backward
+  settlement is not a `TdsShare`, so its interest (i) is in the findings, the schedule and the
+  totals but NOT in the 3CD interest sheets** (`src/tds3cd.ts` sums per-deduction stamps; the
+  v11 run's interest payable is unchanged at 38,651.00 while `totals.interestI` rises). The
+  194Q block's stamp is ADDITIVE (`round2((back.ded.interestI ?? 0) + interest)`) because that
+  same credit may already carry a stamp from the per-booking walk.
+- **A voucher NUMBER is not a voucher identity (run 11; `sameVoucher` in `src/tds.ts`).** Tally
+  numbers each voucher type in its own series, so "P/12" is a purchase bill of the year and also
+  a journal of the year. A credit joins a booking as sitting on the booking's own voucher only
+  when number AND date agree; it is used in `pairExactAmounts`'s `voucher` preference AND in
+  `joinEvents`' `byVoucherCands`. This closed the deferred ₹462 194Q collision and the
+  1,211.70 mis-pair, and it cost the suite ~20 fixtures that paired a credit weeks or months
+  from its bill on the number alone — **the fixtures were rewritten (each credit now carries
+  its own Journal/Payment voucher number inside the 30-day window), never the rule weakened.**
+  Do not reintroduce a date-free voucher join, and do not "fix" a failing fixture by relaxing it.
+- **The amount tie-break must compare what the booking is CHARGED, not its gross statutory
+  liability** (`TdsBooking.chargeNet`, stamped in `stampLiabilities`, read by `pairExactAmounts`;
+  run 11). `pairExactAmounts` asked whether a credit equalled `rate × b.liable` while the walk
+  charges a crossing booking net of `chargedSoFar`, so an operator's netting-derived credit
+  matched nothing and fell to the first bill the date order reached. The netting applies
+  **ONLY at `crossIdx`** — applying it to every booking breaks 11 tests (194-C's 30,000
+  single-limit bill must keep its full liability; two same-day 194-I bills must pair
+  19,000→950,000 and 6,600→330,000). `stampLiabilities` runs before `joinEvents`, so the
+  field is always available.
+
+- One real-data caution, recorded not fixed: a booking that owes **no** tax can still take a
+  duty credit the walk has nothing better to do with (the walk has no zero-liability guard —
+  tried, reverted, it broke a deposit test), so where a silent bill absorbs a credit that
+  belonged to a later bill, that later bill can still report a shortfall the books have in
+  fact paid. Conservative, never an under-report. Separately, a `tds_threshold_crossed`
+  advisory does not name the sibling Tally ledgers of one
+  PAN it aggregates, so a party split over two Tally ledgers sees one ledger's name against a total it
+  cannot reproduce (correct figure, incomplete disclosure — captain withdrew a disclosure fix for it on
+  2026-09-30 because two ledgers of one PAN are one deductee under 194Q).
+
 ## Winman 3CD depreciation (clause 18 additions/deletions, 2026-09-27)
 
 - Design of record: `docs/design/2026-09-27-winman-3cd-depreciation-design.md`; engine `src/dep3cd.ts`

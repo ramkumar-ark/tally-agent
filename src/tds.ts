@@ -116,6 +116,16 @@ export interface TdsBooking {
   liable?: number;
   rateApplied?: number;
   viaCertificate?: boolean;
+  /**
+   * The tax this booking is charged on its OWN account: `rate x liable` less
+   * what the earlier bookings of the same deductee + section + year already
+   * carried (captain 2026-09-30, `chargedSoFar` in the analysis walk, inbox
+   * 016). Only a cumulative-limit CROSSING booking differs from
+   * `rate x liable`, and it is the figure a duty credit settles, so the amount
+   * tiebreak must match against it — a credit booked on the crossing bill's
+   * own date was computed by the operator from the same netting.
+   */
+  chargeNet?: number;
 }
 
 export interface TdsPayment {
@@ -882,10 +892,111 @@ function creditEvidence(
 }
 
 /**
+ * Are a booking and a duty credit the SAME voucher? Number equality alone is
+ * not that (inbox 016, captain): Tally numbers every voucher TYPE in its own
+ * space, so a `Sales` voucher 1 and a `Journal` voucher 1 are two unrelated
+ * entries, and a real book's rows collide like that all the year. The rule
+ * that arrived with the 2026-09-15 design doc — "join a duty credit to the
+ * booking by voucher number when both reports name it" — therefore took a
+ * 09-Jun-2025 bill and a 31-Jan-2026 credit as one voucher, both numbered 462,
+ * and reported the eight-month-old bill as deducted late.
+ *
+ * The number is corroborating evidence, not identity: the TDS line must also
+ * carry the bill's own date, which is what a duty line sitting on the bill's
+ * own voucher looks like (same entry, so same number AND same date). A credit
+ * booked separately — the ordinary month-end journal — has its own number and
+ * is matched by the date/counterparty rules instead, which is the honest
+ * reading. Both pairing sites (the amount tiebreak's voucher preference and
+ * the walk's by-voucher phase) go through this one predicate so they can never
+ * disagree.
+ */
+function sameVoucher(b: Pick<TdsBooking, "voucherNumber" | "date">, d: Pick<TdsDeduction, "voucherNumber" | "date">): boolean {
+  return !!b.voucherNumber && b.voucherNumber === d.voucherNumber && b.date === d.date;
+}
+
+/**
+ * Amount-tiebreak pass (captain instruction 2026-09-30), run before the
+ * by-voucher / nearest-date walk: settle every duty credit against the
+ * booking whose computed liability it matches, across the whole deductee +
+ * section stream at once.
+ *
+ * The tiebreak used to be consulted only inside the walk, so it could only
+ * choose among the candidates of the booking being walked, and the walk is in
+ * date order — an EARLIER booking could therefore take a credit by date that
+ * was owed to a LATER booking. On a real FY a 20-Aug 1,26,200 bill claimed the
+ * 1,967 credit of 30-Aug because its own 1% liability (1,262) matched no
+ * amount, while the 30-Aug 1,96,740 bill the credit was actually for reported
+ * not deducted. Order is irrelevant to an amount match, so it must not be
+ * decided by order.
+ *
+ * Pairs settle strongest-match-first — a same-voucher pair before any other,
+ * then the smallest absolute difference between the credit's tax and the
+ * booking's liability, so an approximate match can never take a credit that an
+ * exact one is owed — and each booking and each credit is consumed once. Every
+ * other constraint the walk applies holds here: same deductee
+ * (`deducteeKeyOf`), same section, an unclaimed credit with no booking yet, a
+ * credit no consolidation already covers, and the 30-day window. A booking
+ * with no amount match is left untouched for the walk.
+ */
+function pairExactAmounts(
+  events: TdsEvents,
+  stamped: boolean,
+  ctx: Pick<TdsCtx, "panKeyOf">,
+  claimed: Set<TdsDeduction>,
+  skip: Set<TdsBooking>,
+): void {
+  // A join with the flag off never saw a stamped liability, so it has no
+  // amounts to match and must keep the walk's behaviour exactly.
+  if (!stamped) return;
+  const pairs: { b: TdsBooking; d: TdsDeduction; voucher: boolean; diff: number }[] = [];
+  for (const b of events.bookings) {
+    if (skip.has(b)) continue;
+    // The amount the engine charges this booking ON ITS OWN ACCOUNT. On a
+    // cumulative-limit crossing booking that is the netted figure, not
+    // `rate x liable` (inbox 016): a real book's crossing bill is paid by a
+    // credit computed from the same netting, so matching against the statutory
+    // base left the credit to be claimed by the earlier booking the walk
+    // reached first and reported the crossing bill not deducted (JANARTHANAN
+    // SWD's 1,212 credit of 15-Sep against its 1,211.70 liability).
+    const liability = b.chargeNet ?? round2((b.rateApplied ?? 0) * (b.liable ?? 0));
+    if (liability <= ZERO) continue;
+    const key = deducteeKeyOf(ctx, b.party);
+    for (const d of events.deductions) {
+      if (d.section !== b.section || d.booking || claimed.has(d)) continue;
+      if (deducteeKeyOf(ctx, d.party) !== key) continue;
+      if (Math.abs(dateDiffDays(d.date, b.date)) > SPLIT_WINDOW_DAYS) continue;
+      const diff = Math.abs(d.tax - liability);
+      if (diff > TDS_TOLERANCE) continue;
+      pairs.push({ b, d, voucher: sameVoucher(b, d), diff });
+    }
+  }
+  pairs.sort(
+    (a, z) =>
+      Number(z.voucher) - Number(a.voucher) ||
+      a.diff - z.diff ||
+      a.b.date.localeCompare(z.b.date) ||
+      a.d.date.localeCompare(z.d.date),
+  );
+  const paired = new Set<TdsBooking>();
+  for (const p of pairs) {
+    if (claimed.has(p.d) || paired.has(p.b)) continue;
+    claimed.add(p.d);
+    paired.add(p.b);
+    p.d.joinedTo = p.b.voucherNumber;
+    p.d.booking = p.b;
+  }
+}
+
+/**
  * Join the event streams:
- * - a duty credit joins a booking by voucherNumber equality when both
- *   periodic reports name it, else by month + counterparty within 30 days,
- *   nearest date first; a counterparty mismatch never joins;
+ * - an amount tiebreak settles a credit against the booking whose computed
+ *   liability it matches, over the whole stream and BEFORE the walk below, so
+ *   that a date-earlier booking can never take a credit owed to a later one
+ *   (`pairExactAmounts`);
+ * - a duty credit joins a booking on the SAME VOUCHER — number and date
+ *   agreeing, never number alone, because Tally numbers each voucher type in
+ *   its own space (`sameVoucher`, inbox 016) — else by month + counterparty
+ *   within 30 days, nearest date first; a counterparty mismatch never joins;
  * - a credit of another section never claims a booking (2026-09-26c): the
  *   by-voucher phase prefers the voucher's same-party credit whose section
  *   equals the booking's, and the month-window phase accepts only
@@ -926,6 +1037,11 @@ function joinEvents(
     report.consolidations.push(...allocated.consolidations);
     report.skipped.push(...allocated.skipped);
   }
+  // The amount tiebreak first, over the whole stream (2026-09-30): the walk
+  // below is in date order and would let an earlier booking claim a credit by
+  // date that a later booking's liability is owed. Whatever it settles is
+  // `claimed` before the walk and is invisible to it.
+  pairExactAmounts(events, stamped, ctx, claimed, splitCovered);
   for (const b of [...events.bookings].sort((a, b) => a.date.localeCompare(b.date))) {
     // A booking a split credit already covers is settled: the credit is
     // claimed, and the walk must not hand it a second credit or let a later
@@ -937,24 +1053,16 @@ function joinEvents(
     const sameDeductee = (d: TdsDeduction): boolean =>
       deducteeKeyOf(ctx, d.party) === deducteeKeyOf(ctx, b.party);
     const byVoucherCands = (byVoucher.get(b.voucherNumber) ?? []).filter(
-      (d) => sameDeductee(d) && d.section === b.section && !claimed.has(d) && !d.booking,
+      (d) => sameDeductee(d) && d.section === b.section && !claimed.has(d) && !d.booking && sameVoucher(b, d),
     );
     const monthCands = events.deductions
       .filter((d) => sameDeductee(d) && d.section === b.section && !claimed.has(d) && !d.booking)
       .filter((d) => Math.abs(dateDiffDays(d.date, b.date)) <= 30);
-    // Amount-tiebreak (2026-09-26g): when several candidates could pair, the
-    // one whose TDS amount matches the booking's computed liability wins (the
-    // books pair the 19,000 journal with the 9,50,000 bill, not the 3,30,000
-    // one). The booking's liability is stamped before the join; a join with
-    // the flag off never sees it. Deterministic fallback otherwise: voucher
-    // members first, then the existing nearest-date rule.
-    const liability = stamped ? round2((b.rateApplied ?? 0) * (b.liable ?? 0)) : 0;
-    const matching =
-      liability > ZERO
-        ? [...monthCands].find((d) => Math.abs(d.tax - liability) <= TDS_TOLERANCE)
-        : undefined;
+    // No amount match is left — `pairExactAmounts` already settled every
+    // credit whose tax equals a booking's liability, so the walk is the
+    // fallback chain only: the voucher's own same-party credit first, then
+    // the existing nearest-date rule.
     const pick =
-      matching ??
       byVoucherCands.sort(
         (a, b2) => a.date.localeCompare(b2.date) || a.voucherNumber.localeCompare(b2.voucherNumber),
       )[0] ??
@@ -1117,22 +1225,48 @@ function stampLiabilities(agg: Agg, ctx: TdsCtx & { operator: OperatorFile }): v
   const bookings = [...agg.bookings].sort((a, b) => a.date.localeCompare(b.date));
 
   let before = 0;
-  for (const b of bookings) {
-    const after = before + b.gross;
-    if (!agg.crossed && threshold.aggregate !== undefined && after > threshold.aggregate) {
+  let crossIdx = -1;
+  for (let i = 0; i < bookings.length; i++) {
+    const after = before + bookings[i].gross;
+    if (crossIdx < 0 && threshold.aggregate !== undefined && after > threshold.aggregate) {
       agg.crossed = true;
-      agg.crossDate = b.date;
+      agg.crossDate = bookings[i].date;
+      crossIdx = i;
     }
     before = after;
   }
 
   let cumulative = 0;
-  for (const b of bookings) {
+  // The running statutory charge of the earlier bookings (inbox 016). Only the
+  // CROSSING booking is netted against it — the same rule and the same index
+  // the analysis walk applies — so `chargeNet` publishes per booking the
+  // liability the engine will actually charge it, which is what a duty credit
+  // booked against that bill settles. (The walk's own running total is taken
+  // after the over-deduction bank, so the two can differ by the bank's
+  // effect on an earlier booking of the same party; the tiebreak only uses this
+  // figure to CHOOSE a pairing, and the walk's figure stays the authority for
+  // what is reported.)
+  let charged = 0;
+  for (let i = 0; i < bookings.length; i++) {
+    const b = bookings[i];
     cumulative += b.gross;
     const singleLiable = threshold.single !== undefined && b.gross > threshold.single;
     let liableBase = 0;
     if (wholeYear) {
-      if (agg.crossed || singleLiable) liableBase = b.gross;
+      if (law.cumulativeOnCross) {
+        // 194-I(a)/(b) (captain 2026-09-30): no deduction while the party's
+        // cumulative FY bookings are within the annual aggregate; the crossing
+        // booking carries the whole cumulative to date (earlier bookings
+        // included) and each later booking its own full gross. The section's
+        // year total is unchanged — only the pre-crossing bookings stop being
+        // reported. A party that never crosses (crossIdx -1) is never liable.
+        // The crossing booking is identified by INDEX, not by date: several
+        // bookings can share the crossing date and only the later one carries
+        // the crossing.
+        if (crossIdx < 0) liableBase = singleLiable ? b.gross : 0;
+        else if (i === crossIdx) liableBase = cumulative;
+        else if (i > crossIdx || singleLiable) liableBase = b.gross;
+      } else if (agg.crossed || singleLiable) liableBase = b.gross;
     } else if (agg.crossed) {
       // Section 194Q: only the amount beyond the crossing (C8) — measured
       // against the running cumulative through this booking, so bookings
@@ -1144,6 +1278,8 @@ function stampLiabilities(agg: Agg, ctx: TdsCtx & { operator: OperatorFile }): v
     const liability = round2(rate.rate * liableBase);
     b.liable = liableBase;
     b.rateApplied = rate.rate;
+    b.chargeNet = i === crossIdx ? round2(Math.max(0, liability - charged)) : liability;
+    charged = round2(charged + Math.max(0, liability));
     b.viaCertificate = ctx.certificateRateOf(b.party, section, b.date) !== null;
     if (liability > TDS_TOLERANCE) {
       agg.taxDue = true;
@@ -1471,10 +1607,17 @@ export function analyzeTds(
   // liability-bearing bookings covered by one combined journal credit — read
   // as covered here even when no single credit joins each booking 1:1.
   const monthCredit = new Map<string, number>();
+  // The SAME credits, one by one, so a month's over-payment can be attributed to
+  // the credit it came from and spent on an EARLIER month's liability (inbox
+  // 016). Built alongside `monthCredit` so the two can never disagree.
+  const monthCredits = new Map<string, TdsDeduction[]>();
   for (const d of events.deductions) {
     if (d.section === null) continue;
     const mk = `${deducteeKeyOf(ctx, d.party)}|${d.section}|${d.date.slice(0, 6)}`;
     monthCredit.set(mk, (monthCredit.get(mk) ?? 0) + d.tax);
+    const list = monthCredits.get(mk);
+    if (list) list.push(d);
+    else monthCredits.set(mk, [d]);
   }
 
   // The tax of a deduction the review treats as paid by the s.139(1) due date:
@@ -1494,24 +1637,198 @@ export function analyzeTds(
     const bookings = [...agg.bookings].sort((a, b) => a.date.localeCompare(b.date));
 
     let before = 0;
-    for (const b of bookings) {
-      const after = before + b.gross;
-      if (!agg.crossed && threshold.aggregate !== undefined && after > threshold.aggregate) {
-        agg.crossed = true;
-        agg.crossDate = b.date;
+    let crossIdx = -1;
+    for (let i = 0; i < bookings.length; i++) {
+      const after = before + bookings[i].gross;
+      if (crossIdx < 0 && threshold.aggregate !== undefined && after > threshold.aggregate) {
+        crossIdx = i;
       }
       before = after;
     }
+
+    // The credit this booking was actually credited: its own share of a split
+    // credit (the 1:1 field points at the credit's FIRST share, so the
+    // whole-credit tax is never read here), else the 1:1 join. Read here
+    // rather than inside the loop because the crossing netting below needs it
+    // for bookings the walk never reaches.
+    const deductionOf = (
+      b: TdsBooking,
+    ): { ded: TdsDeduction; split: { ded: TdsDeduction; share: TdsShare } | undefined } | null => {
+      const split = shareOf.get(b);
+      const ded =
+        split?.ded ??
+        events.deductions.find(
+          (d) =>
+            d.booking === b &&
+            deducteeKeyOf(ctx, d.party) === deducteeKeyOf(ctx, b.party) &&
+            d.section === section,
+        );
+      return ded ? { ded, split } : null;
+    };
+    const taxPaidOn = (b: TdsBooking): number => {
+      const found = deductionOf(b);
+      return found ? (found.split ? found.split.share.tax : found.ded.tax) : 0;
+    };
 
     // Pass 1 already ran before the join (2026-09-26g sum); the stamped
     // bookings carry liable/rateApplied, and the agg carries monthLiability.
     const stamped = agg as Agg & { monthLiability?: Map<string, number> };
     const monthLiability = stamped.monthLiability ?? new Map<string, number>();
 
-    // Pass 2 — findings, on the stamped bookings.
-    for (const b of bookings) {
-      const liability = round2((b.rateApplied ?? 0) * (b.liable ?? 0));
-      if (liability <= TDS_TOLERANCE) continue;
+    // ---- The settlement plan (inbox 016, captain's v11) ------------------------
+    //
+    // The per-booking arithmetic is computed ONCE, here, and the findings walk
+    // below only READS it, so a settlement can never disagree with the figures
+    // the findings quote.
+    //
+    // A duty credit's excess over the liability of the booking it is booked
+    // against is not that booking's business: it is credit against another
+    // liability of the same party, section and year. Until v11 the bank
+    // (captain 2026-09-30, third point) was FORWARD-ONLY, so an excess left
+    // over at the end of a year reported the earlier unpaid bills as NOT
+    // deducted. The captain's case: N. R. BABU's 194-C books carry 1,370.50 of
+    // duty against 1,371.00 of credits, and v10 reported the November bills
+    // 1,250 not deducted because the credits' own pairing had already spent
+    // them on a later bill.
+    //
+    // The POOL below is that bank as a list of unspent rupees that each carry
+    // the credit they came from. It is filled in booking order and spent in two
+    // passes, so the same rupee can never be settled twice:
+    //   1. BACKWARD (captain, inbox 016): the earliest still-unpaid booking is
+    //      settled oldest-first by the earliest unspent credit dated ON OR AFTER
+    //      that booking, and what it pays is reported as a LATE DEDUCTION from
+    //      the booking's due date to the credit's date — the credit exists, it
+    //      was simply booked after the bill it pays. A credit dated BEFORE a
+    //      booking is an advance and never reaches this pass.
+    //   2. FORWARD: whatever the backward pass left reduces the next booking's
+    //      own liability, exactly as the v10 scalar bank did.
+    //
+    // Both passes are skipped for 194Q, whose liability settles at party-month
+    // grain below, and for a timing-only section, whose 194T position is
+    // monitored at section level — there an excess carries forward as in v10.
+    type Cover = { ded: TdsDeduction; tax: number };
+    interface PlanRow {
+      b: TdsBooking;
+      /** The statutory tax on this booking's own base, less what earlier bookings were already charged. */
+      base: number;
+      /** `base` less whatever the forward bank covered. */
+      liability: number;
+      /** The credit this booking was paired with (its own share, or a 1:1 join), if any. */
+      own: { ded: TdsDeduction; split: { ded: TdsDeduction; share: TdsShare } | undefined } | null;
+      ownTax: number;
+      /** Credits that settled this booking out of the pool, oldest first. */
+      backs: Cover[];
+    }
+    const pool: { ded: TdsDeduction; date: string; remaining: number }[] = [];
+    const plan: PlanRow[] = [];
+    // Liability already charged on EARLIER bookings of this party and section
+    // (firstmate 2026-09-30, the double-count finding). A cumulative-limit
+    // crossing booking carries the tax on the year's cumulative to its date,
+    // which already includes the liability an earlier booking was charged on its
+    // own account — a per-bill single-limit bill inside the year. The captain's
+    // example: a 194-C bill of 55,764 on 15-Oct (over the 30,000 per-bill limit,
+    // so 1,115.28 was due and charged there) is inside the 2,17,681.20 the
+    // 26-Dec crossing charges, so charging the full 4,353.62 there makes
+    // 1,115.28 liable twice and reports 1,114.90 on a party that paid
+    // everything. The crossing therefore carries the cumulative LESS what is
+    // already charged; the year still sums to the tax on the year's base, never
+    // more (the invariant `test/tds-194i-threshold.test.ts` pins).
+    //
+    // `charged` accumulates the STATUTORY charge (`base`), not what was left
+    // payable after the bank: a booking whose liability a credit overpaid was
+    // still charged that tax, and letting the crossing charge it again would
+    // count the same rupee twice.
+    let charged = 0;
+    for (let i = 0; i < bookings.length; i++) {
+      const b = bookings[i];
+      const found = deductionOf(b);
+      // A cumulative-limit crossing booking carries the tax on the year's
+      // cumulative to its date, less the liability already charged on this
+      // party's earlier bookings (see `charged`): at the crossing `b.liable`
+      // IS the cumulative gross, so the ordinary rate x liable product is
+      // exactly the number to net.
+      const base =
+        i === crossIdx
+          ? round2((b.rateApplied ?? 0) * (b.liable ?? 0) - charged)
+          : round2((b.rateApplied ?? 0) * (b.liable ?? 0));
+      const ownTax = found ? (found.split ? found.split.share.tax : found.ded.tax) : 0;
+      // What this booking's own credit did beyond its own liability is a free
+      // rupee for this party, section and year — the pool's raw material. A
+      // split credit's share is that share's own liability by construction, so
+      // nothing banks; the 1:1 field points at the credit's FIRST share, so the
+      // whole-credit tax is never read here.
+      if (found) {
+        const excess = round2(Math.max(0, ownTax - base));
+        if (excess > ZERO) pool.push({ ded: found.ded, date: found.ded.date, remaining: excess });
+      }
+      charged = round2(charged + Math.max(0, base));
+      plan.push({ b, base, liability: base, own: found, ownTax, backs: [] });
+    }
+
+    if (section !== "194Q" && !timingOnlySection(section)) {
+      // Oldest credit first: a party that overpaid in June should not have a
+      // December bill settled before an October one.
+      const byDate = [...pool].sort(
+        (x, y) => x.date.localeCompare(y.date) || pool.indexOf(x) - pool.indexOf(y),
+      );
+      for (const row of plan) {
+        let unpaid = round2(row.liability - row.ownTax);
+        for (const e of byDate) {
+          if (unpaid <= TDS_TOLERANCE) break;
+          if (e.remaining <= ZERO) continue;
+          // An advance — the credit predates the bill — is the forward bank's
+          // business, never a late deduction of this booking.
+          if (e.date < row.b.date) continue;
+          const taken = round2(Math.min(e.remaining, unpaid));
+          e.remaining = round2(e.remaining - taken);
+          unpaid = round2(unpaid - taken);
+          row.backs.push({ ded: e.ded, tax: taken });
+        }
+      }
+      for (const row of plan) {
+        // A booking never draws from the pool a rupee its OWN credit put there:
+        // that credit already covers this booking's base, so its excess belongs
+        // to OTHER bookings. The captain's case: the 4,354 deducted on 16-Oct
+        // covers the 15-Oct bill's own 1,115.28 and leaves 3,238.72 for the
+        // 26-Dec bill — without this guard the forward pass would hand 1,115.28
+        // of that excess straight back to the bill that produced it and report
+        // 1,114.90 on a party that paid everything (inbox 015, still true in
+        // v10's order-of-operations terms).
+        if (row.ownTax >= row.base) continue;
+        let want = row.liability;
+        for (const e of pool) {
+          if (want <= ZERO) break;
+          if (e.remaining <= ZERO) continue;
+          const taken = round2(Math.min(e.remaining, want));
+          e.remaining = round2(e.remaining - taken);
+          want = round2(want - taken);
+        }
+        row.liability = want;
+      }
+    }
+
+    // Pass 2 — findings, on the stamped bookings and the settlement plan above.
+    // Everything below READS the plan: the arithmetic was done once, so a
+    // backward settlement and the figure a finding quotes cannot diverge.
+    for (let i = 0; i < bookings.length; i++) {
+      const row = plan[i];
+      const b = row.b;
+      const { liability } = row;
+      const found = row.own;
+      // What was actually credited against this booking: its own credit first,
+      // then any pool credit that settled it from behind (inbox 016).
+      const dedTax = round2(row.ownTax + row.backs.reduce((t, c) => t + c.tax, 0));
+      // Covered means some credit paid some of what was due — its own, or a
+      // later one the plan settled this booking with.
+      const covered = found !== null || row.backs.length > 0;
+      // A booking inside the annual limit owes no tax (captain 2026-09-30) and
+      // is silent — but only while it also carries no credit. A credit paired
+      // to such a booking is a real deduction, and its own timeliness is a
+      // real question (firstmate 2026-09-30): the pre-crossing monthly
+      // deductions of a rent party that later crosses the limit keep their
+      // late-deduction and late-deposit findings.
+      if (liability <= TDS_TOLERANCE && !covered) continue;
+      const silent = liability <= TDS_TOLERANCE;
       const rate = rateFor(ctx, b.party, section, b.date);
 
       const panNote = rate.via206AA
@@ -1519,7 +1836,7 @@ export function analyzeTds(
         : ctx.panDerivedFromGstinOf?.(b.party)
           ? " (PAN derived from GSTIN)"
           : "";
-      if (ctx.transporterDeclared(b.party) && section === "194C") {
+      if (!silent && ctx.transporterDeclared(b.party) && section === "194C") {
         // 194C(6): a transporter declaration excludes these payments.
         push(
           "tds_not_deducted",
@@ -1532,24 +1849,18 @@ export function analyzeTds(
         continue;
       }
 
-      // A split credit's share wins over the 1:1 field (which points at the
-      // credit's FIRST share, so the whole-credit tax is never read here).
-      const split = shareOf.get(b);
-      const ded = split?.ded ?? events.deductions.find(
-        (d) =>
-          d.booking === b &&
-          deducteeKeyOf(ctx, d.party) === deducteeKeyOf(ctx, b.party) &&
-          d.section === section,
-      );
+      const split = found?.split;
+      const ded = found?.ded;
       // The tax this booking was actually credited: its own share of a split
       // credit, the whole credit on a 1:1 join.
-      const dedTax = ded ? (split ? split.share.tax : ded.tax) : 0;
-      // Per-booking liability fact, additive: the exact figures the findings
-      // above derive from, captured here so the 194Q running-cumulative and
-      // whole-year rules are never re-derived in a second module. `ded` is
-      // null for an undeducted booking; no other filtering is applied.
-      liabilities.push({ booking: b, section, liableBase: b.liable ?? 0, liability, rate: b.rateApplied ?? rate.rate, deduction: ded ?? null });
-      if (!ded) {
+      if (!silent) {
+        // Per-booking liability fact, additive: the exact figures the findings
+        // above derive from, captured here so the 194Q running-cumulative and
+        // whole-year rules are never re-derived in a second module. `ded` is
+        // null for an undeducted booking; no other filtering is applied.
+        liabilities.push({ booking: b, section, liableBase: b.liable ?? 0, liability, rate: b.rateApplied ?? rate.rate, deduction: ded ?? null });
+      }
+      if (!covered) {
         // A timing-only section (194T, 2026-09-26o item 035) never raises a
         // not-deducted finding: its deductee is a partner's Capital Account,
         // its liability is not rate-recomputed, and its duty credits are
@@ -1570,19 +1881,31 @@ export function analyzeTds(
         // whole liability, so the shortfall is raised once per party-month
         // below, never per purchase voucher.
         if (section === "194Q") continue;
+        // 194-I(a)/(b) crossing booking (captain 2026-09-30): the liability was
+        // measured on the cumulative booked to that date, not on this booking's
+        // own gross, so the expenditure reported with it (s.40(a)(ia) base and
+        // the 21(b) row) is that same base — the 194Q `liability / rate`
+        // precedent, and never the single booking's gross.
+        const expense = law.cumulativeOnCross ? (b.liable ?? 0) : b.gross;
         notDeducted += liability;
-        notDeductedBase += b.gross;
+        notDeductedBase += expense;
+        // Say so in the finding: on this booking the payable tax is a multiple
+        // of its own gross, which is only true at a crossing.
+        const crossNote =
+          law.cumulativeOnCross && round2(b.liable ?? 0) !== round2(b.gross)
+            ? ` on the ${money(b.liable ?? 0)} booked to this date, including the earlier bookings within the annual limit`
+            : "";
         const notDeductedId = push(
           "tds_not_deducted",
           "critical",
           b.party,
           section,
           liability,
-          `booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}: tax of ${money(liability)} was payable, but no duty credit was found.${creditEvidence(events, b, section, ctx)}`,
+          `booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}: tax of ${money(liability)} was payable${crossNote}, but no duty credit was found.${creditEvidence(events, b, section, ctx)}`,
         );
         clause21b.push({
           party: b.party, date: b.date, voucherNumber: b.voucherNumber,
-          gross: b.gross, tdsDone: 0, tdsDeposited: 0, depositDate: null,
+          gross: expense, tdsDone: 0, tdsDeposited: 0, depositDate: null,
           section, reason: "not_deducted", liability, findingId: notDeductedId,
         });
         continue;
@@ -1596,11 +1919,11 @@ export function analyzeTds(
       // and never loses the other bills' (the 3CD interest rows read them).
       const stampInterestI = (v: number): void => {
         if (split) split.share.interestI = v;
-        else ded.interestI = v;
+        else if (ded) ded.interestI = v;
       };
       const stampInterestII = (v: number): void => {
         if (split) split.share.interestII = v;
-        else ded.interestII = v;
+        else if (ded) ded.interestII = v;
       };
       if (dedTax < liability - TDS_TOLERANCE && section !== "194Q" && !timingOnlySection(section)) {
         // The 21(b) sheet reports only the UNDEDUCTED portion of the expense
@@ -1612,49 +1935,95 @@ export function analyzeTds(
           b.party,
           section,
           round2(liability - dedTax),
-          `duty credit of ${money(dedTax)} on ${displayDate(ded.date)} is short of the ${money(liability)} payable on the booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}.`,
+          ded
+            ? `duty credit of ${money(dedTax)} on ${displayDate(ded.date)} is short of the ${money(liability)} payable on the booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}.`
+            : `duty credit of ${money(dedTax)} booked on or after ${displayDate(b.date)} is short of the ${money(liability)} payable on the booking of ${money(b.gross)} on ${displayDate(b.date)} under section ${section}${panNote}.`,
           {
             date: b.date,
             voucherNumber: b.voucherNumber,
             gross: shortRate > 0 ? round2((liability - dedTax) / shortRate) : b.gross,
             tdsDone: 0,
             tdsDeposited: 0,
-            depositDate: dep?.date ?? ded.subsequentDeposit ?? null,
+            depositDate: dep?.date ?? ded?.subsequentDeposit ?? null,
             liability,
           },
         );
       }
-      const advance = events.payments
-        .filter((p) => p.party === b.party && p.date < b.date && p.date <= ded.date)
-        .map((p) => p.date)
-        .sort()[0];
-      const deductibleDate = advance ?? b.date;
-      // A same-month consolidation carries the month's BATCH date, not this
-      // booking's own deduction date (2026-09-29, captain: one deduction entry
-      // against several bookings of the same month is normal bookkeeping).
-      // Every monthly-payment section falls due by the 7th of the month AFTER
-      // the booking (s.201(1) proviso read with the section's own schedule), so
-      // a journal dated inside the booking's own month is never late — the
-      // finding (and its s.201(1A) interest) would be an artefact of the batch
-      // date. A delay of a real month or more is still reported, and so is
-      // every finding for a cross-month "window" consolidation.
-      if (ded.date > deductibleDate && ded.consolidated !== "month" && (ctx.lateDeductionInterest ?? true)) {
+      // s.201(1A) interest (i) runs on what was DUE by the deductible date, for
+      // each credit that paid it, oldest credit first (inbox 016: a credit the
+      // settlement plan spent on an EARLIER booking is a late deduction of that
+      // booking, charged from the booking's own due date to the credit's date —
+      // not a not-deduction).
+      //
+      // The deductible date is the booking's own date, pulled earlier by an (e)
+      // payment (a receipt) that precedes the booking and lands on or before
+      // this credit. A same-month consolidation carries the month's BATCH date,
+      // not this booking's own deduction date (2026-09-29, captain: one
+      // deduction entry against several bookings of the same month is normal
+      // bookkeeping). Every monthly-payment section falls due by the 7th of the
+      // month AFTER the booking (s.201(1) proviso read with the section's own
+      // schedule), so a journal dated inside the booking's own month is never
+      // late — the finding (and its s.201(1A) interest) would be an artefact of
+      // the batch date. A delay of a real month or more is still reported, and
+      // so is every finding for a cross-month "window" consolidation.
+      //
+      // What was actually DUE by the deductible date, and so what interest (i)
+      // can run on: the booking's own liability, capped at the tax each credit
+      // actually paid. A credit larger than that liability is an over-deduction
+      // made in ADVANCE (captain 2026-09-30, third point: a 194-C bill of 55,764
+      // carried 4,354 where only 1,115.28 was due), and an advance payment is
+      // not "paid late" — the tax it over-paid belongs to a later booking, and
+      // its interest is charged there, from that booking's own due date. When
+      // NOTHING was due by then (a booking inside an annual limit, or one whose
+      // liability the bank already covered) there is no late deduction at all.
+      const covers: { ded: TdsDeduction; tax: number; own: boolean }[] = [];
+      if (found && ded) covers.push({ ded, tax: row.ownTax, own: true });
+      for (const c of row.backs) covers.push({ ...c, own: false });
+      covers.sort((x, y) => x.ded.date.localeCompare(y.ded.date));
+      let remaining = liability;
+      for (const cover of covers) {
+        if (remaining <= TDS_TOLERANCE) break;
+        const dueAtDate = Math.min(remaining, cover.tax);
+        remaining = round2(remaining - cover.tax);
+        const creditDate = cover.ded.date;
+        const advance = events.payments
+          .filter((p) => p.party === b.party && p.date < b.date && p.date <= creditDate)
+          .map((p) => p.date)
+          .sort()[0];
+        const deductibleDate = advance ?? b.date;
+        if (
+          dueAtDate <= TDS_TOLERANCE ||
+          creditDate <= deductibleDate ||
+          cover.ded.consolidated === "month" ||
+          (ctx.lateDeductionInterest ?? true) === false
+        ) {
+          continue;
+        }
         const shielded = ctx.deducteeFiledReturn(b.party);
-        const months = calendarMonths(deductibleDate, ded.date);
-        const interest = shielded ? 0 : interestOn(0.01, months, dedTax);
+        const months = calendarMonths(deductibleDate, creditDate);
+        const interest = shielded ? 0 : interestOn(0.01, months, dueAtDate);
+        // A backward settlement is not "a deduction was late" — the operator
+        // needs to see that the books DID deduct, on a later date.
+        const paid = cover.own
+          ? `deduction of ${money(dueAtDate)} on ${displayDate(creditDate)}`
+          : `duty credit of ${money(dueAtDate)} on ${displayDate(creditDate)}, booked after the bill it settles (payable on the booking of ${money(b.gross)} on ${displayDate(b.date)})`;
         push(
           "tds_late_deducted",
           "warning",
           b.party,
           section,
-          dedTax,
+          dueAtDate,
           shielded
-            ? `deduction of ${money(dedTax)} on ${displayDate(ded.date)} is after the ${displayDate(deductibleDate)} deductible date; s.201(1) proviso shields interest (i) (deductee filed a return).`
-            : `deduction of ${money(dedTax)} on ${displayDate(ded.date)} is after the ${displayDate(deductibleDate)} deductible date; s.201(1A) interest (i) of ${money(interest)} for ${months} month(s) at 1%.`,
-          shielded ? undefined : [{ kind: "i", amount: interest, from: deductibleDate, to: ded.date, basis: `1% of ${months} month(s)` }],
+            ? `${paid} is after the ${displayDate(deductibleDate)} deductible date; s.201(1) proviso shields interest (i) (deductee filed a return).`
+            : `${paid} is after the ${displayDate(deductibleDate)} deductible date; s.201(1A) interest (i) of ${money(interest)} for ${months} month(s) at 1%.`,
+          shielded ? undefined : [{ kind: "i", amount: interest, from: deductibleDate, to: creditDate, basis: `1% of ${months} month(s)` }],
         );
         interestI += interest;
-        stampInterestI(interest);
+        // Only a credit the engine PAIRED to this booking is stamped: the 3CD
+        // interest rows are read off the deduction and its shares, and a
+        // backward settlement is neither. Its interest is in the findings and
+        // the totals (a known, recorded limit).
+        if (cover.own) stampInterestI(interest);
       }
       // Deposit checks: the joined deposit was matched in joinEvents.
       // 2026-09-26t (inbox 075, captain): where a Winman return challan covers
@@ -1672,9 +2041,18 @@ export function analyzeTds(
       // over the month's bookings overstates the disallowance — a 194Q
       // liability is only its post-threshold excess, so multiplying it out
       // read a whole month's purchases as not-deposited expenditure.
+      // A credit the plan settled this booking with FROM BEHIND has no deposit
+      // chain to run here (inbox 016): that credit's deposit facts are raised
+      // once, on its own primary booking, and a second s.40(a)(ia) base or a
+      // second late-deposit row would count the same payment twice. Nothing
+      // follows in this walk, so skipping the rest is the same as continuing.
+      if (!ded) continue;
       const consolidated = ded.shares !== undefined;
       const creditReported = !consolidated || ded.booking === b;
-      const creditTax = consolidated ? ded.tax : dedTax;
+      // The credit's own tax, never the total credited to this booking: a
+      // backward settlement pays a DIFFERENT credit, whose tax belongs to that
+      // credit's own booking.
+      const creditTax = consolidated ? ded.tax : row.ownTax;
       if (creditReported && dep && ded.subsequentDeposit && ded.date <= ctx.asOnDate) {
         const due = depositDue(ded.date);
         if (ded.subsequentDeposit > due) {
@@ -1753,7 +2131,7 @@ export function analyzeTds(
         // A timing-only section is handled once at section level below (its
         // joined and orphan credits must not be double-counted).
         if (!timingOnlySection(section)) {
-          notDepositedBase += liability > ZERO ? round2(b.gross * (dedTax / liability)) : b.gross;
+          notDepositedBase += liability > ZERO ? round2(b.gross * (row.ownTax / liability)) : b.gross;
         }
         if (creditReported) {
           const notDepositedId = push(
@@ -1780,47 +2158,152 @@ export function analyzeTds(
     // tds_short_deducted for the shortfall. The ₹50 lakh annual threshold
     // and the C8 excess-only base are unchanged (stamped above); other
     // sections keep the per-booking matching.
+    //
+    // A credit of a LATER month than the purchases it pays settles them
+    // backwards (inbox 016): a month whose liability is still open is covered
+    // by the oldest still-unspent credit of a later month, and the amount it
+    // takes is a `tds_late_deducted` (s.201(1A)(i), from the month's own last
+    // purchase date to the credit's date) rather than an undeducted one. Only
+    // the month's residue is reported below.
     if (section === "194Q") {
-      const monthGross = new Map<string, { party: string; gross: number; date: string; liable: number }>();
+      const monthGross = new Map<string, { party: string; gross: number; date: string; last: string; liable: number }>();
       for (const b of bookings) {
         if ((b.liable ?? 0) <= 0) continue;
         const mk = `${deducteeKeyOf(ctx, b.party)}|${section}|${b.date.slice(0, 6)}`;
         if (!monthLiability.has(mk)) continue;
-        const cur = monthGross.get(mk) ?? { party: b.party, gross: 0, date: b.date, liable: 0 };
+        const cur = monthGross.get(mk) ?? { party: b.party, gross: 0, date: b.date, last: b.date, liable: 0 };
         cur.gross += b.gross;
         cur.liable += b.liable ?? 0;
+        if (b.date > cur.last) cur.last = b.date;
         monthGross.set(mk, cur);
       }
+      // One slot per party-month: what the month owed, what its own credits
+      // paid, and what is still open.
+      interface QSlot {
+        mk: string;
+        party: string;
+        gross: number;
+        liable: number;
+        liab: number;
+        cred: number;
+        date: string;
+        backs: { ded: TdsDeduction; tax: number }[];
+      }
+      const slots: QSlot[] = [];
+      const slotByMk = new Map<string, QSlot>();
       for (const [mk, m] of monthGross) {
         const liab = round2(monthLiability.get(mk) ?? 0);
         if (liab <= TDS_TOLERANCE) continue;
-        const cred = monthCredit.get(mk) ?? 0;
-        if (cred >= liab - TDS_TOLERANCE) continue;
-        const label = displayDate(`${mk.slice(-6)}01`).slice(3);
-        const r0 = rateFor(ctx, m.party, section, m.date);
+        const s: QSlot = {
+          mk, party: m.party, gross: m.gross, liable: m.liable, liab,
+          cred: round2(monthCredit.get(mk) ?? 0), date: m.last, backs: [],
+        };
+        slots.push(s);
+        slotByMk.set(mk, s);
+      }
+      // The pool: each credit's excess over the liability of its OWN month,
+      // oldest credit first within the month, carrying the credit it came
+      // from. A month with no liability of its own (before the ₹50 lakh
+      // crossing) contributes its whole credit — but only the agg's OWN
+      // deductees' credits, keyed exactly like `monthCredit`.
+      const qpool: { ded: TdsDeduction; date: string; month: string; remaining: number }[] = [];
+      const partyKeys = new Set(slots.map((s) => s.mk.slice(0, -7)));
+      for (const [mk, list] of monthCredits) {
+        if (!partyKeys.has(mk.slice(0, -7))) continue;
+        const s = slotByMk.get(mk);
+        let owed = s ? s.liab : 0;
+        const month = mk.slice(-6);
+        for (const d of [...list].sort((a, b) => a.date.localeCompare(b.date))) {
+          const applied = Math.min(d.tax, Math.max(0, owed));
+          owed = round2(owed - applied);
+          const excess = round2(d.tax - applied);
+          if (excess > ZERO) qpool.push({ ded: d, date: d.date, month, remaining: excess });
+        }
+      }
+      // Backward settlement (inbox 016): a later month's credit that pays an
+      // EARLIER month's still-open liability is a LATE DEDUCTION, not an
+      // undeducted one — the books did deduct, on a later date. Oldest credit
+      // first, oldest open month first.
+      const open = slots
+        .map((s) => ({ s, unpaid: round2(Math.max(0, s.liab - s.cred)) }))
+        .filter((o) => o.unpaid > TDS_TOLERANCE)
+        .sort((a, b) => a.s.mk.localeCompare(b.s.mk));
+      qpool.sort((a, b) => a.date.localeCompare(b.date));
+      for (const e of qpool) {
+        if (e.remaining <= ZERO) continue;
+        for (const o of open) {
+          if (o.unpaid <= TDS_TOLERANCE) break;
+          // A credit of the SAME or an EARLIER month is an advance against
+          // the month's own liability, never a late payment of it.
+          if (e.month <= o.s.mk.slice(-6)) continue;
+          const taken = round2(Math.min(e.remaining, o.unpaid));
+          if (taken <= ZERO) continue;
+          e.remaining = round2(e.remaining - taken);
+          o.unpaid = round2(o.unpaid - taken);
+          o.s.backs.push({ ded: e.ded, tax: taken });
+        }
+      }
+      for (const s of slots) {
+        const { party: m, gross, liable, liab, cred, date } = s;
+        const label = displayDate(`${s.mk.slice(-6)}01`).slice(3);
+        const r0 = rateFor(ctx, s.party, section, s.date);
         const panNote = r0.via206AA
           ? " (s.206AA: no PAN on the deductee)"
-          : ctx.panDerivedFromGstinOf?.(m.party)
+          : ctx.panDerivedFromGstinOf?.(s.party)
             ? " (PAN derived from GSTIN)"
             : "";
-        if (cred <= TDS_TOLERANCE) {
+        for (const back of s.backs) {
+          // The month's purchases were due on its own last date, so a credit
+          // from a later month is late by construction (the pool only holds
+          // strictly later months). Same-day credits are inside the month.
+          if (back.ded.date <= s.date) continue;
+          const shielded = ctx.deducteeFiledReturn(s.party);
+          const months = calendarMonths(s.date, back.ded.date);
+          const interest = (ctx.lateDeductionInterest ?? true) === false || shielded
+            ? 0
+            : interestOn(0.01, months, back.tax);
+          const paid = `duty credit of ${money(back.tax)} on ${displayDate(back.ded.date)} settles the ${money(liab)} payable on purchases of ${money(s.gross)} for ${label} under section ${section} (payable on ${displayDate(s.date)})`;
+          push(
+            "tds_late_deducted",
+            "warning",
+            s.party,
+            section,
+            back.tax,
+            shielded
+              ? `${paid}, booked after that date; s.201(1) proviso shields interest (i) (deductee filed a return).`
+              : `${paid}, booked after that date; s.201(1A) interest (i) of ${money(interest)} for ${months} month(s) at 1%.`,
+            interest > 0
+              ? [{ kind: "i", amount: interest, from: s.date, to: back.ded.date, basis: `1% of ${months} month(s)` }]
+              : undefined,
+          );
+          interestI += interest;
+          // Additive: the per-booking walk may already have stamped this very
+          // credit for its own booking, and the 3CD interest rows are read off
+          // the deduction (so unlike a per-booking backward settlement, this
+          // one IS visible there).
+          back.ded.interestI = round2((back.ded.interestI ?? 0) + interest);
+        }
+        const paidTotal = round2(cred + s.backs.reduce((t, c) => t + c.tax, 0));
+        const resid = round2(Math.max(0, liab - paidTotal));
+        if (resid <= TDS_TOLERANCE) continue;
+        if (cred <= TDS_TOLERANCE && s.backs.length === 0) {
           notDeducted += liab;
-          notDeductedBase += m.gross;
+          notDeductedBase += gross;
           const qId = push(
             "tds_not_deducted",
             "critical",
-            m.party,
+            m,
             section,
             liab,
-            `purchases of ${money(m.gross)} for ${label} under section ${section}${panNote}: tax of ${money(liab)} was payable, but no duty credit was found for the month.`,
+            `purchases of ${money(gross)} for ${label} under section ${section}${panNote}: tax of ${money(liab)} was payable, but no duty credit was found for the month.`,
           );
           clause21b.push({
-            party: m.party, date: `${mk.slice(-6)}01`, voucherNumber: "",
+            party: m, date: `${s.mk.slice(-6)}01`, voucherNumber: "",
             // 194Q no-deduction: the expense is the TAXABLE part of the month
             // (the excess beyond the ₹50 lakh crossing), not the whole month's
             // purchases (captain, 2026-09-26) — the liable tax / the applicable
-            // rate. `m.liable` is that same base, used as a zero-rate fallback.
-            gross: r0.rate > 0 ? round2(liab / r0.rate) : round2(m.liable),
+            // rate. `liable` is that same base, used as a zero-rate fallback.
+            gross: r0.rate > 0 ? round2(liab / r0.rate) : round2(liable),
             tdsDone: 0, tdsDeposited: 0, depositDate: null,
             section, reason: "not_deducted", liability: liab, findingId: qId,
           });
@@ -1828,15 +2311,20 @@ export function analyzeTds(
           // The month's shortfall is undeducted tax, so the 21(b) row reports
           // only that portion of the expense — shortfall tax / the applicable
           // rate — with TDS done and deposited at 0 (captain, 2026-09-26).
+          // A backward settlement has already reported its share as a late
+          // deduction above, so only the RESIDUE lands here.
+          const backText = s.backs.length > 0
+            ? ` (${money(paidTotal)} was deducted later, reported as a late deduction above)`
+            : "";
           stageShort(
-            m.party,
+            m,
             section,
-            round2(liab - cred),
-            `duty credits of ${money(cred)} for ${label} fall short of the ${money(liab)} payable on purchases of ${money(m.gross)} under section ${section}${panNote}.`,
+            resid,
+            `duty credits of ${money(cred)} for ${label}${backText} fall short of the ${money(liab)} payable on purchases of ${money(gross)} under section ${section}${panNote}.`,
             {
-              date: `${mk.slice(-6)}01`,
+              date: `${s.mk.slice(-6)}01`,
               voucherNumber: "",
-              gross: r0.rate > 0 ? round2((liab - cred) / r0.rate) : round2(m.liable),
+              gross: r0.rate > 0 ? round2(resid / r0.rate) : round2(liable),
               tdsDone: 0,
               tdsDeposited: 0,
               depositDate: null,
@@ -1855,7 +2343,13 @@ export function analyzeTds(
         agg.party,
         section,
         round2(rate * agg.gross),
-        `aggregate of ${money(agg.gross)} crossed the threshold in ${displayDate(agg.crossDate)}: ${wholeYear ? "the whole year's amounts are liable;" : "only the amount beyond the crossing is liable (section 194Q);"}`,
+        `aggregate of ${money(agg.gross)} crossed the threshold in ${displayDate(agg.crossDate)}: ${
+          law.cumulativeOnCross
+            ? "the amounts booked up to the crossing are liable on the crossing booking itself and each later booking in full;"
+            : wholeYear
+              ? "the whole year's amounts are liable;"
+              : "only the amount beyond the crossing is liable (section 194Q);"
+        }`,
       );
     }
   }
