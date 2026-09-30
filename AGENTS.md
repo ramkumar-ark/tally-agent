@@ -1514,16 +1514,27 @@ When updating this file, preserve this bar for all agents and keep entries conci
   016)** — see the "backward settlement" and "voucher identity" bullets below. The sweep
   instrument still is: patch `dist/tds.js` with a
   `process.env.TDS_RECON` block immediately before its `    return {` at the END of `analyzeTds`
-  (where `aggs`, `liabilities`, `events.deductions` and the pushed `findings` are in scope), dump
-  `yearDue` computed WITH the `chargedSoFar` netting (a plain `Σ rate×b.liable` double-counts a
-  single-limit bill and invents ~19 false violations), then restore `dist/` with `npm run build`.
-  The honest identity is the ENGINE's own: `max(0, Σ liabilities[].liability − Σ credits)` vs
-  `Σ not_deducted + short_deducted`. On the real book that leaves 13 of 375 aggs out by >₹1,
-  all accounted for: 2 × 194T (timing-only, never reports), 9 under `SHORT_DEDUCTION_MIN`,
-  one ₹1.21 rounding, and one genuine (a 194-C party's ₹202 credit of 31-Jul-2025 has no bill
-  inside the 30-day pairing window, so its credit sum overstates what is spendable — run 12
-  brings that party's out-of-tie figure from ₹364.79 to ₹162.50 once the pool defect below is
-  fixed; the instrument reads `.scratch/recon-vNN.json`, `recon-v11-check.mjs` takes it as argv).
+  (where `aggs`, `liabilities`, `events.deductions` and the pushed `findings` are in scope), then
+  restore `dist/` with `npm run build`.
+  Read the identity against the **PRE-POOL** due side, and section by section: for every
+  per-booking section `due = Σ` the walk's `base` (the statutory charge it stamps in the plan
+  phase, before any credit is applied), for 194Q `due = Σ liabilities[].liability` (that
+  section is reported party-month, so each month has its own row and a base sum is unusable
+  there). `Σ liabilities[].liability` is POST-pool and is **not** the due side for the rest:
+  a bill an advance settled drops out of it while the advance is still counted on the credit
+  side, so the identity reads the credits too rich by exactly the advance. That single
+  mistake invented a phantom ₹364.79 residual on a 194-C party and a phantom ₹1,114.90 on
+  another (inbox 021). Dump `base` by splicing the plan-push line
+  (`plan.push({ b, base,` → inject a `globalThis.__reconBases` collector keyed
+  `section~party~date~gross`) — **the injected JS must use single quotes**; a double quote
+  inside the double-quoted replacement string silently corrupts `dist/tds.js`
+  (`node --check` it). `.scratch/recon-v12.json` is the current dump, `recon-check2.mjs`
+  takes the dump path as argv. On the real book this leaves 13 of 375 aggs out by >₹1 and
+  **not one of them is a defect**: 2 × 194T (timing-only, never reports), 9 under
+  `SHORT_DEDUCTION_MIN` (each a whole-party shortfall), and two rupee-rounding rows
+  (₹1.21 and ₹1.31, each six challans rounded to the rupee). The 194-C party of inbox 019/021
+  ties: due 6,444.81 (= 1% of its 6,44,481 of charges) − credits 6,281 = 163.81 against the
+  reported 162.50.
 - **The carry-forward is BIDIRECTIONAL within the year (run 11, hardened run 12).** The bank is a
   LIST of unspent credit (`pool: {ded; date; remaining}[]` in pass 2's plan phase, which replaced
   v10's `excessBank` scalar), not a running figure in date order. After the forward pass it is

@@ -546,3 +546,90 @@ describe("an excess deduction carries forward (captain 2026-09-30, inbox 014)", 
     );
   });
 });
+
+describe("a duty credit on a bill that owed nothing is banked against the crossing (captain 2026-09-30, inbox 019)", () => {
+  // The captain's own 194-C party, scaled to 2% so the fixture reads plainly.
+  // Journal 355 of 31-Jul-2025 books the 20,200 expense (20,000 + the 404 of
+  // TDS) against the party, so that bill's own tax is 404.00 - and the
+  // netting inside the 31-Aug crossing already reserves that 404.00 for it.
+  //
+  // Run 11 stranded the credit: the forward bank had NO date filter, so it
+  // spent the 404 on the EARLIER 30-Jun bill - which its own credit of 606 had
+  // already paid - and the crossing was then charged 404 more than the books
+  // had paid, a 404.54 short-deduction on a party whose every other bill was
+  // paid. A credit is worth what it can be applied to: a bill that owed
+  // nothing (or whose own tax the crossing reserved) banks it for the
+  // crossing that charges it, and it is counted ONCE.
+  const cLedger = "Labour Contractor Expenses A/c";
+  const cDuty = "TDS on Labour Contractor";
+  const cParty = "Creditor 91 A/c";
+  const op: OperatorFile = {
+    ...EMPTY_TDS_OPERATOR,
+    sections: [
+      { ledger: cLedger, section: "194C" },
+      { ledger: cDuty, section: "194C", kind: "duty" },
+    ],
+  };
+  const cctx = tdsCtx(op, { tdsParties: [cParty] });
+  const bill = (date: string, v: string, gross: number, type = "Purchase"): LedgerVoucherRow => ({
+    ...row(date, v, gross, cParty),
+    voucherType: type,
+  });
+  const credit = (date: string, v: string, tax: number): LedgerVoucherRow => ({
+    ...row(date, v, -tax, cParty),
+    voucherType: "Journal",
+  });
+  // 1,39,480 of 194-C bookings: 30-Jun 30,303, the 31-Jul journal 20,200, the
+  // 31-Aug crossing 72,727 (cumulative 1,23,230 > 1,00,000) and a 31-Oct bill
+  // of 16,250 the books never credit.
+  const book = () =>
+    run(
+      cctx,
+      [
+        {
+          ledger: cDuty,
+          rows: [
+            credit("20250630", "D/1", 606),
+            credit("20250731", "J/355", 404),
+            credit("20250831", "D/2", 1454),
+          ],
+        },
+      ],
+      [
+        {
+          ledger: cLedger,
+          rows: [
+            bill("20250630", "P/1", 30303),
+            bill("20250731", "J/355", 20200, "Journal"),
+            bill("20250831", "P/2", 72727),
+            bill("20251031", "P/3", 16250),
+          ],
+        },
+      ],
+    );
+
+  it("counts the stranded credit against the crossing that charges it", () => {
+    const out = book();
+    // 2% of the cumulative 1,23,230, less the 606.06 and 404.00 the two
+    // earlier bills were charged - and not a rupee more, whatever the 404
+    // credit is also the 31-Jul journal's own deduction for.
+    const crossing = out.liabilities.find((l) => l.booking.date === "20250831");
+    expect(crossing?.liability).toBe(1454.54);
+    // its own credit of 1,454 leaves 0.54, under the rupee tolerance: the
+    // run-11 report of 404.54 here is gone.
+    expect(out.findings.filter((f) => f.check === "tds_short_deducted")).toEqual([]);
+    // and the 31-Oct bill, which has no credit at all, is the only hole.
+    expect(notDeducted(out).map((f) => f.amount)).toEqual([325]);
+  });
+
+  it("charges the year once: 2% of the year's bookings, the silent journal inside the crossing", () => {
+    const out = book();
+    // 2,789.60 is 2% of the year's 1,39,480. The 31-Jul journal raises no row
+    // of its own (its own credit pays it) and is reported as nothing, but its
+    // 404.00 is inside the crossing's net - which is why a whole-company
+    // identity that sums the ROWS alone reads the credit side 404 too rich
+    // and looks for a shortfall that is not there.
+    const charged = out.liabilities.reduce((s, l) => s + l.liability, 0) + 404;
+    expect(charged).toBe(2789.6);
+  });
+});
