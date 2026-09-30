@@ -86,7 +86,7 @@ export type ToolRegistrar = (
 ) => void;
 
 export type ToolsConfig = Pick<GatewayConfig, "reportDir"> &
-  Partial<Pick<GatewayConfig, "defaultCompany" | "dumpVault">> &
+  Partial<Pick<GatewayConfig, "defaultCompany" | "dumpVault" | "downstreamArgs">> &
   Pick<GatewayConfig, "dayBookMaxBytes">;
 
 /**

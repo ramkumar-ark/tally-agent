@@ -107,7 +107,7 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     extensions: [".json"],
     doc: "docs/operator/export-daybook.md",
     howToGet:
-      "Run scripts/export-daybook.mjs against the open company for the whole period (the workflow can also export it for you when Tally is reachable).",
+      "Run scripts/export-daybook.mjs against the open company for the whole period, or call tb_audit_workflow_export_daybook and let the workflow export it for you (needs the upstream server path in TALLY_MCP_ARGS).",
   },
   priorGstSheet: {
     key: "priorGstSheet",

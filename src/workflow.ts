@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { access, mkdir, readdir, rename, readFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { ToolRegistrar, ToolsConfig } from "./index.js";
 import type { Session } from "./review.js";
@@ -45,8 +47,9 @@ import {
 import type { StepCtx } from "./workflow-registry.js";
 
 /**
- * The three tax-audit workflow tools: tb_audit_workflow_start,
- * tb_audit_workflow_status and tb_audit_workflow_run. The workflow folder is
+ * The tax-audit workflow tools: tb_audit_workflow_start,
+ * tb_audit_workflow_status, tb_audit_workflow_export_daybook and
+ * tb_audit_workflow_run. The workflow folder is
  * the only state — every call reads and writes workflow.json on disk, so a
  * run survives the process. Handlers go through the in-process handler map
  * (ctx.call); file contents are never returned, only paths.
@@ -92,6 +95,60 @@ const scrubReason = (msg: string, session: Session): string =>
   scrubSecrets(maskKnownNames(msg, session.vault));
 
 const wfRoot = (cfg: ToolsConfig): string => join(cfg.reportDir, "audit-workflows");
+
+/** Everything scripts/export-daybook.mjs needs on one command line. */
+export interface DayBookExportSpec {
+  script: string;
+  upstream: string;
+  company: string;
+  from: string;
+  to: string;
+  out: string;
+}
+
+export type SpawnDayBookExport = (spec: DayBookExportSpec) => Promise<{ code: number; stderr: string }>;
+
+/** The first .js argument is the upstream server's entry script (its dist/index.js). */
+export function resolveUpstreamScript(args: string[]): string | undefined {
+  return args.find((a) => a.toLowerCase().endsWith(".js"));
+}
+
+const EXPORT_TIMEOUT_MS = 10 * 60 * 1000;
+const STDERR_KEEP = 8000;
+
+/**
+ * Run scripts/export-daybook.mjs as its own child process: a whole-FY export
+ * is far too large for the MCP stdio transport (the AGENTS.md 26AS sharp edge),
+ * and one child process keeps the tool inside its own timeout budget. A
+ * timeout or a non-zero exit is a normal failed return, never a thrown error.
+ */
+const defaultSpawnDayBookExport: SpawnDayBookExport = (spec) =>
+  new Promise((resolveDone, rejectDone) => {
+    const child = spawn(
+      process.execPath,
+      [spec.script, spec.upstream, spec.company, spec.from, spec.to, spec.out],
+      { stdio: ["ignore", "pipe", "pipe"], env: process.env },
+    );
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      stderr += (stderr ? "\n" : "") + `day-book export timed out after ${Math.round(EXPORT_TIMEOUT_MS / 60000)} minutes`;
+    }, EXPORT_TIMEOUT_MS);
+    child.stdout.resume();
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+      if (stderr.length > STDERR_KEEP) stderr = stderr.slice(-STDERR_KEEP);
+    });
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      rejectDone(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolveDone({ code: code ?? -1, stderr: stderr.trim() });
+    });
+  });
 
 function resolveSteps(args: {
   steps?: string[];
@@ -421,8 +478,13 @@ async function writeArtifacts(
   await saveManifest(wfDir, m);
 }
 
-export function registerWorkflowTools(register: ToolRegistrar, ctx: WorkflowToolCtx): void {
+export function registerWorkflowTools(
+  register: ToolRegistrar,
+  ctx: WorkflowToolCtx,
+  opts: { spawnDayBookExport?: SpawnDayBookExport } = {},
+): void {
   const { session } = ctx;
+  const spawnExport = opts.spawnDayBookExport ?? defaultSpawnDayBookExport;
 
   /** workflowId -> the TDS-step fingerprint this process holds a review for. */
   const tdsCache = new Map<string, string>();
@@ -608,6 +670,110 @@ export function registerWorkflowTools(register: ToolRegistrar, ctx: WorkflowTool
           0,
         );
         return JSON.stringify(workflowView(m, wfDir), null, 2);
+      } catch (e) {
+        throw scrubbed(e, session);
+      }
+    },
+  );
+
+  register(
+    "tb_audit_workflow_export_daybook",
+    "Export the day book for a tax-audit workflow's company and period into the workflow folder " +
+      "(runs scripts/export-daybook.mjs as its own child process against the same upstream Tally " +
+      "server the gateway is configured with, then validates the file). Skipped when the operator " +
+      "supplied a day-book path — a user-supplied day book always wins; an earlier export of this " +
+      "tool's own is moved aside and replaced. Call this when the intake table " +
+      "shows the day book missing and Tally is reachable.",
+    {
+      workflowId: z.string().describe("The workflow folder name"),
+    },
+    async (args) => {
+      try {
+        const wfDir = join(wfRoot(ctx.cfg), args.workflowId);
+        let m: WorkflowManifest;
+        try {
+          m = await loadManifest(wfDir);
+        } catch {
+          throw new Error(
+            `no workflow '${args.workflowId}' under ${wfRoot(ctx.cfg)} — call tb_audit_workflow_status without an id to list them`,
+          );
+        }
+        const entry = m.inputs.dayBook;
+        // Only a USER-supplied path wins: a previous export of our own is
+        // replaceable (Tally data moved on), moved aside, never clobbered.
+        if (entry.path !== undefined && entry.source !== "generated") {
+          const note = satisfied("dayBook", m)
+            ? "day book already supplied — nothing exported"
+            : `day book path is set but not usable (${entry.status}) — fix it or set a good path with tb_audit_workflow_status`;
+          await ctx.audit("tb_audit_workflow_export_daybook", { workflowId: m.workflowId }, 0, 0);
+          return JSON.stringify({ ...workflowView(m, wfDir), exported: false, note }, null, 2);
+        }
+        const upstream = resolveUpstreamScript(ctx.cfg.downstreamArgs ?? []);
+        if (upstream === undefined) {
+          entry.reason =
+            "cannot export the day book: the upstream Tally MCP server path is not configured — " +
+            "point TALLY_MCP_ARGS at the upstream's dist/index.js, or run scripts/export-daybook.mjs " +
+            "yourself and set the path with tb_audit_workflow_status";
+          await saveManifest(wfDir, m);
+          await ctx.audit("tb_audit_workflow_export_daybook", { workflowId: m.workflowId }, 0, 0);
+          return JSON.stringify({ ...workflowView(m, wfDir), exported: false }, null, 2);
+        }
+        const script = fileURLToPath(new URL("../scripts/export-daybook.mjs", import.meta.url));
+        const out = join(wfDir, "daybook.json");
+        if (await exists(out)) {
+          const aside = await uniquePath(wfDir, "daybook.json.old");
+          await rename(out, aside);
+        }
+        let run: { code: number; stderr: string };
+        try {
+          run = await spawnExport({
+            script,
+            upstream,
+            company: m.params.company,
+            from: m.params.fromDate,
+            to: m.params.toDate,
+            out,
+          });
+        } catch (e) {
+          entry.reason = `day-book export failed: ${scrubReason(errMsg(e), ctx.session)}`;
+          await saveManifest(wfDir, m);
+          await ctx.audit("tb_audit_workflow_export_daybook", { workflowId: m.workflowId }, 0, 0);
+          return JSON.stringify({ ...workflowView(m, wfDir), exported: false }, null, 2);
+        }
+        if (run.code !== 0) {
+          const tail = run.stderr
+            ? run.stderr.split("\n").slice(-3).join("\n")
+            : `exit ${run.code}`;
+          entry.reason = `day-book export failed: ${scrubReason(tail, ctx.session)}`;
+          await saveManifest(wfDir, m);
+          await ctx.audit("tb_audit_workflow_export_daybook", { workflowId: m.workflowId }, 0, 0);
+          return JSON.stringify({ ...workflowView(m, wfDir), exported: false }, null, 2);
+        }
+        try {
+          const text = await loadDayBookText(out, ctx.cfg.dayBookMaxBytes);
+          readDayBook(text, {
+            company: m.params.company,
+            fromDate: m.params.fromDate,
+            toDate: m.params.toDate,
+          });
+        } catch (e) {
+          entry.reason = `day book failed validation: ${scrubReason(errMsg(e), ctx.session)}`;
+          await saveManifest(wfDir, m);
+          await ctx.audit("tb_audit_workflow_export_daybook", { workflowId: m.workflowId }, 0, 0);
+          return JSON.stringify({ ...workflowView(m, wfDir), exported: false }, null, 2);
+        }
+        // A fresh export the operator has not touched: no generatedDigest, so
+        // the status reads "present", never "generated-unfilled".
+        entry.path = out;
+        entry.source = "generated";
+        entry.digest = sha256(await readFile(out));
+        entry.accepted = false;
+        entry.approved = false;
+        entry.reason = undefined;
+        entry.status = inputStatus(WORKFLOW_INPUTS.dayBook, entry, entry.digest);
+        await saveManifest(wfDir, m);
+        await ctx.audit("tb_audit_workflow_export_daybook", { workflowId: m.workflowId }, 1, 0);
+        return JSON.stringify({ ...workflowView(m, wfDir), exported: true }, null, 2);
       } catch (e) {
         throw scrubbed(e, session);
       }
