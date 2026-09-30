@@ -289,6 +289,22 @@ describe("Bank Interest mapping sheet", () => {
       parseAs26MapTemplate(rawBank([[null, "Sample Bank FD Int A/c", null]])),
     ).toThrow(/row 2 .*"26AS name \(bank\)" is blank/);
   });
+  it("pre-fills the bank list already in force, one row per ledger, so re-fill round-trips", () => {
+    // A bank left off the sheet stops being a bank (it falls back to bill-level
+    // reconciliation), so the generated template must carry the list forward.
+    const banks = [
+      { as26Name: "Sample Bank", interestLedgers: ["Sample Bank FD Int A/c", "Sample Bank Saving Int"], fdLedgers: ["Sample Bank FD A/c"] },
+    ];
+    const buf = buildAs26MapTemplate({ company: "Sample", deductors: [], map: { mappings: [], banks }, ledgers: [] });
+    const sheet = sheetOf(buf, "Bank Interest")!;
+    const rows = sheet.rows.slice(1).map((r) =>
+      [...r.cells.entries()].sort((x, y) => x[0] - y[0]).map(([, c]) => c.value));
+    expect(rows).toEqual([
+      ["Sample Bank", "Sample Bank FD Int A/c", "Sample Bank FD A/c"],
+      ["Sample Bank", "Sample Bank Saving Int", null],
+    ]);
+    expect(parseAs26MapTemplate(buf).banks).toEqual(banks);
+  });
   it("an older filled template without the sheet loads unchanged with empty banks", () => {
     expect(parseAs26MapTemplate(rawTemplate([
       ["Alpha Traders", "tds", 1, "Alpha Ledger"],

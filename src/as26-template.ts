@@ -132,11 +132,13 @@ const ledgerReferenceSheet = (ledgers: string[]): Sheet => ({
 
 /** The Bank Interest mapping sheet (design §12.5): presence on it marks the
  * 26AS name a bank and names the interest income and FD ledgers belonging to
- * it. Blank so the operator fills it; the columns reuse the Ledgers-backed
- * dropdown range. */
+ * it. Pre-filled from the map in force, so re-fill round-trips: a bank left
+ * off the sheet stops being a bank, so losing it silently reverts the party to
+ * bill-level reconciliation. The columns reuse the Ledgers-backed dropdown
+ * range. */
 export const BANK_SHEET = "Bank Interest";
 
-function bankInterestSheet(ledgers: string[]): Sheet {
+function bankInterestSheet(ledgers: string[], declared: BankInterestMapping[]): Sheet {
   const validation = ledgers.length > 0
     ? { formula: ledgerRange(ledgers.length + 1) }
     : undefined;
@@ -147,7 +149,19 @@ function bankInterestSheet(ledgers: string[]): Sheet {
       { header: "Interest income ledger", width: 34, format: "text", ...(validation ? { validation } : {}) },
       { header: "FD ledger", width: 34, format: "text", ...(validation ? { validation } : {}) },
     ],
-    rows: [],
+    // One row per ledger: the parser reads a row as (name, ONE interest
+    // ledger, ONE FD ledger) and REFUSES a ledger named twice anywhere on the
+    // sheet, so a bank with several ledgers repeats its name on follow-on rows.
+    rows: declared.flatMap((b): Array<Array<string | number>> => {
+      const row = (interest: string, fd: string): Array<string | number> =>
+        [b.as26Name, interest, fd];
+      const first: Array<string | number> = row(b.interestLedgers[0] ?? "", b.fdLedgers[0] ?? "");
+      const rest = [
+        ...b.interestLedgers.slice(1).map((l) => row(l, "")),
+        ...b.fdLedgers.slice(1).map((l) => row("", l)),
+      ];
+      return [first, ...rest];
+    }),
   };
 }
 
@@ -263,7 +277,7 @@ export function buildAs26MapTemplate(opts: {
   return buildWorkbook([
     instructions(opts.company, ledgers.length > 0),
     mapping,
-    bankInterestSheet(ledgers),
+    bankInterestSheet(ledgers, opts.map.banks ?? []),
     creditLedgerSheet(ledgers, opts.map.creditLedgers ?? []),
     manualMatchSheet(opts.map.manualMatches ?? []),
     manualLinkSheet(opts.map.manualLinks ?? []),

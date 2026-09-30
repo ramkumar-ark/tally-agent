@@ -345,6 +345,26 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `combinationExplained` shift, and only towards "explained". Guarded in
   `test/as26-manual.test.ts`.
 
+## Sharp edges found round-tripping the Bank Interest sheet (2026-09-30)
+
+- `bankInterestSheet` (design §12.5) wrote `rows: []` while every other
+  operator sheet is pre-filled from the map in force, so
+  `tb_write_26as_template` DROPPED the operator's bank list on every re-fill.
+  A bank left off the sheet stops being a bank (it falls back to bill-level
+  reconciliation and loses its 194A totals comparison), so a re-fill silently
+  changed the review's basis: measured on Narayanan, one bank party went
+  unmapped, totals moved 17,172,194 -> 17,097,558 and two `mapping_gap`
+  findings appeared. Fixed by passing `map.banks` through; guarded by a
+  round-trip test in `test/as26-template.test.ts`.
+- The sheet's parser reads ONE row as (bank name, ONE interest ledger, ONE FD
+  ledger) and REFUSES a ledger named twice anywhere on the sheet, so a
+  pre-fill must emit one row per ledger, repeating the bank name.
+- **Never trust a row id from an earlier report** when picking rows for a demo
+  or for an operator instruction: ids are assigned per run from the sorted rows
+  and move with the data. On Narayanan, row ids read off the v9 workbook pointed
+  at different entries on the current baseline. Bind by (date, tax), as the
+  manual channel does.
+
 ## Sharp edges found adding the offline day-book input (2026-09-22)
 
 - The gateway's `StdioClientTransport` cannot receive a whole-FY day book —
