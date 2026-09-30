@@ -1583,6 +1583,35 @@ When updating this file, preserve this bar for all agents and keep entries conci
   from its bill on the number alone — **the fixtures were rewritten (each credit now carries
   its own Journal/Payment voucher number inside the 30-day window), never the rule weakened.**
   Do not reintroduce a date-free voucher join, and do not "fix" a failing fixture by relaxing it.
+- **Compare two day-book exports by voucher COMPOSITION, never by `date|type|number`**
+  (run 14). Asking "what did the operator change in the books?" against a fresh export
+  showed 289 differing `date|type|number` keys of which exactly 9 were real edits: the rest
+  is Tally renumbering after the corrections, which is exactly the trap the bullet above
+  records inside the engine. Key each voucher by its sorted entry signature
+  (`ledger|amount` multiset) and the real changes fall out in one pass — that is how run 14
+  found the two re-ledgerings (`Repairs - Machinery - Service - URD` → `Spares - URD` on
+  JAYARAJ's 31,643 bill, and five VRV bills from `Professional Fees - 18%` to
+  `Labour Charges Payable-18%`) and dismissed a 1.4-crore GST receivable reclass as
+  out of scope.
+- **An operator remap changes the LIMIT STRUCTURE, not just the section name (run 14).**
+  `Repairs - Machinery - Service - 18% A/c` moving 194J → 194C took one party from
+  ₹13,863 of not-deducted to ₹1,386.30 and produced a NEW ₹465.22 finding for another,
+  because 194J charges 10% on every bill over ₹30,000 while 194C charges 1–2% above a
+  ₹1,00,000 ANNUAL aggregate (`cumulativeOnCross`) — the same payments largely fall inside
+  the limit. Never read a remap as "the same liability under a new heading", and **check the
+  rate the new finding lands on against the sub-clause** (that ₹465.22 is 1%, i.e. 194C's
+  works-contractor/transporter rate, where a technical contract would be 2%).
+- **A journal whose signs are inverted against every other journal in its party IS a debit
+  note; that is a book fact, not an engine defect (run 14).** MURUGAN SILT CATCHPIT's
+  01-Apr-2025 journal of ₹1,010 debits the party and credits the expense ledger, so
+  `netDebitNotes` LIFOs it against the most recent open bill (1,75,253 → 1,74,243) and the
+  finding becomes a ₹346.43 short-deduction on the next bill, funded by the first bill's
+  ₹10.57 of over-credit. The smallest counterfactual (negate those two amounts, change
+  nothing else) moves it to ₹357.00 not-deducted — ₹10.57, not the ₹20 an operator reading
+  the same voucher expects, because the April charge's own tax is exactly offset by the
+  reduction it had been granting. When a captain says a finding is "understated by Rs N",
+  build that counterfactual before touching the engine; here it proved the reported figure
+  right and the books wrong.
 - **The amount tie-break must compare what the booking is CHARGED, not its gross statutory
   liability** (`TdsBooking.chargeNet`, stamped in `stampLiabilities`, read by `pairExactAmounts`;
   run 11). `pairExactAmounts` asked whether a credit equalled `rate × b.liable` while the walk
