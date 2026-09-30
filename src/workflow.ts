@@ -87,6 +87,10 @@ const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(
 const scrubbed = (e: unknown, session: Session): Error =>
   new Error(scrubSecrets(maskKnownNames(errMsg(e), session.vault)));
 
+/** Reason strings reach the model too: same scrubbers as errors. */
+const scrubReason = (msg: string, session: Session): string =>
+  scrubSecrets(maskKnownNames(msg, session.vault));
+
 const wfRoot = (cfg: ToolsConfig): string => join(cfg.reportDir, "audit-workflows");
 
 function resolveSteps(args: {
@@ -203,7 +207,7 @@ async function digestUserFile(
         toDate: m.params.toDate,
       });
     } catch (e) {
-      return { digest, invalid: `day book failed validation: ${errMsg(e)}` };
+      return { digest, invalid: `day book failed validation: ${scrubReason(errMsg(e), ctx.session)}` };
     }
   }
   return { digest };
@@ -287,7 +291,7 @@ async function runIntake(
         await generateInput(m, ctx, wfDir, key);
       } catch (e) {
         entry.status = "missing";
-        entry.reason = `generation failed: ${errMsg(e)}`;
+        entry.reason = `generation failed: ${scrubReason(errMsg(e), ctx.session)}`;
       }
       continue;
     }
@@ -319,7 +323,7 @@ async function runIntake(
         await generateInput(m, ctx, wfDir, key);
       } catch (e) {
         entry.status = "missing";
-        entry.reason = `generation failed: ${errMsg(e)}`;
+        entry.reason = `generation failed: ${scrubReason(errMsg(e), ctx.session)}`;
       }
     }
   }
