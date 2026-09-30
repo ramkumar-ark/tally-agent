@@ -87,6 +87,19 @@ import { EMPTY_DEP3CD_OPERATOR, parseDep3cdTemplate } from "./dep3cd-file.js";
 import { ADDITIONAL_DEPRECIATION_TEXT, DEFAULT_BLOCK_LISTS, DEPN_TEXT } from "./dep3cd-law.js";
 import { parseNotdsTemplate, EMPTY_NOTDS_OPERATOR, type NotdsOperatorFile } from "./notds-file.js";
 import {
+  buildStatement,
+  payableCandidates,
+  type PayableDecision,
+  type PayablePartyKind,
+  type TdsPayableCandidate,
+  type TdsPayableStatement,
+} from "./tds-payable.js";
+import {
+  parsePayableDecisions,
+  type TdsPayableOperatorFile,
+} from "./tds-payable-file.js";
+import type { PayableRunIdentity } from "./tds-payable-template.js";
+import {
   booksCandidates, doneKeyOf, depositedKeyOf, amountKeyOf, isNrSectionSpelling, winmanSectionOf,
   NOTDS_FORM_ID,
   type NoTdsCandidateRow, type NoTdsRow, type NotdsSheetKey,
@@ -349,6 +362,68 @@ export interface NoTdsReviewResult {
   manualCount: number;
   findings: NoTdsMaskedFinding[];
   counts: Record<Severity, number>;
+}
+
+/**
+ * tb_tds_payable_statement's result: what the statement carries, masked and
+ * counted. Party names appear as pseudonyms and **no PAN reaches this result
+ * at all** — a PAN lives only on the operator's disk. Money arrives as
+ * `money()` strings on the headline and grouped totals, so a bare 6+-digit
+ * figure can never be mangled by `scrubDigits` inside a prose field.
+ */
+export interface TdsPayableStatementResult {
+  company?: string;
+  fromDate: string;
+  toDate: string;
+  asOnDate: string;
+  /** Where the cached books came from (the tb_tds_review run's channel). */
+  booksSource: "live" | "daybook-file";
+  /** The payment date the interest was measured to, YYYYMMDD. */
+  paymentDate: string;
+  /** Critical findings in the cached run — the decision population. */
+  critical: number;
+  accepted: number;
+  rejected: number;
+  /** Accepted rows whose PAN could not be found (never guessed). */
+  panMissing: number;
+  totals: {
+    amountPaid: string;
+    taxPayable: string;
+    taxDeducted: string;
+    shortfall: string;
+    interestI: string;
+    interestII: string;
+    interest: string;
+    /** Shortfall + interest — what the challan carries. */
+    payable: string;
+  };
+  bySection: Array<{ section: string; rows: number; shortfall: string; interest: string; payable: string }>;
+  byPartyKind: Array<{
+    kind: PayablePartyKind;
+    rows: number;
+    shortfall: string;
+    interest: string;
+    payable: string;
+  }>;
+  /** One line per statement row: the finding id, its check, the pseudonym and the figures. */
+  rows: Array<{
+    findingId: string;
+    check: string;
+    /** The party pseudonym; "" when the finding resolved no books row. */
+    party: string;
+    section: string;
+    date: string;
+    partyKind: PayablePartyKind;
+    amountPaid: number;
+    taxPayable: number;
+    taxDeducted: number;
+    rate: number | null;
+    shortfall: number;
+    interestI: number;
+    interestII: number;
+    interest: number;
+    depositDueDate: string;
+  }>;
 }
 
 /** The books facts tb_tds_review caches for the clause 21(b) merge. */
@@ -880,6 +955,36 @@ export interface Session {
    */
   notdsCandidates(): NoTdsCandidateRow[] | undefined;
   /**
+   * The TDS payable statement's decision population: every CRITICAL finding of
+   * the cached tb_tds_review run, enriched with the books facts of the clause
+   * 21(b) row each one pushed — the seed of the fillable decisions workbook
+   * (tb_write_tds_payable_decisions). Real party names; session-only.
+   * Undefined before a TDS review has run.
+   */
+  tdsPayableCandidates(): TdsPayableCandidate[] | undefined;
+  /**
+   * The run identity the decisions workbook is bound to; undefined before a
+   * TDS review has run. A workbook carrying a different identity is refused
+   * rather than read as decisions on this run.
+   */
+  tdsPayableIdentity(): PayableRunIdentity | undefined;
+  /**
+   * The payable statement for one payment date, priced with the review's own
+   * s.201(1A) schedule. Refuses while any critical finding is undecided,
+   * naming the open ones. The result is masked (pseudonymized parties, no
+   * PAN); the unmasked statement is cached for the workbook writer.
+   */
+  tdsPayableStatement(input: {
+    decisionsPath?: string;
+    operator?: TdsPayableOperatorFile;
+    paymentDate: string;
+  }): Promise<TdsPayableStatementResult>;
+  /**
+   * The cached payable statement from the last tdsPayableStatement — unmasked,
+   * real names and PANs, raw dates. Only the workbook writer consumes it.
+   */
+  tdsPayableRows(): TdsPayableStatement | undefined;
+  /**
    * The cached clause 20(b) rows from the last pfEsiReview, with raw dates —
    * the report writer (tb_write_pf_esi_report) consumes them unchanged; the
    * review result's own rows are display-formatted for the model.
@@ -1031,6 +1136,12 @@ export function createSession(
   let lastTdsBooks: TdsBooksCache | undefined;
   /** The private vellum of the clause 21(b) review: unmasked NoTdsRow[] for the Winman writer. */
   let lastNoTds: NoTdsRow[] | undefined;
+  /**
+   * The private vellum of the payable statement: unmasked TdsPayableStatement,
+   * real party names and PANs, session-only. The workbook writer
+   * (tb_tds_payable_statement) consumes it; nothing here is ever masked.
+   */
+  let lastTdsPayable: TdsPayableStatement | undefined;
   /** canonical ledger key -> session-stable scrutiny sequence (LS-<seq>-..., scrutinyId L<seq>). */
   const ledgerSeqByKey = new Map<string, number>();
 
@@ -2691,6 +2802,9 @@ export function createSession(
       toDate,
       booksSource: dayBook ? "daybook-file" : "live",
     };
+    // A new TDS run replaces the payable population, so any statement cached
+    // against the previous one is stale by construction.
+    lastTdsPayable = undefined;
     return result;
   }
 
@@ -4535,6 +4649,159 @@ export function createSession(
     return { path: target, rowsBySheet };
   }
 
+/**
+   * The payable population of the cached tb_tds_review run: every CRITICAL
+   * finding, enriched with the books facts of the clause 21(b) row its raise
+   * site pushed. A pure projector over the run's own rows — it never
+   * re-derives a liability predicate and never re-runs the engine, exactly
+   * like `booksCandidates`. Real party names; session-only.
+   */
+  function tdsPayableCandidates(): TdsPayableCandidate[] | undefined {
+    if (!lastTds || !lastTdsBooks) return undefined;
+    return payableCandidates({
+      findings: lastTds.findings,
+      clause21b: lastTdsBooks.clause21b,
+      liabilities: lastTdsBooks.liabilities,
+    });
+  }
+
+  /**
+   * The run identity a decisions workbook is bound to. It travels with the
+   * workbook's hidden Run sheet and the parser refuses any mismatch, so a
+   * file filled against a different review can never be read as decisions on
+   * this one.
+   */
+  function tdsPayableIdentity(): PayableRunIdentity | undefined {
+    const candidates = tdsPayableCandidates();
+    if (!lastTds || !candidates) return undefined;
+    return {
+      company: lastTds.company ?? "",
+      fromDate: lastTds.fromDate,
+      toDate: lastTds.toDate,
+      asOnDate: lastTds.asOnDate,
+      criticalCount: candidates.length,
+      findingIds: candidates.map((c) => c.findingId),
+    };
+  }
+
+  /**
+   * The payable statement for one payment date (design of record:
+   * docs/design/2026-10-01-tds-payable-statement-design.md): the cached run's
+   * critical findings cut by the operator's decisions workbook, then the
+   * Accepted ones priced with the review's OWN s.201(1A) schedule —
+   * `calendarMonths`, `depositDue` and `interestOn` re-parameterised to the
+   * payment date, never a second formula.
+   *
+   * It refuses while any critical finding is undecided, naming the open ones:
+   * an undecided row is not a decision, and silently dropping it would
+   * understate the challan.
+   *
+   * What comes back here is masked — pseudonymed parties and no PAN at all, a
+   * PAN belonging only on the operator's disk. The unmasked statement is
+   * cached for the workbook writer.
+   */
+  async function tdsPayableStatement(input: {
+    decisionsPath?: string;
+    operator?: TdsPayableOperatorFile;
+    paymentDate: string;
+  }): Promise<TdsPayableStatementResult> {
+    if (!lastTds || !lastTdsBooks) {
+      throw new Error("run tb_tds_review first: it caches the critical findings the payable statement prices");
+    }
+    const books = lastTdsBooks;
+    const candidates = tdsPayableCandidates() ?? [];
+    const identity = tdsPayableIdentity();
+    const operator: TdsPayableOperatorFile = input.decisionsPath
+      ? parsePayableDecisions(
+          await readFile(input.decisionsPath),
+          identity ?? {
+            company: books.company ?? "",
+            fromDate: books.fromDate,
+            toDate: books.toDate,
+            asOnDate: lastTds.asOnDate,
+            criticalCount: candidates.length,
+            findingIds: candidates.map((c) => c.findingId),
+          },
+          candidates.map((c) => c.findingId),
+        )
+      : input.operator ?? { decisions: new Map<string, PayableDecision>(), undecided: [] };
+
+    const statement = buildStatement({
+      candidates,
+      decisions: operator.decisions,
+      paymentDate: input.paymentDate,
+      panOf: books.panOf,
+      panDerivedFromGstinOf: books.panDerivedFromGstinOf,
+    });
+    lastTdsPayable = statement;
+
+    const totals = statement.totals;
+    const groupMoney = (t: typeof totals) => ({
+      shortfall: money(t.shortfall),
+      interest: money(t.interest),
+      payable: money(t.payable),
+    });
+    const checkOf = new Map(candidates.map((c) => [c.findingId, c.check]));
+    return {
+      company: lastTds.company,
+      fromDate: lastTds.fromDate,
+      toDate: lastTds.toDate,
+      asOnDate: lastTds.asOnDate,
+      booksSource: lastTds.booksSource,
+      paymentDate: statement.paymentDate,
+      critical: candidates.length,
+      accepted: statement.accepted,
+      rejected: statement.rejected,
+      panMissing: statement.rows.filter((r) => r.pan === null || r.pan.trim() === "").length,
+      totals: {
+        amountPaid: money(totals.amountPaid),
+        taxPayable: money(totals.taxPayable),
+        taxDeducted: money(totals.taxDeducted),
+        shortfall: money(totals.shortfall),
+        interestI: money(totals.interestI),
+        interestII: money(totals.interestII),
+        interest: money(totals.interest),
+        payable: money(totals.payable),
+      },
+      bySection: statement.bySection.map((g) => ({
+        section: g.section,
+        rows: g.rows,
+        ...groupMoney(g.totals),
+      })),
+      byPartyKind: statement.byPartyKind.map((g) => ({
+        kind: g.kind,
+        rows: g.rows,
+        ...groupMoney(g.totals),
+      })),
+      rows: statement.rows.map((r) => ({
+        findingId: r.findingId,
+        check: checkOf.get(r.findingId) ?? "",
+        party: r.party ? vault.pseudonym(r.party, "creditor") : "",
+        section: r.section,
+        date: displayDate(r.date),
+        partyKind: r.partyKind,
+        amountPaid: r.amountPaid,
+        taxPayable: r.taxPayable,
+        taxDeducted: r.taxDeducted,
+        rate: r.rate,
+        shortfall: r.shortfall,
+        interestI: r.interestI,
+        interestII: r.interestII,
+        interest: r.interest,
+        depositDueDate: displayDate(r.depositDueDate),
+      })),
+    };
+  }
+
+  /**
+   * The cached payable statement — unmasked, real names and PANs, the raw
+   * YYYYMMDD dates. The workbook writer (tb_tds_payable_statement) consumes
+   * it; this never leaves the operator's disk.
+   */
+  function tdsPayableRows(): TdsPayableStatement | undefined {
+    return lastTdsPayable;
+  }
+
   /**
    * Clause 21(b) merge (design of record:
    * docs/design/2026-09-24-no-tds-disallowance-design.md §4): the books
@@ -4542,7 +4809,7 @@ export function createSession(
    * decisions workbook — blank Include keeps, Include=N cures the row away,
    * Residency NR routes to the non-resident sheet under the operator's
    * NR-section spelling. The merged rows are cached unmasked for the Winman
-   * writer; what comes back here is masked: pseudonymed parties, no PAN
+   * writer; what comes back here is masked: pseudonymized parties, no PAN
    * anywhere, money()/displayDate() details. No disallowance percentage is
    * ever computed here — the sheets carry payment facts only.
    */
@@ -4918,6 +5185,10 @@ async function realPathId(p: string): Promise<string> {
       lastTdsBooks
         ? booksCandidates(lastTdsBooks.clause21b, lastTdsBooks.panOf, lastTdsBooks.panDerivedFromGstinOf)
         : undefined,
+    tdsPayableCandidates,
+    tdsPayableIdentity,
+    tdsPayableStatement,
+    tdsPayableRows: () => lastTdsPayable,
     write3cdNoTds,
   };
 }

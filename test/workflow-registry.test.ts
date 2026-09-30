@@ -60,11 +60,11 @@ describe("workflow registry integrity", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(stepDirName(WORKFLOW_STEPS[0], 0)).toBe("01-gst_working_sheet");
     expect(stepDirName(WORKFLOW_STEPS[WORKFLOW_STEPS.length - 1], WORKFLOW_STEPS.length - 1)).toBe(
-      `${String(WORKFLOW_STEPS.length).padStart(2, "0")}-loans`,
+      `${String(WORKFLOW_STEPS.length).padStart(2, "0")}-tds_payable`,
     );
   });
 
-  it("keeps the ten steps of the plan in order", () => {
+  it("keeps the steps of the plan in order", () => {
     expect(WORKFLOW_STEPS.map((s) => s.id)).toEqual([
       "gst_working_sheet",
       "gst44",
@@ -76,13 +76,14 @@ describe("workflow registry integrity", () => {
       "fa_register",
       "pf_esi",
       "loans",
+      "tds_payable",
     ]);
   });
 
-  it("marks only the working sheet approvable and only the notds template stepOnly", () => {
+  it("marks only the working sheet approvable and only the decision workbooks stepOnly", () => {
     const approvables = Object.values(WORKFLOW_INPUTS).filter((i) => i.approvable).map((i) => i.key);
     expect(approvables).toEqual(["gstWorkingSheet"]);
     const stepOnly = Object.values(WORKFLOW_INPUTS).filter((i) => i.generator?.stepOnly).map((i) => i.key);
-    expect(stepOnly).toEqual(["notdsTemplate"]);
+    expect(stepOnly).toEqual(["notdsTemplate", "payableDecisions"]);
   });
 });

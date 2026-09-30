@@ -300,6 +300,15 @@ export interface Clause21bBookRow {
    * section row carries the single finding raised for it.
    */
   findingId: string;
+  /**
+   * The date the duty credit was booked, where the raise site had the joined
+   * credit in scope (2026-10-01: the s.201(1A) payable statement). Additive
+   * and optional — it adds a fact for a downstream projector and changes no
+   * computation, finding, total or 21(b) sheet value. Absent on an undeducted
+   * row (no credit exists) and on a 194Q party-month short row (a month of
+   * credits has no single date, so it is left null rather than invented).
+   */
+  deductionDate?: string | null;
 }
 
 export interface TdsDeposit {
@@ -1533,14 +1542,14 @@ export function analyzeTds(
   // the floor is measured across all its short rows before any is emitted.
   const shortStage: {
     key: string; party: string; section: string; amount: number; detail: string;
-    row?: { date: string; voucherNumber: string; gross: number; tdsDone: number; tdsDeposited: number; depositDate: string | null; liability: number };
+    row?: { date: string; voucherNumber: string; gross: number; tdsDone: number; tdsDeposited: number; depositDate: string | null; liability: number; deductionDate?: string | null };
   }[] = [];
   const stageShort = (
     party: string,
     section: string,
     amount: number,
     detail: string,
-    row?: { date: string; voucherNumber: string; gross: number; tdsDone: number; tdsDeposited: number; depositDate: string | null; liability: number },
+    row?: { date: string; voucherNumber: string; gross: number; tdsDone: number; tdsDeposited: number; depositDate: string | null; liability: number; deductionDate?: string | null },
   ): void => {
     shortStage.push({ key: deducteeKeyOf(ctx, party), party, section, amount, detail, ...(row ? { row } : {}) });
   };
@@ -1973,6 +1982,8 @@ export function analyzeTds(
             tdsDeposited: 0,
             depositDate: dep?.date ?? ded?.subsequentDeposit ?? null,
             liability,
+            // The credit's own date, for the payable statement's interest (i).
+            deductionDate: ded?.date ?? null,
           },
         );
       }
@@ -2182,6 +2193,9 @@ export function analyzeTds(
             party: b.party, date: b.date, voucherNumber: b.voucherNumber,
             gross: b.gross, tdsDone: creditTax, tdsDeposited: 0, depositDate: null,
             section, reason: "not_deposited", liability, findingId: notDepositedId,
+            // The undedeposited credit's own date — the payable statement's
+            // "date of deduction" and the base of its s.201(1A) (ii) run.
+            deductionDate: ded.date,
           });
         }
       }
@@ -2474,6 +2488,7 @@ export function analyzeTds(
       })(),
       tdsDone: d.tax, tdsDeposited: 0, depositDate: null,
       section, reason: "not_deposited", liability: d.tax, findingId: timingId,
+      deductionDate: d.date,
     });
   }
   for (const [section, undep] of timingUndepositedTax) {
@@ -2501,6 +2516,7 @@ export function analyzeTds(
         depositDate: s.row.depositDate,
         section: s.section, reason: "short_deducted",
         liability: s.row.liability, findingId: shortId,
+        deductionDate: s.row.deductionDate ?? null,
       });
     }
   }

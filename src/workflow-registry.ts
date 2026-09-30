@@ -97,7 +97,7 @@ export interface WorkflowStep {
   /** Needs live Tally; planPass holds the step when Tally is unreachable. */
   live?: boolean;
   actions: WorkflowAction[];
-  custom?: "notds" | "gst_working_sheet";
+  custom?: "notds" | "gst_working_sheet" | "tds_payable";
 }
 
 export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
@@ -200,6 +200,21 @@ export const WORKFLOW_INPUTS: Record<InputKey, WorkflowInput> = {
     doc: "docs/operator/tds-operator-template.md",
     generator: {
       tool: "tb_write_notds_template",
+      args: (c, _paths, toFillDir) => ({ company: c.company, outDir: toFillDir }),
+      resultKey: "templatePath",
+      stepOnly: true,
+    },
+  },
+  payableDecisions: {
+    key: "payableDecisions",
+    label: "TDS payable decisions workbook",
+    extensions: [".xlsx"],
+    doc: "docs/operator/tds-payable-statement.md",
+    howToGet:
+      "The filled tds-payable-decisions-*.xlsx from this exact tb_tds_review run: every critical finding " +
+      "marked Accept or Reject. A workbook from another run is refused, and a blank decision is not a decision.",
+    generator: {
+      tool: "tb_write_tds_payable_decisions",
       args: (c, _paths, toFillDir) => ({ company: c.company, outDir: toFillDir }),
       resultKey: "templatePath",
       stepOnly: true,
@@ -619,6 +634,21 @@ export const WORKFLOW_STEPS: WorkflowStep[] = [
         args: (c) => ({ sourcePath: c.path("winmanLoans"), outPath: c.stepDir }),
       },
     ],
+  },
+  {
+    // Appended, never inserted: a step's position fixes every later step's
+    // `01-`/`02-` directory prefix, so an inserted step would make every
+    // older workflow folder on disk read the wrong folder.
+    id: "tds_payable",
+    title: "TDS payable statement (s.201(1A) shortfall and interest)",
+    clause: "201(1A)",
+    inputs: [
+      { key: "dayBook", need: "optional" },
+      { key: "payableDecisions", need: "optional" },
+    ],
+    after: ["tds", "notds"],
+    actions: [],
+    custom: "tds_payable",
   },
 ];
 

@@ -276,6 +276,7 @@ describe("clause 21(b) engine rows (2026-09-26 005)", () => {
         section: "194C",
         reason: "not_deposited",
         liability: 4000,
+        deductionDate: "20260220",
         findingId: "TDS-004-1",
       },
     ]);

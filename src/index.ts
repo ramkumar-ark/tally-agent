@@ -19,6 +19,12 @@ import { parseRateFromGroup } from "./depreciation.js";
 import { readXlsm } from "./xlsm.js";
 import { readListValues } from "./winman3cd.js";
 import { buildNotdsTemplate, notdsTemplateFileName } from "./notds-template.js";
+import {
+  buildPayableDecisions,
+  buildPayableStatement,
+  payableDecisionsFileName,
+  payableStatementFileName,
+} from "./tds-payable-template.js";
 import { parseOperatorFile, parseOperatorTemplate, parseWinmanExport } from "./tds-file.js";
 import { EMPTY_PF_ESI, parsePfEsiTemplate } from "./pf-esi-file.js";
 import { buildGst44Template, gst44TemplateFileName } from "./gst44-template.js";
@@ -1178,6 +1184,103 @@ let lastGst44: Gst44ReviewResult | undefined;
         await writeVaultDump(cfg.reportDir, sessionId, session.vault);
       }
       return JSON.stringify(written, null, 2);
+    },
+  );
+
+  register(
+    "tb_write_tds_payable_decisions",
+    "Generate the fillable TDS payable decisions workbook " +
+      "(tds-payable-decisions-<company>-<date>.xlsx) out of a cached tb_tds_review's CRITICAL findings, " +
+      "into the report directory, and return its PATH. One row per critical finding with the review's own " +
+      "wording; put Accept or Reject in the Decision column and a reason in Remarks, then pass the PATH " +
+      "back to tb_tds_payable_statement - never paste its rows into chat. The workbook is bound to this " +
+      "run: one generated from another review is refused. It carries no PAN. Requires tb_tds_review first.",
+    {
+      company: z.string().optional().describe("Company name; defaults to the cached review's company"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+      outPath: z.string().optional().describe("Optional full path to write to, overriding outDir and the file name"),
+    },
+    async (args) => {
+      // The decision population is the cached run's critical findings, not a
+      // live call: the workbook restates what the cached review saw, and its
+      // Run sheet binds it to that run.
+      const candidates = session.tdsPayableCandidates();
+      const identity = session.tdsPayableIdentity();
+      if (!candidates || !identity) {
+        throw new Error("run tb_tds_review first: it caches the critical findings the decisions workbook lists");
+      }
+      const company = args.company ?? identity.company;
+      const generatedOn = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const outPath =
+        args.outPath ?? join(args.outDir ?? cfg.reportDir, payableDecisionsFileName(company, generatedOn));
+      await writeFile(
+        outPath,
+        buildPayableDecisions({
+          company,
+          candidates,
+          identity: { ...identity, company },
+          generatedOn,
+        }),
+      );
+      await audit(
+        "tb_write_tds_payable_decisions",
+        { company, outDir: args.outDir ?? null, ...(args.outPath ? { outPath } : {}) },
+        candidates.length,
+        0,
+      );
+      return JSON.stringify({ templatePath: outPath, critical: candidates.length }, null, 2);
+    },
+  );
+
+  register(
+    "tb_tds_payable_statement",
+    "The TDS payable statement for a payment date: price the Accepted critical findings of the last " +
+      "tb_tds_review with the review's own s.201(1A) schedule (1% and 1.5% per month or part of a month, " +
+      "measured to the payment date) and write the workbook. Refuses while any critical finding is " +
+      "undecided, naming the open ones. Pass the PATH of the filled tds-payable-decisions-*.xlsx as " +
+      "decisionsPath and the payment date as YYYYMMDD. Names appear as pseudonyms and no PAN appears here; " +
+      "the workbook on disk carries the real names, PANs and the company/non-company split.",
+    {
+      decisionsPath: z.string().optional().describe("Path to the filled tds-payable-decisions-*.xlsx; read inside the gateway"),
+      paymentDate: z.string().describe("The date the challan is paid, as YYYYMMDD"),
+      company: z.string().optional().describe("Company name, used only in the file name; defaults to the review's company"),
+      outDir: z.string().optional().describe("Optional directory to write into; defaults to the report directory"),
+      outPath: z.string().optional().describe("Optional full path to write to, overriding outDir and the file name"),
+    },
+    async (args) => {
+      const result = await session.tdsPayableStatement({
+        decisionsPath: args.decisionsPath,
+        paymentDate: args.paymentDate,
+      });
+      const statement = session.tdsPayableRows();
+      if (!statement) throw new Error("the payable statement was not produced");
+      const company = args.company ?? result.company ?? "";
+      const outPath =
+        args.outPath ??
+        join(args.outDir ?? cfg.reportDir, payableStatementFileName(company, statement.paymentDate));
+      await writeFile(
+        outPath,
+        buildPayableStatement({
+          statement,
+          company,
+          generatedOn: new Date().toISOString().slice(0, 10).replace(/-/g, ""),
+        }),
+      );
+      await audit(
+        "tb_tds_payable_statement",
+        {
+          company,
+          paymentDate: statement.paymentDate,
+          outDir: args.outDir ?? null,
+          ...(args.outPath ? { outPath } : {}),
+          ...(args.decisionsPath ? { decisionsPath: args.decisionsPath } : {}),
+        },
+        statement.rows.length,
+        // Every row this tool returns is pseudonymized, so the masked count
+        // is the row count: a PAN never crosses the boundary at all.
+        statement.rows.length,
+      );
+      return JSON.stringify({ ...result, statementPath: outPath }, null, 2);
     },
   );
 

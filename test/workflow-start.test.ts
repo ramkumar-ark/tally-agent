@@ -56,7 +56,7 @@ describe("tb_audit_workflow_start", () => {
     expect(pfEsi.status).toBe("generated-unfilled");
     expect(existsSync(pfEsi.path)).toBe(true);
 
-    expect(parsed.steps).toHaveLength(10);
+    expect(parsed.steps).toHaveLength(11);
     expect(parsed.steps.every((s: any) => s.status === "pending")).toBe(true);
     expect(parsed.nextAction).toMatch(/tb_audit_workflow_run/);
   });

@@ -955,6 +955,100 @@ export function registerWorkflowTools(
       return state;
     }
 
+    if (step.custom === "tds_payable") {
+      const entry = m.inputs.payableDecisions;
+      const usable =
+        !!entry?.path && (await exists(entry.path)) && entry.status !== "generated-unfilled";
+      if (!usable) {
+        if (!entry?.path || !(await exists(entry.path))) {
+          const raw = await ctx.call("tb_write_tds_payable_decisions", {
+            company: m.params.company,
+            outDir: toFillDir,
+          });
+          const { templatePath } = JSON.parse(raw) as { templatePath: string };
+          const digest = sha256(await readFile(templatePath));
+          entry.path = templatePath;
+          entry.source = "generated";
+          entry.generatedDigest = digest;
+          entry.digest = digest;
+          entry.accepted = false;
+          entry.approved = false;
+          entry.status = inputStatus(WORKFLOW_INPUTS.payableDecisions, entry, digest);
+        }
+        state.outputs = [entry.path as string];
+        state.notes = [
+          "TDS payable decisions workbook generated into to-fill — mark every critical finding Accept or " +
+            "Reject, then call tb_audit_workflow_status (accept payableDecisions) and run again",
+        ];
+        markStop("needs-input");
+        await saveManifest(wfDir, m);
+        return state;
+      }
+      // The statement prices the cached run's critical findings, so the TDS
+      // review it reads has to be this process's (the decisions workbook is
+      // bound to that run's identity and would be refused otherwise).
+      const tdsFp = fingerprint(stepById("tds")!, m);
+      if (tdsCache.get(m.workflowId) !== tdsFp) {
+        await ctx.call("tb_tds_review", {
+          fromDate: m.params.fromDate,
+          toDate: m.params.toDate,
+          asOnDate: m.params.asOnDate,
+          company: m.params.company,
+          templatePath: m.inputs.tdsTemplate?.path,
+          winmanPath: m.inputs.winmanTdsSummary?.path,
+          dayBookPath: m.inputs.dayBook?.path,
+        });
+        tdsCache.set(m.workflowId, tdsFp);
+        state.notes = [...(state.notes ?? []), "re-ran tb_tds_review (no fresh cache this process)"];
+      } else {
+        state.notes = [...(state.notes ?? []), "reused this process's TDS review"];
+      }
+      // The payment date is the workflow's as-on date: the statement is priced
+      // to the day the audit is as at, and a later run re-prices it.
+      const toolArgs = {
+        decisionsPath: entry.path,
+        paymentDate: m.params.asOnDate,
+        outDir: stepDir,
+      };
+      let statement: unknown;
+      try {
+        await guardTargets(m, wfDir, toolArgs);
+        statement = JSON.parse(await ctx.call("tb_tds_payable_statement", toolArgs));
+      } catch (e) {
+        const msg = errMsg(e);
+        // An undecided critical finding is the operator's next action, not a
+        // failure: the workbook is on disk and waiting for a decision. Every
+        // other fault (a workbook from another run, a bad Decision cell) is a
+        // real failure of this step.
+        const undecided = /not decided yet/i.test(msg);
+        state.error = noteScrub(msg);
+        markStop(undecided ? "needs-input" : "failed");
+        await saveManifest(wfDir, m);
+        return state;
+      }
+      parsedResults.push({ tool: "tb_tds_payable_statement", parsed: statement });
+      const s = statement as {
+        critical?: number;
+        accepted?: number;
+        totals?: { shortfall?: string; interest?: string; payable?: string };
+        statementPath?: string;
+      };
+      state.findings = countFindings(statement);
+      state.notes = [
+        ...(state.notes ?? []),
+        `payable statement: ${s.accepted ?? 0} of ${s.critical ?? 0} critical findings accepted; ` +
+          `tax ${s.totals?.shortfall ?? "-"}, interest ${s.totals?.interest ?? "-"}, ` +
+          `payable ${s.totals?.payable ?? "-"} as on ${m.params.asOnDate}`,
+      ];
+      state.outputs = [
+        ...(s.statementPath ? [s.statementPath] : []),
+        ...(await listDir(stepDir)).map((f) => join(stepDir, f)),
+      ].sort();
+      markStop("done");
+      await saveManifest(wfDir, m);
+      return state;
+    }
+
     for (const action of step.actions) {
       const actx = mkCtx(parsedResults[parsedResults.length - 1]?.parsed);
       const verdict = action.when?.(actx) ?? true;

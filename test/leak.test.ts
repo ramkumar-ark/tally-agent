@@ -292,6 +292,7 @@ describe("no secret leaves the gateway", () => {
       "tb_notds_review",
       "tb_pf_esi_review",
       "tb_review",
+      "tb_tds_payable_statement",
       "tb_tds_review",
       "tb_write_26as_report",
       "tb_write_26as_template",
@@ -316,6 +317,7 @@ describe("no secret leaves the gateway", () => {
       "tb_write_pf_esi_report",
       "tb_write_pf_esi_template",
       "tb_write_report",
+      "tb_write_tds_payable_decisions",
       "tb_write_tds_report",
       "tb_write_tds_template",
     ]);

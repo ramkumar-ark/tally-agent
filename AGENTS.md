@@ -1641,6 +1641,45 @@ When updating this file, preserve this bar for all agents and keep entries conci
   cannot reproduce (correct figure, incomplete disclosure — captain withdrew a disclosure fix for it on
   2026-09-30 because two ledgers of one PAN are one deductee under 194Q).
 
+## Sharp edges found adding the TDS payable statement (2026-10-01)
+
+- Design of record `docs/design/2026-10-01-tds-payable-statement-design.md`;
+  operator walkthrough `docs/operator/tds-payable-statement.md`. Code
+  `src/tds-payable.ts` (pure projection + pricing), `src/tds-payable-template.ts`
+  (both workbooks + the run digest), `src/tds-payable-file.ts` (strict parse),
+  the session methods in `src/review.ts`, the two tools in `src/index.ts`, and
+  the appended `payable` workflow step.
+- **The payable lane reads the TDS session's PRIVATE facts, never a report
+  JSON.** `tdsPayableCandidates()` needs the cached books (clause 21(b) rows
+  with their `deductionDate`, PANs/GSTINs), which a saved review result does
+  not carry; a run that reloads a v-N JSON must re-run `tb_tds_review` (or feed
+  `dayBookPath`). `deductionDate` was added to `Clause21bBookRow` and the staged
+  short row as an OPTIONAL field and set at the push sites only — nothing in the
+  review's own computation may read it, or a payable re-run would move the
+  findings.
+- **A decisions workbook is bound to its run by a digest of the sorted CRITICAL
+  ids, not by row position** — ids are assigned per run, so a workbook from
+  another run (even the same company) is refused. The digest is compared and
+  never printed (six hex digits trip `scrubDigits`). Bind any operator
+  instruction by (finding id, check, party, date) as the as26 lanes do.
+- **s.201(1A) leg (ii) runs from the DEDUCTION date to the payment date**; the
+  Rule 30 due date (`depositDue`) only decides whether the leg is charged
+  (`tds.ts` pushes and `tds3cd.ts:287` measure it the same way). A leg measured
+  from the due date forgives every month the tax was held before it fell due.
+  Leg (i) is 1% from the booking to the payment date for a shortfall that was
+  never deducted (deemed deducted when the challan is paid), so its leg (ii) is
+  zero by construction. `interestOn`/`calendarMonths`/`depositDue` are reused
+  from `src/tds-law.ts` — never a second interest formula here.
+- **A blank or deleted Decision is `undecided`, never "not a finding"**: the
+  statement refuses while any critical row is open, naming it. The rate is read
+  from `panOf(party)` (already GSTIN-derivable) and a party with no PAN at all
+  takes the s.206AA `S206AA_RATE` floor as its rate with the label
+  `Not determinable (no PAN)`; PANs appear ONLY inside the statement workbook —
+  the decisions workbook and every outbound string are PAN-free.
+- The workflow step is APPENDED after `loans` (`test/workflow-registry.test.ts`
+  pins the order); the tool surface is now 46 tools, pinned by
+  `test/server-tools.test.ts` and `test/leak.test.ts` — a new tool fails both.
+
 ## Winman 3CD depreciation (clause 18 additions/deletions, 2026-09-27)
 
 - Design of record: `docs/design/2026-09-27-winman-3cd-depreciation-design.md`; engine `src/dep3cd.ts`
