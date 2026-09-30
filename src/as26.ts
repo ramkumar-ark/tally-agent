@@ -108,7 +108,7 @@ export function vouchersFromLedgerRows(rows: LedgerVoucherRow[]): AttachedVouche
   return { vouchers: order.map((k) => byKey.get(k)!), unattached };
 }
 
-export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "none";
+export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "manual" | "none";
 
 export interface BooksDeduction { ledgerKey: string; kind: As26Kind; date: string; tax: number; voucherType: string; voucherNumber: string | null; reference: string | null; }
 export interface BooksSale { ledgerKey: string; date: string; ref: string | null; taxable: number; gross: number; }
@@ -334,7 +334,56 @@ export interface As26MapEntry { ledger: string; as26Name: string; }
  *  "receivable" in the name, which the heuristic cannot see), while a kind it
  *  declares nothing for keeps the heuristic. */
 export interface CreditLedgerMapping { ledger: string; kind: As26Kind; }
-export interface As26Map { mappings: As26MapEntry[]; banks?: BankInterestMapping[]; creditLedgers?: CreditLedgerMapping[]; }
+
+/** Worksheet names of the two operator-instruction sheets (declared here so
+ *  every refusal cites the sheet the operator is looking at). */
+export const MANUAL_MATCH_SHEET = "Manual Matches";
+export const MANUAL_LINK_SHEET = "Invoice Links";
+
+/** One row of the operator template's "Manual Matches" sheet: a single entry
+ *  the operator pairs by hand. `row` is the worksheet row, cited in every
+ *  refusal (values are never echoed). */
+export interface ManualMatchEntry { date: string; tax: number; row: number; }
+
+/** One operator-declared match between entries the automatic stages left
+ * unmatched, 1:1 or 1:N / N:1 (both sides must balance within
+ * AS26_TAX_TOLERANCE). `row` is the first worksheet row of the group.
+ * Declared on the mapping template's "Manual Matches" sheet. */
+export interface ManualMatchInstruction {
+  kind: As26Kind; as26NameKey: string; as26Name: string;
+  books: ManualMatchEntry[]; as26: ManualMatchEntry[];
+  /** The operator's own group label (blank = a group of one), carried through
+   * so a regenerated template round-trips the grouping the operator typed. */
+  group: string;
+  row: number;
+}
+
+/** One operator-declared link of a party entry to a specific sales invoice,
+ * identified by its voucher number (the report's "linked invoice ref").
+ * Declared on the mapping template's "Invoice Links" sheet. */
+export interface ManualLinkInstruction {
+  kind: As26Kind; as26NameKey: string; as26Name: string;
+  side: "books" | "as26"; date: string; tax: number;
+  invoiceRef: string; row: number;
+}
+
+/** A resolved manual link, carried on PartyRecon so the bill-level builder can
+ * use it without seeing the operator's sheet (plain shape: the session masks
+ * its date and ref on the way out). */
+export interface ManualLinkResolved {
+  side: "books" | "as26"; date: string; tax: number;
+  linked: { date: string; ref: string | null; taxable: number };
+}
+
+export interface As26Map {
+  mappings: As26MapEntry[];
+  banks?: BankInterestMapping[];
+  creditLedgers?: CreditLedgerMapping[];
+  /** Operator's manual decisions; both are empty for a template or JSON map
+   * that carries neither sheet. */
+  manualMatches?: ManualMatchInstruction[];
+  manualLinks?: ManualLinkInstruction[];
+}
 export const EMPTY_AS26_MAP: As26Map = { mappings: [] };
 
 /**
@@ -828,6 +877,10 @@ export interface PartyRecon {
    * (captain 2026-09-30). Absent on a hand-built row, where `reconPartyId`
    * falls back to the recon's own position. */
   partyBase?: number;
+  /** The party's resolved operator links ("Invoice Links" sheet), each the
+   * exact invoice an entry is pinned to. Absent when the operator declared
+   * none. Consumed by the bill-level builder, which reports basis "manual". */
+  manualLinks?: ManualLinkResolved[];
 }
 
 /** Index-combination subsets of `items` with size 2..maxSize, in index order. */
@@ -1060,9 +1113,154 @@ export function linkInvoiceWithCapacity(
 }
 
 
+/**
+ * The operator's instructions that apply to one party. A shared-ledger group
+ * matches on every member name it reconciles, but takes no instruction: such a
+ * party is totals-only by construction and has no entries to name (assertManual
+ * refuses it there, with the reason).
+ */
+export function selectManual(map: As26Map, match: PartyMatch): { matches: ManualMatchInstruction[]; links: ManualLinkInstruction[] } {
+  const keys = new Set<string>([match.as26NameKey, ...(match.members ?? []).map((m) => m.as26NameKey)]);
+  const pick = <T extends { kind: As26Kind; as26NameKey: string }>(xs: T[] | undefined): T[] =>
+    (xs ?? []).filter((x) => x.kind === match.kind && keys.has(x.as26NameKey));
+  return { matches: pick(map.manualMatches), links: pick(map.manualLinks) };
+}
+
+/**
+ * Refuse an instruction the review cannot apply — the honest-fail gate before
+ * any party is reconciled, so a decision the operator believes is in force is
+ * never silently dropped: an unknown 26AS name, or a shared-ledger party (which
+ * reconciles on totals and has no entries to name or match).
+ */
+export function assertManualParties(map: As26Map, matches: PartyMatch[]): void {
+  const byKey = new Map<string, PartyMatch>();
+  for (const m of matches) {
+    byKey.set(`${m.kind}|${m.as26NameKey}`, m);
+    for (const mm of m.members ?? []) byKey.set(`${mm.kind}|${mm.as26NameKey}`, m);
+  }
+  for (const [sheet, ins] of [
+    [MANUAL_MATCH_SHEET, map.manualMatches ?? []],
+    [MANUAL_LINK_SHEET, map.manualLinks ?? []],
+  ] as Array<[string, Array<{ kind: As26Kind; as26NameKey: string; row: number }>]>) {
+    for (const i of ins) {
+      const m = byKey.get(`${i.kind}|${i.as26NameKey}`);
+      if (!m) {
+        throw new Error(`as26-map template row ${i.row} on the ${sheet} sheet: its 26AS name is not a party of this review — it is unmapped, not on the 26AS for this period, or the kind is wrong.`);
+      }
+      if (m.shared) {
+        throw new Error(`as26-map template row ${i.row} on the ${sheet} sheet: its 26AS name shares a Tally ledger with another name and reconciles on totals only, so it has no single entries to name.`);
+      }
+    }
+  }
+}
+
+/** Sheet/row-cited refusal for one instruction row. Never echoes a cell value. */
+const manualRefusal = (sheet: string, row: number, why: string): Error =>
+  new Error(`as26-map template row ${row} on the ${sheet} sheet: ${why}`);
+
+const sideLabel = (side: "books" | "as26"): string => (side === "books" ? "books" : "26AS");
+const countLabel = (n: number, none: string, many: string): string =>
+  n === 0 ? none : n === 1 ? "1" : `${n} ${many}`;
+
+/**
+ * The operator's manual matches, resolved against the entries automatic
+ * matching left unmatched, in sheet order. Every group is 1:1, 1:N or N:1 —
+ * one side carries a single entry, the other one or more — and both sides must
+ * balance within AS26_TAX_TOLERANCE; a group that cannot be pinned down that
+ * exactly is REFUSED, never applied to whatever happens to be nearest, because
+ * row ids shift between runs while date+tax are the facts that do not.
+ * Returns the combinations (basis "manual", so the report shows where the
+ * entries went) and the index sets consumed on each side.
+ */
+export function resolveManualMatches(
+  ins: ManualMatchInstruction[],
+  pools: { books: ReconItem[]; as26: ReconItem[] },
+): { combinations: PartyRecon["combinations"]; takenBooks: Set<number>; takenAs26: Set<number> } {
+  const combinations: PartyRecon["combinations"] = [];
+  const taken: { books: Set<number>; as26: Set<number> } = { books: new Set(), as26: new Set() };
+  for (const g of ins) {
+    if (g.books.length === 0 || g.as26.length === 0) {
+      throw manualRefusal(MANUAL_MATCH_SHEET, g.row,
+        "its group needs at least one row on each side (books and 26AS) — every row of a group carries the same 26AS name, kind and group label.");
+    }
+    if (g.books.length > 1 && g.as26.length > 1) {
+      throw manualRefusal(MANUAL_MATCH_SHEET, g.row,
+        "its group has more than one row on both sides; a manual match is 1:1, 1:N or N:1 — give one side a single row, and use a different group label for the next match.");
+    }
+    const pick = (side: "books" | "as26"): ReconItem[] => {
+      const pool = pools[side];
+      const entries = side === "books" ? g.books : g.as26;
+      return entries.map((e) => {
+        const hits: number[] = [];
+        pool.forEach((item, i) => {
+          if (taken[side].has(i)) return;
+          if (item.date === e.date && Math.abs(round2(item.tax - e.tax)) <= AS26_TAX_TOLERANCE) hits.push(i);
+        });
+        if (hits.length !== 1) {
+          throw manualRefusal(MANUAL_MATCH_SHEET, e.row,
+            `its ${sideLabel(side)} entry matches ${countLabel(hits.length, "no unmatched entry", "unmatched entries")} of that party — a manual match must name exactly one entry (check its date and tax; an entry the review already paired automatically is not available).`);
+        }
+        taken[side].add(hits[0]);
+        return pool[hits[0]];
+      });
+    };
+    const books = pick("books");
+    const as26 = pick("as26");
+    const drift = round2(sumTax(books) - sumTax(as26));
+    if (Math.abs(drift) > AS26_TAX_TOLERANCE) {
+      throw manualRefusal(MANUAL_MATCH_SHEET, g.row,
+        `its group does not balance: the ${sideLabel("books")} rows and the 26AS rows differ by ${drift.toFixed(2)}, more than the ${AS26_TAX_TOLERANCE.toFixed(2)} tolerance.`);
+    }
+    combinations.push(books.length === 1
+      ? { target: books[0], parts: as26, side: "books", basis: "manual" }
+      : { target: as26[0], parts: books, side: "as26", basis: "manual" });
+  }
+  return { combinations, takenBooks: taken.books, takenAs26: taken.as26 };
+}
+
+/**
+ * The operator's invoice links, each pinned to the ONE entry and the ONE sales
+ * invoice it names (ref compared case-insensitively, as every other ref in the
+ * engine). Entries resolve against the party's whole books — a link may name an
+ * entry the review paired automatically, since a paired entry still gets a
+ * bill-value comparison — and against its sales ledger pool, never across
+ * parties. Anything else is refused: an entry or an invoice number that no
+ * longer identifies exactly one thing, or two links for the same entry.
+ */
+export function resolveManualLinks(
+  ins: ManualLinkInstruction[],
+  booksItems: ReconItem[], as26Items: ReconItem[], sales: BooksSale[],
+): ManualLinkResolved[] {
+  const out: ManualLinkResolved[] = [];
+  for (const i of ins) {
+    const pool = i.side === "books" ? booksItems : as26Items;
+    const hits = pool.filter((it) => it.date === i.date && Math.abs(round2(it.tax - i.tax)) <= AS26_TAX_TOLERANCE);
+    if (hits.length !== 1) {
+      throw manualRefusal(MANUAL_LINK_SHEET, i.row,
+        `its ${sideLabel(i.side)} entry matches ${countLabel(hits.length, "no entry", "entries")} of that party — a link must name exactly one entry (check its date and tax).`);
+    }
+    if (out.some((o) => o.side === i.side && o.date === i.date && Math.abs(round2(o.tax - i.tax)) <= AS26_TAX_TOLERANCE)) {
+      throw manualRefusal(MANUAL_LINK_SHEET, i.row,
+        `another link on the sheet already names the same ${sideLabel(i.side)} entry — one invoice per entry.`);
+    }
+    const key = normRef(i.invoiceRef);
+    const invoices = sales.filter((s) => normRef(s.ref) === key);
+    if (invoices.length !== 1) {
+      throw manualRefusal(MANUAL_LINK_SHEET, i.row,
+        `its invoice number matches ${countLabel(invoices.length, "no sales invoice", "sales invoices")} on that party's ledgers — a link must name exactly one invoice (use the voucher number shown as the linked invoice reference).`);
+    }
+    out.push({
+      side: i.side, date: i.date, tax: i.tax,
+      linked: { date: invoices[0].date, ref: invoices[0].ref, taxable: invoices[0].taxable },
+    });
+  }
+  return out;
+}
+
 export function reconcileParty(
   file: As26File, facts: BooksFacts, match: PartyMatch, toDate: string,
   opts: { skipBooks?: ReadonlySet<number> } = {},
+  manual?: { matches?: ManualMatchInstruction[]; links?: ManualLinkInstruction[] },
 ): PartyRecon {
   const keySet = new Set(match.ledgerKeys);
   // Shared-ledger group, called directly: two or more 26AS names stand on one
@@ -1140,6 +1338,21 @@ export function reconcileParty(
 
   const combinations: PartyRecon["combinations"] = [];
   let ambiguous = 0;
+
+  // Operator's manual decisions (design §14). They run here — after the exact
+  // 1:1 stages, before every group/combination stage — so a declared match
+  // beats the automatic searches, is never consumed twice (nor by them), and
+  // can never fight an automatic pair the operator never saw: the entries it
+  // may name are precisely the ones left on the two unmatched sheets.
+  const manualLinks = resolveManualLinks(
+    manual?.links ?? [],
+    booksItems, as26Items,
+    facts.sales.filter((s) => keySet.has(s.ledgerKey) && String(s.ref ?? "").trim() !== ""),
+  );
+  const applied = resolveManualMatches(manual?.matches ?? [], { books: unmatchedBooks, as26: unmatchedAs26 });
+  unmatchedBooks = unmatchedBooks.filter((_, i) => !applied.takenBooks.has(i));
+  unmatchedAs26 = unmatchedAs26.filter((_, i) => !applied.takenAs26.has(i));
+  combinations.push(...applied.combinations);
 
   // Invoice-anchored group matching (addendum 5, reworked addendum 6): one
   // 26AS row is the TDS of one invoice — or of a small set of invoices the
@@ -1531,6 +1744,7 @@ export function reconcileParty(
   return {
     match, booksTax, as26Tax, paired, combinations, ambiguous,
     unmatchedBooks, unmatchedAs26, combinationSearchSkipped: searchSkipped, lateBookedTax,
+    ...(manualLinks.length > 0 ? { manualLinks } : {}),
   };
 }
 
@@ -1744,10 +1958,13 @@ export function analyzeAs26(
   // per-deductor figures are carried into the Winman and tax-audit workbooks.
   // A plain party is a single row over its own recon.
   const partyRows: As26PartyRow[] = [];
+  // Every instruction is checked before any party is reconciled, so one bad
+  // name fails the whole run rather than one party's row.
+  assertManualParties(map, matches);
   for (const match of matches) {
     if (match.shared) { partyRows.push(...sharedPartyRows(file, facts, match, opts.toDate, salesByKey)); continue; }
     partyRows.push({
-      match, recon: reconcileParty(file, facts, match, opts.toDate),
+      match, recon: reconcileParty(file, facts, match, opts.toDate, {}, selectManual(map, match)),
       sales: match.ledgerKeys.flatMap((k) => salesByKey.get(k) ?? []),
       includeOtherIncome: true, valueColumns: true,
     });

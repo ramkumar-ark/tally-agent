@@ -308,6 +308,43 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   cells positionally against `columns` — a row cell past the column list is
   silently dropped (the winman fixture caught this).
 
+## Sharp edges found adding manual 26AS matches and links (2026-09-30)
+
+- Design of record is design doc §14 (operator channel; captain's ruling that
+  AUTOMATIC matching stays exactly as it is). Code `src/as26.ts`
+  (`selectManual`, `assertManualParties`, `resolveManualMatches`,
+  `resolveManualLinks`, `MANUAL_MATCH_SHEET`/`MANUAL_LINK_SHEET`), the two
+  sheets in `src/as26-template.ts`, the `manualLinks` override in
+  `src/as26-bill.ts`, and the `recon[].manualLinks` rebuild in `src/review.ts`
+  (`as26Review`'s masking block — a new recon field carrying real dates/refs
+  MUST be rebuilt there or `sweepStrings`/`scrubDigits` eats or leaks it).
+- **Manual matches run inside `reconcileParty`, after the 1:1 and
+  `pairEqualLeftovers` stages and before the invoice-anchored/subset search.**
+  That is the only placement where a declared match beats the automatic stages
+  and cannot be consumed twice by them; the pool it resolves against is
+  therefore exactly what the two unmatched sheets show. Manual LINKS resolve
+  against the party's whole books/sales pools instead, because a paired entry
+  still gets a bill-value comparison.
+- A manual match is a `recon[].combinations` entry with `basis: "manual"`, so
+  everything downstream (B/D id reservation, `explained` rows, the Combination
+  sheet, finding pointers) works unchanged — do not add a parallel mechanism.
+  `LinkBasis` gained `"manual"` in BOTH `src/as26.ts` and its `src/as26-bill.ts`
+  twin; a new consumer must handle it in both.
+- **Instructions are bound to `(side, date, tax)`, never to a row id** — ids are
+  assigned per run from sorted rows and move. Dates are parsed by
+  `parseOperatorDate` (report format / `YYYYMMDD` / ISO / Excel serial);
+  `GridCell.isDate` is what distinguishes a serial from a number.
+- **Refusals throw, never silently drop**, and cite sheet + row + column letter +
+  header — never a cell value. `assertManualParties` runs once before any party
+  is reconciled so an instruction naming an unknown or shared-ledger party fails
+  the whole run rather than one party. A shared-ledger party is totals-only by
+  construction and therefore refuses instructions.
+- The identity `Σ unmatched books − Σ unmatched 26AS = booksTax − as26Tax`
+  (within `AS26_TAX_TOLERANCE`) holds with and without instructions, and
+  per-party `booksTax`/`as26Tax`/totals never move: only `ambiguous` and
+  `combinationExplained` shift, and only towards "explained". Guarded in
+  `test/as26-manual.test.ts`.
+
 ## Sharp edges found adding the offline day-book input (2026-09-22)
 
 - The gateway's `StdioClientTransport` cannot receive a whole-FY day book —

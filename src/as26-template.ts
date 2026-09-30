@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { buildWorkbook, type Sheet } from "./xlsx.js";
 import { readWorkbook, type GridRow, type GridSheet } from "./xlsx-read.js";
 import { canonicalKey } from "./key.js";
-import { loadAs26Map, round2, EMPTY_AS26_MAP, type As26Map, type As26MapEntry, type BankInterestMapping, type CreditLedgerMapping } from "./as26.js";
+import { loadAs26Map, round2, EMPTY_AS26_MAP, MANUAL_MATCH_SHEET, MANUAL_LINK_SHEET, type As26Map, type As26MapEntry, type BankInterestMapping, type CreditLedgerMapping, type ManualMatchInstruction, type ManualLinkInstruction } from "./as26.js";
 import type { As26File, As26Kind } from "./as26-file.js";
 
 /**
@@ -106,9 +106,21 @@ const instructions = (company: string | undefined, hasLedgers: boolean): Sheet =
     [
       "TDS/TCS credit ledgers: the asset ledgers a customer DEBITS when it deducts tax from your invoices. Left the sheet empty, the review looks for a 'TDS Receivable'-style name under an asset group — which misses a ledger named e.g. 'TDS (FY:25-26) A/c' under Loans & Advances. If your books name it differently, write it on the 'Credit Ledgers' sheet with its kind (tds or tcs) and the review uses exactly those ledgers for that kind, ignoring its name rule; a kind you leave off the sheet keeps the name rule, so declaring only the TDS ledger still finds a 'TCS A/c' by rule. A name that is not a ledger in the books is refused.",
     ],
+    [
+      "Manual matches: when the report leaves a TDS entry on 'Books not in 26AS' and an entry on '26AS unmatched' that you know are the same money, match them yourself on the 'Manual Matches' sheet. Give each instruction its own group label (any text you like, e.g. 'March rent'), list the books rows with side 'books' and the 26AS rows with side '26as', and identify each row by its date and tax exactly as the report prints them. One books row may stand against several 26AS rows (1:N) and the other way round (N:1); both sides must add up to the same amount, or the instruction is refused. A date+tax pair that does not identify exactly one row for that party is also refused — row numbers move between runs, so the date and tax are what the instruction is bound to.",
+    ],
+    [
+      "A manual match is applied BEFORE the automatic rules, so the rows it names can never be consumed twice, and the matched pair leaves the two unmatched sheets and is listed on 'Combination matches' with link basis 'manual'. The party's totals and its Deductors sheet figures do not change — only which entries are explained.",
+    ],
+    [
+      "Manual invoice links: to tie a books TDS entry (or a 26AS entry) to a sales invoice the tool could not find, use the 'Invoice Links' sheet. One row per instruction: the 26AS name, its kind, the side ('books' or '26as'), the entry's date and tax, and the invoice number (the sales voucher's number, as the report prints it). The entry must identify exactly one row for that party, and the invoice number must exist among that party's sales, or the instruction is refused. The linked-invoice columns then fill with link basis 'manual', and the bill-value comparison runs on that row.",
+    ],
     ["Worked example (invented names only):"],
     ["Mapping | Sample Builders LLP | tds | 12,000.00 | Sample Builders"],
     ["Credit Ledgers | TDS Receivable A/c | tds"],
+    ["Manual Matches | Sample Builders LLP | tds | Mar-rent | books | 16-Mar-2026 | 12,000.00"],
+    ["Manual Matches | Sample Builders LLP | tds | Mar-rent | 26as | 16-Mar-2026 | 12,000.00"],
+    ["Invoice Links | Sample Builders LLP | tds | books | 20-Mar-2026 | 4,000.00 | NC/17"],
   ],
 });
 
@@ -167,6 +179,47 @@ function creditLedgerSheet(ledgers: string[], declared: CreditLedgerMapping[]): 
   };
 }
 
+/** The operator's manual matches (design §14): one row per entry they want
+ * paired by hand. Rows sharing a 26AS name, kind and group label are ONE
+ * instruction; one side carries a single row (1:1, 1:N or N:1). Written even
+ * when empty (the operator fills it after reading the report's two unmatched
+ * sheets) and pre-filled from the map in force, so re-fill round-trips. */
+function manualMatchSheet(declared: ManualMatchInstruction[]): Sheet {
+  return {
+    name: MANUAL_MATCH_SHEET,
+    columns: [
+      { header: "26AS name", width: 34, format: "text" },
+      { header: "kind", width: 6, format: "text", validation: { list: ["tds", "tcs"] } },
+      { header: "group", width: 16, format: "text" },
+      { header: "side", width: 8, format: "text", validation: { list: MANUAL_SIDES } },
+      { header: "date", width: 12, format: "text" },
+      { header: "tax", width: 14, format: "money" },
+    ],
+    rows: declared.flatMap((m) => [
+      ...m.books.map((e): Array<string | number> => [m.as26Name, m.kind, m.group, "books", e.date, e.tax]),
+      ...m.as26.map((e): Array<string | number> => [m.as26Name, m.kind, m.group, "26as", e.date, e.tax]),
+    ]),
+  };
+}
+
+/** The operator's invoice links (design §14): one entry, one invoice voucher
+ * number. Pre-filled from the map in force. */
+function manualLinkSheet(declared: ManualLinkInstruction[]): Sheet {
+  return {
+    name: MANUAL_LINK_SHEET,
+    columns: [
+      { header: "26AS name", width: 34, format: "text" },
+      { header: "kind", width: 6, format: "text", validation: { list: ["tds", "tcs"] } },
+      { header: "side", width: 8, format: "text", validation: { list: MANUAL_SIDES } },
+      { header: "date", width: 12, format: "text" },
+      { header: "tax", width: 14, format: "money" },
+      { header: "invoice number", width: 24, format: "text" },
+    ],
+    rows: declared.map((l): Array<string | number> =>
+      [l.as26Name, l.kind, l.side, l.date, l.tax, l.invoiceRef]),
+  };
+}
+
 export function buildAs26MapTemplate(opts: {
   company?: string;
   deductors: As26TemplateDeductor[];
@@ -212,6 +265,8 @@ export function buildAs26MapTemplate(opts: {
     mapping,
     bankInterestSheet(ledgers),
     creditLedgerSheet(ledgers, opts.map.creditLedgers ?? []),
+    manualMatchSheet(opts.map.manualMatches ?? []),
+    manualLinkSheet(opts.map.manualLinks ?? []),
     ledgerReferenceSheet(ledgers),
   ]);
 }
@@ -286,7 +341,12 @@ export function parseAs26MapTemplate(buf: Buffer): As26Map {
     mappings.push({ ledger, as26Name });
   }
   const banks = parseBankInterestSheet(sheets);
-  return { mappings, banks, creditLedgers: parseCreditLedgerSheet(sheets) };
+  return {
+    mappings, banks,
+    creditLedgers: parseCreditLedgerSheet(sheets),
+    manualMatches: parseManualMatchSheet(sheets),
+    manualLinks: parseManualLinkSheet(sheets),
+  };
 }
 
 const BANK_TOKENS = {
@@ -430,6 +490,230 @@ function parseCreditLedgerSheet(sheets: GridSheet[]): CreditLedgerMapping[] {
     }
     seenLedger.add(lkey);
     out.push({ ledger, kind });
+  }
+  return out;
+}
+
+/** Header index of an instruction sheet: normalized header text -> column. */
+const headerIndex = (sheet: GridSheet): Map<string, number> => {
+  const byHeader = new Map<string, number>();
+  for (const [idx, c] of sheet.rows[0]?.cells ?? []) {
+    if (typeof c.value !== "string") continue;
+    const k = normHeader(c.value);
+    if (!byHeader.has(k)) byHeader.set(k, idx);
+  }
+  return byHeader;
+};
+
+/** "books" | "26as" -> the engine's side label. */
+const MANUAL_SIDES = ["books", "26as"];
+const manualSideOf = (text: string): "books" | "as26" | null => {
+  const k = normHeader(text);
+  return k === "books" ? "books" : k === "26as" || k === "26a" ? "as26" : null;
+};
+const kindOf = (text: string): As26Kind | null => {
+  const k = normHeader(text);
+  return k === "tds" ? "tds" : k === "tcs" ? "tcs" : null;
+};
+
+/** An Excel date serial (45000) -> YYYYMMDD; 1900 date system. */
+const serialToYyyymmdd = (serial: number): string => {
+  const ms = Date.UTC(1899, 11, 30) + Math.round(serial) * 86400000;
+  const d = new Date(ms);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+};
+
+const MONTH_NO: Record<string, string> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+};
+
+/**
+ * An operator-typed date -> YYYYMMDD. The report's own date format is what the
+ * operator reads ("16-Jan-2026"), so that, a bare 20260116, and the common
+ * slash/dash forms are all accepted; an Excel date cell arrives as a serial.
+ * Anything else refuses, citing the row and column only.
+ */
+function parseOperatorDate(value: string | number, isDate: boolean, cite: string): string {
+  if (typeof value === "number") return isDate ? serialToYyyymmdd(value) : String(value);
+  const text = String(value).trim();
+  if (/^\d{8}$/.test(text)) return text;
+  const iso = text.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (iso) return `${iso[1]}${String(iso[2]).padStart(2, "0")}${String(iso[3]).padStart(2, "0")}`;
+  const dmy = text.match(/^(\d{1,2})[-/. ]+([A-Za-z]{3})[-/. ]+(\d{4})$/);
+  if (dmy) {
+    const mm = MONTH_NO[dmy[2].toLowerCase()];
+    if (mm) return `${dmy[3]}${mm}${String(dmy[1]).padStart(2, "0")}`;
+  }
+  const numeric = text.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (numeric) return `${numeric[3]}${String(numeric[2]).padStart(2, "0")}${String(numeric[1]).padStart(2, "0")}`;
+  throw new Error(`${cite}: the date could not be read — use 20260116 or 16-Jan-2026`);
+}
+
+/** Shared cell readers for the two instruction sheets. `text` refuses a
+ * numeric cell the way the other sheets do; `number` refuses anything that is
+ * not a number. Neither ever puts a cell value into an error. */
+const instructionCellReaders = (sheetName: string) => {
+  const cite = (r: GridRow, col: number, headerName: string): string =>
+    `as26-map template row ${r.row}, column ${colLetter(col)} (${headerName}) on the ${sheetName} sheet`;
+  return {
+    raw: (r: GridRow, col: number, headerName: string): { value: string | number; isDate: boolean } | undefined => {
+      const c = r.cells.get(col);
+      if (!c || c.value === null || String(c.value).trim() === "") return undefined;
+      return { value: c.value, isDate: c.isDate };
+    },
+    text: (r: GridRow, col: number | undefined, headerName: string): string | undefined => {
+      if (col === undefined) return undefined;
+      const c = instructionCellReaders(sheetName).raw(r, col, headerName);
+      if (!c) return undefined;
+      if (typeof c.value !== "string") {
+        throw new Error(`${cite(r, col, headerName)}: cell is numeric — retype it as text`);
+      }
+      return c.value.trim();
+    },
+    number: (r: GridRow, col: number | undefined, headerName: string): number | undefined => {
+      if (col === undefined) return undefined;
+      const c = instructionCellReaders(sheetName).raw(r, col, headerName);
+      if (!c) return undefined;
+      const n = typeof c.value === "number" ? c.value : Number(String(c.value).replace(/,/g, "").trim());
+      if (!Number.isFinite(n)) {
+        throw new Error(`${cite(r, col, headerName)}: cell is not a number`);
+      }
+      return n;
+    },
+    date: (r: GridRow, col: number | undefined): string | undefined => {
+      if (col === undefined) return undefined;
+      const c = instructionCellReaders(sheetName).raw(r, col, "date");
+      if (!c) return undefined;
+      return parseOperatorDate(c.value, c.isDate, cite(r, col, "date"));
+    },
+  };
+};
+
+/**
+ * The optional Manual Matches sheet (design §14). Rows are grouped by 26AS name
+ * + kind + the group label the operator typed (blank label = a group of one);
+ * a group is one instruction, 1:1 or 1:N / N:1, and BOTH sides must be
+ * present. Every refusal cites sheet, row, column letter + header — never a
+ * cell value, since a stray cell can be anything.
+ */
+function parseManualMatchSheet(sheets: GridSheet[]): ManualMatchInstruction[] {
+  const sheet = sheets.find((s) => normHeader(s.name) === "manualmatches");
+  if (!sheet) return [];
+  const byHeader = headerIndex(sheet);
+  for (const [token, human] of [["26asname", "26AS name"], ["side", "side"], ["date", "date"], ["tax", "tax"]] as Array<[string, string]>) {
+    if (!byHeader.has(token)) {
+      throw new Error(
+        `as26-map template: the '${MANUAL_MATCH_SHEET}' sheet needs a "${human}" header column` +
+          ` — found headers: ${[...byHeader.keys()].join(", ") || "none"}`,
+      );
+    }
+  }
+  const nameCol = byHeader.get("26asname");
+  const kindCol = byHeader.get("kind");
+  const groupCol = byHeader.get("group");
+  const sideCol = byHeader.get("side");
+  const dateCol = byHeader.get("date");
+  const taxCol = byHeader.get("tax");
+  const cell = instructionCellReaders(MANUAL_MATCH_SHEET);
+  const groups = new Map<string, ManualMatchInstruction>();
+  for (const r of sheet.rows.slice(1)) {
+    const name = cell.text(r, nameCol, "26AS name");
+    const sideText = cell.text(r, sideCol, "side");
+    const date = cell.date(r, dateCol);
+    const tax = cell.number(r, taxCol, "tax");
+    if (!name && !sideText && date === undefined && tax === undefined) continue;
+    if (!name) {
+      throw new Error(`as26-map template row ${r.row} on the ${MANUAL_MATCH_SHEET} sheet: "26AS name" is blank on a filled row`);
+    }
+    const side = sideText === undefined ? null : manualSideOf(sideText);
+    if (!side) {
+      throw new Error(
+        `as26-map template row ${r.row}, column ${colLetter(sideCol ?? 0)} (side) on the ${MANUAL_MATCH_SHEET} sheet: expected books or 26as`,
+      );
+    }
+    if (date === undefined || tax === undefined) {
+      throw new Error(
+        `as26-map template row ${r.row} on the ${MANUAL_MATCH_SHEET} sheet: every row needs a date and a tax (column ${colLetter(dateCol ?? 0)} and ${colLetter(taxCol ?? 0)})`,
+      );
+    }
+    const kindText = cell.text(r, kindCol, "kind");
+    const kind = kindText === undefined ? "tds" : kindOf(kindText);
+    if (!kind) {
+      throw new Error(
+        `as26-map template row ${r.row}, column ${colLetter(kindCol ?? 0)} (kind) on the ${MANUAL_MATCH_SHEET} sheet: expected tds or tcs`,
+      );
+    }
+    const group = cell.text(r, groupCol, "group") ?? "";
+    const gkey = `${kind}|${canonicalKey(name)}|${canonicalKey(group)}`;
+    let g = groups.get(gkey);
+    if (!g) {
+      g = { kind, as26NameKey: canonicalKey(name), as26Name: name, books: [], as26: [], group, row: r.row };
+      groups.set(gkey, g);
+    }
+    g[side].push({ date, tax, row: r.row });
+  }
+  return [...groups.values()];
+}
+
+/**
+ * The optional Invoice Links sheet (design §14): one row pins one party entry
+ * to one sales invoice voucher number. Same refusal contract as Manual
+ * Matches; the engine re-checks that both still name exactly one thing.
+ */
+function parseManualLinkSheet(sheets: GridSheet[]): ManualLinkInstruction[] {
+  const sheet = sheets.find((s) => normHeader(s.name) === "invoicelinks");
+  if (!sheet) return [];
+  const byHeader = headerIndex(sheet);
+  for (const [token, human] of [["26asname", "26AS name"], ["side", "side"], ["date", "date"], ["tax", "tax"], ["invoicenumber", "invoice number"]] as Array<[string, string]>) {
+    if (!byHeader.has(token)) {
+      throw new Error(
+        `as26-map template: the '${MANUAL_LINK_SHEET}' sheet needs a "${human}" header column` +
+          ` — found headers: ${[...byHeader.keys()].join(", ") || "none"}`,
+      );
+    }
+  }
+  const nameCol = byHeader.get("26asname");
+  const kindCol = byHeader.get("kind");
+  const sideCol = byHeader.get("side");
+  const dateCol = byHeader.get("date");
+  const taxCol = byHeader.get("tax");
+  const refCol = byHeader.get("invoicenumber") ?? byHeader.get("invoice") ?? byHeader.get("linkedinvoiceref");
+  const cell = instructionCellReaders(MANUAL_LINK_SHEET);
+  const out: ManualLinkInstruction[] = [];
+  for (const r of sheet.rows.slice(1)) {
+    const name = cell.text(r, nameCol, "26AS name");
+    const sideText = cell.text(r, sideCol, "side");
+    const date = cell.date(r, dateCol);
+    const tax = cell.number(r, taxCol, "tax");
+    const invoiceRef = cell.text(r, refCol, "invoice number");
+    if (!name && !sideText && date === undefined && tax === undefined && !invoiceRef) continue;
+    if (!name) {
+      throw new Error(`as26-map template row ${r.row} on the ${MANUAL_LINK_SHEET} sheet: "26AS name" is blank on a filled row`);
+    }
+    const side = sideText === undefined ? null : manualSideOf(sideText);
+    if (!side) {
+      throw new Error(
+        `as26-map template row ${r.row}, column ${colLetter(sideCol ?? 0)} (side) on the ${MANUAL_LINK_SHEET} sheet: expected books or 26as`,
+      );
+    }
+    if (date === undefined || tax === undefined || !invoiceRef) {
+      throw new Error(
+        `as26-map template row ${r.row} on the ${MANUAL_LINK_SHEET} sheet: every row needs a date, a tax and an invoice number`,
+      );
+    }
+    const kindText = cell.text(r, kindCol, "kind");
+    const kind = kindText === undefined ? "tds" : kindOf(kindText);
+    if (!kind) {
+      throw new Error(
+        `as26-map template row ${r.row}, column ${colLetter(kindCol ?? 0)} (kind) on the ${MANUAL_LINK_SHEET} sheet: expected tds or tcs`,
+      );
+    }
+    out.push({
+      kind, as26NameKey: canonicalKey(name), as26Name: name,
+      side, date, tax, invoiceRef, row: r.row,
+    });
   }
   return out;
 }

@@ -1774,6 +1774,19 @@ export function createSession(
       })),
       unmatchedBooks: r.unmatchedBooks.map((i) => ({ ...i, date: displayDate(i.date) })),
       unmatchedAs26: r.unmatchedAs26.map((i) => ({ ...i, date: displayDate(i.date) })),
+      ...(r.manualLinks
+        ? {
+            manualLinks: r.manualLinks.map((l) => ({
+              ...l,
+              date: displayDate(l.date),
+              linked: {
+                date: displayDate(l.linked.date),
+                ref: REF_MASK(l.linked.ref),
+                taxable: l.linked.taxable,
+              },
+            })),
+          }
+        : {}),
     }));
     const masterByKey = new Map(masterPairs.map((l) => [canonicalKey(l.name), l.name]));
     const pseudoKey = (k: string): string =>

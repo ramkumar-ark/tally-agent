@@ -311,3 +311,93 @@ voucher type, ref, ledger), so a reader sees why the basis grew. Masking is
 unchanged and stays at the session boundary (`pseudoKey` / `pseudoName` /
 `REF_MASK`).
 
+## 14. Operator-declared manual matches and invoice links (2026-09-30)
+
+Automatic matching is deliberately conservative: a subset fit that more than
+one grouping could satisfy stays unmatched and counts as `ambiguous`, and a
+sales invoice is only tied to a TDS entry by reference, by the section rate, or
+— failing both — approximately, which carries no bill-value comparison. Both
+leave rows on **Books not in 26AS** / **26AS unmatched** that a human can see
+are the same money, or a books entry that a human can see belongs to a
+particular invoice. The captain's ruling (2026-09-30) is that automatic
+linking stays exactly as it is and the operator gets a channel to state the
+decision.
+
+### 14.1 The two sheets
+
+Both live on the existing mapping template (`tb_write_26as_template`), written
+empty with headers and pre-filled from the map in force, so a re-fill
+round-trips an operator's earlier decisions:
+
+* **Manual Matches** — columns `26AS name | kind | group | side | date | tax`.
+  Rows sharing a 26AS name, kind and the operator's own `group` label form ONE
+  instruction; a blank label is a group of one. One side carries a single row
+  (1:1, 1:N, N:1) and both sides must balance within `AS26_TAX_TOLERANCE`.
+* **Invoice Links** — columns `26AS name | kind | side | date | tax | invoice
+  number`. One row pins one party entry to one sales invoice, identified by its
+  voucher number (the report's *linked invoice ref*).
+
+`side` is `books` or `26as`. `As26Map` gains `manualMatches` and
+`manualLinks`; the JSON map channel may carry them, and a map with neither is
+unchanged (`EMPTY_AS26_MAP`).
+
+### 14.2 Binding by fact, never by row id
+
+Row ids (`B12`, `D7`) shift between runs — they are assigned per run from the
+sorted rows — so an instruction is bound to `(side, date, tax)`, the facts the
+report prints on the row. Dates may be typed as the report prints them
+(`16-Jan-2026`), as `20260116`, as `2026/01/16`, or left as an Excel date cell;
+anything else refuses. Every refusal cites sheet, row, and column letter +
+header — never a cell value, since a stray cell can be anything (a name, a PAN).
+
+### 14.3 Refusal, not silent application
+
+The whole point of a hand-stated decision is that applying it to the *wrong*
+entry is worse than not applying it. An instruction is refused — a thrown,
+operator-facing error naming the sheet and row — when:
+
+* its 26AS name is not a party of this review (unmapped, absent from 26AS for
+  the period, or the wrong kind), or is a shared-ledger party, which reconciles
+  on totals and has no single entries to name (`assertManualParties`, run once
+  before any party is reconciled so the whole map is checked up front);
+* a date+tax pair matches no entry, or more than one, of that party;
+* the group has no row on one side, has more than one row on both sides, or
+  does not balance (the drift is quoted);
+* the invoice number matches no sales invoice, or more than one, **on that
+  party's own ledgers** (a link never reaches across parties);
+* two links name the same entry (one invoice per entry).
+
+### 14.4 Where manual runs, and what it may not change
+
+In `reconcileParty`, manual links resolve against the party's WHOLE books/sales
+pools — a link may name an entry the review already paired automatically,
+because a paired entry still gets a bill-value comparison — while manual
+matches resolve against the pools left unmatched after the exact 1:1 and
+equal-amount-leftover stages and BEFORE the invoice-anchored and subset
+searches. Manual therefore beats the automatic searches and can never compete
+with them; one entry is consumed once, by the operator's instruction or by the
+engine, never twice.
+
+A manual match is pushed into `recon[].combinations` with `basis: "manual"`,
+which is all the report needs: the consumed rows are re-emitted as `explained`
+rows (ids reserved, hidden from the two unmatched sheets, cited by the
+combination row) and appear on **Combination matches** with link basis
+`manual`. A manual link is carried on `recon[].manualLinks` as a plain
+`{side, date, tax, linked:{date, ref, taxable}}` — deliberately not a
+`BooksSale`, so the session's masking stays simple — and
+`buildBillRows` consults it first on the books, 26AS and value rows. On the
+value rows a manual link replaces the automatic tie even when the only possible
+automatic one was *approximate*, so the comparison the tool could not make now
+runs and reports `linkBasis: "manual"`.
+
+Nothing else moves: `booksTax`, `as26Tax`, the run totals, the Deductors sheet
+figures and every automatic decision are untouched, and the identity
+`Σ unmatched books − Σ unmatched 26AS = booksTax − as26Tax` (to
+`AS26_TAX_TOLERANCE`) holds with and without instructions. `LinkBasis` gains
+`"manual"` in both `src/as26.ts` and its `src/as26-bill.ts` twin.
+
+### 14.5 Out of scope
+
+`linkInvoice`, `linkInvoiceWithCapacity`, `reconcileParty`'s automatic stages
+and every threshold in §5 are unchanged, and the TDS payable review is
+untouched.

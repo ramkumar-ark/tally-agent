@@ -4,13 +4,13 @@
 // boundary, never inside the builder.
 import {
   round2, AS26_TAX_TOLERANCE, AS26_VALUE_TOLERANCE,
-  type BooksFacts, type BooksSale, type BooksDeduction, type As26Result, type ReconItem,
+  type BooksFacts, type BooksSale, type BooksDeduction, type As26Result, type ReconItem, type ManualLinkResolved,
 } from "./as26.js";
 import { lawOf } from "./tds-law.js";
 import type { As26File, As26Kind, As26Transaction } from "./as26-file.js";
 
 export type BillKind = "booksded" | "as26" | "value";
-export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "none";
+export type LinkBasis = "reference" | "taxable-rate" | "invoice-rate" | "approximate" | "manual" | "none";
 
 export interface BillRow {
   kind: BillKind; ledgerKey: string; nameKey: string;
@@ -48,6 +48,17 @@ export { linkInvoice, linkInvoiceWithCapacity, normalizeAs26Section };
 
 const inWindow = (d: string, o: { fromDate: string; toDate: string }): boolean =>
   d >= o.fromDate && d <= o.toDate;
+
+/**
+ * The operator's link for one entry, if they declared it ("Invoice Links"
+ * sheet, resolved by the engine). It overrides the automatic link — that is the
+ * whole point of the sheet — and reports basis "manual", so the workbook shows
+ * the row was pinned by hand rather than inferred.
+ */
+const manualLinkAt = (
+  links: ManualLinkResolved[] | undefined, side: "books" | "as26", date: string, tax: number,
+): ManualLinkResolved | undefined =>
+  (links ?? []).find((m) => m.side === side && m.date === date && Math.abs(round2(m.tax - tax)) <= AS26_TAX_TOLERANCE);
 
 /**
  * Drill-down rows from an analyzed 26AS run: one books row per unmatched books
@@ -128,13 +139,15 @@ export function buildBillRows(
     for (const { dedIdx, explained } of booksOrder) {
       const d: BooksDeduction | undefined = facts.deductions[dedIdx];
       if (!d || !keySet.has(d.ledgerKey) || d.kind !== r.match.kind) continue;
+      const manualLink = manualLinkAt(r.manualLinks, "books", d.date, d.tax);
       const link = linkOf(d.tax, d.date, d.reference, d.ledgerKey);
+      const linked = manualLink?.linked ?? (link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null);
       rows.push({
         kind: "booksded", ledgerKey: d.ledgerKey, nameKey: r.match.as26NameKey, reconIdx: ri,
         date: d.date, tax: d.tax, voucherType: d.voucherType || null, ref: d.voucherNumber,
         gross: null, status: null, section, inWindow: inWindow(d.date, opts),
-        linkBasis: link ? link.basis : "none",
-        linked: link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null,
+        linkBasis: manualLink ? "manual" : (link ? link.basis : "none"),
+        linked,
         delta: null, explained, dedIdx,
       });
     }
@@ -144,14 +157,16 @@ export function buildBillRows(
       const tx = txs[txIdx];
       if (!tx) continue;
       const date = item.date;
+      const manualLink = manualLinkAt(r.manualLinks, "as26", date, item.tax);
       const link = linkOf(item.tax, date, null);
+      const linked = manualLink?.linked ?? (link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null);
       rows.push({
         kind: "as26", ledgerKey: r.match.ledgerKeys[0] ?? "", nameKey: r.match.as26NameKey, reconIdx: ri,
         date, tax: item.tax, voucherType: null, ref: null,
         gross: item.gross ?? null, status: item.status ?? null, section: tx.section,
         inWindow: inWindow(date, opts),
-        linkBasis: link ? link.basis : "none",
-        linked: link ? { date: link.sale.date, ref: link.sale.ref, taxable: link.sale.taxable } : null,
+        linkBasis: manualLink ? "manual" : (link ? link.basis : "none"),
+        linked,
         delta: null, explained, txIdx,
       });
     }
@@ -177,7 +192,13 @@ export function buildBillRows(
     );
     for (const t of partyTxsOf(file, r.match.kind, r.match.as26NameKey)) {
       const date = t.bookingDate || t.date;
-      const link = linkInvoiceWithCapacity(pool, { date, tax: t.tax, reference: null, section: t.section }, claimed);
+      const manualLink = manualLinkAt(r.manualLinks, "as26", date, t.tax);
+      // A declared link replaces the automatic one, so a row whose only
+      // possible tie was an approximate one (which carries no comparison) can
+      // still be measured against the invoice the operator named.
+      const link = manualLink
+        ? { sale: manualLink.linked, basis: "manual" as const }
+        : linkInvoiceWithCapacity(pool, { date, tax: t.tax, reference: null, section: t.section }, claimed);
       if (!link || link.basis === "approximate") continue;
       const delta = round2(t.amount - link.sale.taxable);
       if (Math.abs(delta) <= AS26_VALUE_TOLERANCE) continue;

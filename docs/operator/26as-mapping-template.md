@@ -101,6 +101,84 @@ them:
   empty when no bank interest is involved, and older filled templates remain
   valid.
 
+## Matching and linking entries by hand
+
+Automatic matching is deliberately cautious, so two things stay on the report
+until a human decides. Both have a home on the same template:
+
+- a TDS entry on **Books not in 26AS** and an entry on **26AS unmatched** that
+  you know are the same money (the tax was booked as one journal but 26AS shows
+  it split, say — or the split could be grouped more than one way, so the tool
+  honestly refused to guess);
+- a TDS entry, books or 26AS, that belongs to a **particular sales invoice** the
+  tool could not tie to one (no bill reference on the voucher, and the tax does
+  not match the invoice's rate).
+
+### Manual Matches sheet
+
+Columns: `26AS name | kind | group | side | date | tax`. Rows that share a 26AS
+name, a kind and a **group** label you type are one instruction; a blank label
+is a group of one (a 1:1 match). Put the books row(s) with side `books` and the
+26AS row(s) with side `26as`:
+
+| 26AS name | kind | group | side | date | tax |
+| --- | --- | --- | --- | --- | --- |
+| Sample Builders LLP | tds | Mar-rent | books | 16-Mar-2026 | 12,000.00 |
+| Sample Builders LLP | tds | Mar-rent | 26as | 20-Mar-2026 | 7,000.00 |
+| Sample Builders LLP | tds | Mar-rent | 26as | 21-Mar-2026 | 5,000.00 |
+
+One side must carry a single row (1:1, 1:N or N:1) and **both sides must add up
+to the same amount**, to the rupee.
+
+- A matched pair **leaves both unmatched sheets** and is listed on
+  **Combination matches** with link basis `manual`; the entries keep their row
+  numbers so earlier runs' references stay readable. The party's totals, its
+  Deductors figures and every other decision are unchanged — only which entries
+  are explained.
+- Manual decisions are applied **before** the automatic searches, so an entry
+  you have named is never consumed twice, by you or by the tool.
+- Identify each row by its **date and tax exactly as the report prints them**,
+  not by its row number: numbers move between runs, the facts do not.
+
+### Invoice Links sheet
+
+Columns: `26AS name | kind | side | date | tax | invoice number`. One row pins
+one entry to one sales invoice, named by its **voucher number** — the number the
+report prints in the *linked invoice ref* column.
+
+| 26AS name | kind | side | date | tax | invoice number |
+| --- | --- | --- | --- | --- | --- |
+| Sample Builders LLP | tds | books | 25-Mar-2026 | 4,000.00 | NC/17 |
+
+- The entry may be one the review already paired automatically: a paired entry
+  still gets a bill-value comparison, and yours overrides whatever was inferred.
+- Once named, the row's linked-invoice columns fill with link basis `manual`,
+  and the **Bill value mismatch** sheet reports the invoice-value comparison for
+  it even when the only tie the tool could infer was an approximate one.
+- The invoice must be one of **that party's own** sales; a number belonging to
+  another party's ledger does not count.
+
+### When an instruction is refused
+
+The run stops with an error naming the **sheet and row** (never a name, a PAN
+or any cell value) when an instruction no longer identifies exactly one thing —
+which is the honest answer, since row numbers move:
+
+- the 26AS name is not a party of that review (unmapped, not on 26AS for the
+  period, or the wrong kind), or it shares a Tally ledger with another name
+  (such a party reconciles on totals, so it has no single entries to name);
+- a date + tax matches no entry, or more than one, of that party;
+- the group has no row on one side, has more than one row on both sides, or its
+  two sides do not add up (the difference is quoted);
+- the invoice number matches no invoice on that party's ledgers, or more than
+  one;
+- two links name the same entry — one invoice per entry.
+
+Dates may be typed `16-Mar-2026` (as the report prints them), `20260316`,
+`2026/03/16`, or left as an Excel date cell. Both sheets are pre-filled from
+the mapping already in force, so re-filling and re-running keeps your earlier
+decisions.
+
 ## Notes
 
 - The file carries company and party names. **Never paste its rows into chat.**

@@ -72,6 +72,8 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       mappings: [{ ledger: "Alpha Traders Ledger", as26Name: "Alpha Traders" }],
       banks: [],
       creditLedgers: [],
+      manualMatches: [],
+      manualLinks: [],
     });
     const mapping = sheetOf(buf, "Mapping")!;
     const cell = (row: number, col: number) =>
@@ -86,7 +88,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
     ]};
     const buf = buildAs26MapTemplate({ deductors, map: multi, ledgers: ["Alpha Site Ledger", "Alpha Head Office"] });
-    expect(parseAs26MapTemplate(buf)).toEqual({ ...multi, banks: [], creditLedgers: [] });
+    expect(parseAs26MapTemplate(buf)).toEqual({ ...multi, banks: [], creditLedgers: [], manualMatches: [], manualLinks: [] });
     const mapping = sheetOf(buf, "Mapping")!;
     const nameAt = (row: number) => mapping.rows[row].cells.get(0)?.value;
     const ledgerAt = (row: number) => mapping.rows[row].cells.get(3)?.value;
@@ -103,7 +105,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     ]))).toEqual({ mappings: [
       { ledger: "Alpha Site Ledger", as26Name: "Alpha Traders" },
       { ledger: "Alpha Head Office", as26Name: "Alpha Traders" },
-    ], banks: [], creditLedgers: [] });
+    ], banks: [], creditLedgers: [], manualMatches: [], manualLinks: [] });
   });
 
   it("skips fully blank rows and pre-filled rows with no ledger yet", () => {
@@ -115,6 +117,8 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       mappings: [{ ledger: "Beta Minerals Ledger", as26Name: "Beta Minerals" }],
       banks: [],
       creditLedgers: [],
+      manualMatches: [],
+      manualLinks: [],
     });
   });
 
@@ -127,7 +131,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
     ]))).toEqual({ mappings: [
       { ledger: "Alpha Ledger", as26Name: "Alpha Traders" },
       { ledger: "Alpha Ledger", as26Name: "Executive Engineer Alpha Division" },
-    ], banks: [], creditLedgers: [] });
+    ], banks: [], creditLedgers: [], manualMatches: [], manualLinks: [] });
   });
 
   it("round-trips a shared-ledger mapping through the generated template", () => {
@@ -136,7 +140,7 @@ describe("buildAs26MapTemplate / parseAs26MapTemplate", () => {
       { ledger: "Alpha Ledger", as26Name: "Beta Minerals" },
     ]};
     const buf = buildAs26MapTemplate({ deductors, map: shared, ledgers: ["Alpha Ledger"] });
-    expect(parseAs26MapTemplate(buf)).toEqual({ ...shared, banks: [], creditLedgers: [] });
+    expect(parseAs26MapTemplate(buf)).toEqual({ ...shared, banks: [], creditLedgers: [], manualMatches: [], manualLinks: [] });
   });
 
   it("refuses the same ledger AND 26AS name pair twice, citing the row number only", () => {
@@ -212,6 +216,8 @@ describe("loadAs26MapFile", () => {
       mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }],
       banks: [],
       creditLedgers: [],
+      manualMatches: [],
+      manualLinks: [],
     });
   });
 
@@ -290,6 +296,8 @@ describe("Bank Interest mapping sheet", () => {
       mappings: [{ ledger: "Alpha Ledger", as26Name: "Alpha Traders" }],
       banks: [],
       creditLedgers: [],
+      manualMatches: [],
+      manualLinks: [],
     });
   });
 });
