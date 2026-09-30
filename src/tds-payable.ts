@@ -72,9 +72,14 @@ const rowKey = (party: string, date: string, voucher: string, section: string): 
 
 /**
  * The applied rate for a row: the engine's own stamped rate when a cached
- * liability matched, else the ratio the row's own figures imply (exact for a
- * 194Q party-month row, whose `gross` is `liable tax / rate`, and for a
- * not-deposited row), else null.
+ * liability matched, else the STATUTORY rate for that deductee and section
+ * (the s.197 certificate, the PAN's 4th character, or the s.206AA floor when
+ * the deductee has no PAN) as `analyzeTds` itself charges it, else null.
+ *
+ * Never the ratio the row's figures imply: `gross` is the engine's *base*,
+ * which for a threshold/cumulative section is smaller than the bill, so a
+ * ratio reads 10.0151% for a 10% rate — the column is the rate of deduction,
+ * not an accident of the base.
  *
  * Indexed once: a linear scan per candidate over a run's liabilities is the
  * shape AGENTS.md records as a 30-minute event-blocker.
@@ -109,10 +114,21 @@ export function payableCandidates(args: {
   findings: readonly TdsPayableFinding[];
   clause21b: readonly Clause21bBookRow[];
   liabilities: readonly TdsLiability[];
+  /**
+   * The statutory rate for a deductee and section, resolved by the caller over
+   * the review's own context (`rateFor`: certificate, then the PAN's 4th
+   * character, then the s.206AA floor when there is no PAN). Null when the
+   * section is not in the law table, or when the caller resolves nothing.
+   */
+  statutoryRateOf?: (party: string, section: string, date: string) => number | null;
 }): TdsPayableCandidate[] {
   const byId = new Map<string, Clause21bBookRow>();
   for (const r of args.clause21b) if (!byId.has(r.findingId)) byId.set(r.findingId, r);
   const rates = rateIndex(args.liabilities);
+  // The engine's own rate resolution, bound by the caller to `rateFor` over
+  // the review's own context. A hand-built call (a test, a future channel)
+  // may omit it, and then a row with no matched liability carries no rate.
+  const statutory = args.statutoryRateOf ?? (() => null);
   const out: TdsPayableCandidate[] = [];
   for (const f of args.findings) {
     if (f.severity !== "critical") continue;
@@ -138,7 +154,7 @@ export function payableCandidates(args: {
     const rate =
       rates.exact.get(rowKey(r.party, r.date, r.voucherNumber, r.section)) ??
       rates.loose.get(`${r.party}|${r.date}|${r.section}`) ??
-      (r.gross > 0 ? r.liability / r.gross : null);
+      statutory(r.party, r.section, r.date);
     out.push({
       findingId: f.id,
       check: f.check,
@@ -278,7 +294,12 @@ export function statementRow(args: {
   // a not-deposited row, and the payment date itself for a shortfall that was
   // never deducted at all.
   const creditDate = deemed ? paymentDate : c.deductionDate ?? c.date;
-  const depositDueDate = depositDue(creditDate);
+  // The Rule 30 due date of the ORIGINAL deduction or booking — 7th of the
+  // next month, 30-Apr for a March deduction. Never the payment date's: a
+  // shortfall that was never deducted is due on the booking's own Rule 30
+  // date, and showing the date after the payment would tell the operator
+  // nothing about when the liability arose.
+  const depositDueDate = depositDue(deemed ? c.date : creditDate);
   const interestI = deemed
     ? interestOn(0.01, calendarMonths(c.date, paymentDate), shortfall)
     : creditDate > c.date

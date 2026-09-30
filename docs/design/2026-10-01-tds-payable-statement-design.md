@@ -54,11 +54,28 @@ that the row does not carry is the **date the credit was booked**:
   scope). It adds a fact; **no computation, finding, total or 21(b) sheet value
   changes**, and every existing consumer treats the field as absent.
 
+`TdsBooksCache` also carries `rateOf`, the review's own `rateFor` over its own
+context — s.197 certificate, then the PAN's 4th character, then the s.206AA
+floor when the deductee has no PAN. It is the only rate source a
+missing-liability row may use.
+
+## 3a. The rate column is a statutory rate, never a ratio (2026-10-01 review)
+
 Rate resolution for a row: the cached `liabilities` entry matching
-`party | date | voucherNumber | section` → `.rate`; failing that
-`liability / gross` — exact for a 194Q party-month row (its `gross` is
-`liable tax / rate` by construction) and for a not-deposited row; and `null`
-(blank on the sheet) when neither resolves. **A rate is never guessed.**
+`party | date | voucherNumber | section` → `.rate` (the engine's own stamped
+rate); failing that the `party | date | section` key, which is what a 194Q
+party-month row matches (it carries no voucher number); failing that
+`rateOf(party, section, date)`; and `null` (blank on the sheet) when none of
+them resolves. **A rate is never guessed.**
+
+The first implementation fell back to `liability / gross`, and that is wrong:
+`gross` is the engine's **base**, which for a threshold or cumulative section
+is smaller than the bill (a 194Q row's base is the excess beyond the ₹50 lakh
+crossing), so the ratio read 10.0151% for a 10% rate, 20.1004% for a 20% one,
+and 0 where `taxPayable` was 0. The column is the rate at which the tax is
+deducted, so it must be a rate the law applies to that deductee — never an
+artefact of the base. `rateOf` is the engine's own resolution, so the column
+cannot drift from the rate the review charged.
 
 ## 4. Interest: the existing schedule, re-parameterised to the payment date
 
@@ -71,8 +88,8 @@ Per Accepted row, on the shortfall tax:
 
 | Finding kind | Interest (i) — 1% | Interest (ii) — 1.5% | "Due date of deposit" column |
 |---|---|---|---|
-| `not_deposited` (tax was deducted, not deposited) | `interestOn(0.01, calendarMonths(bookingDate, deductionDate), shortfall)` when the credit postdates the booking, else 0 | `interestOn(0.015, calendarMonths(deductionDate, paymentDate), shortfall)` | `depositDue(deductionDate)` |
-| `not_deducted` / `short_deducted` (the shortfall is undeducted tax, deemed deducted when the challan is paid) | `interestOn(0.01, calendarMonths(bookingDate, paymentDate), shortfall)` | 0 — `calendarMonths(depositDue(paymentDate), paymentDate)` is 0 | `depositDue(paymentDate)` |
+| `not_deposited` (tax was deducted, not deposited) | `interestOn(0.01, calendarMonths(bookingDate, deductionDate), shortfall)` when the credit postdates the booking, else 0 | `interestOn(0.015, calendarMonths(deductionDate, paymentDate), shortfall)`, charged only when the payment is after the due date | `depositDue(deductionDate)` |
+| `not_deducted` / `short_deducted` (the shortfall is undeducted tax, deemed deducted when the challan is paid) | `interestOn(0.01, calendarMonths(bookingDate, paymentDate), shortfall)` | 0 by construction — the credit is deemed made on the payment date | `depositDue(bookingDate)` |
 
 Notes that are decisions, not accidents:
 
@@ -82,9 +99,12 @@ Notes that are decisions, not accidents:
   due date), never where the clock starts — a leg measured from the due date
   would quietly forgive every month the tax was held before it fell due.
 - The undeducted shortfall is deemed deducted **on the payment date**, so its
-  late-deposit leg is zero by construction and its deposit-due date is the
-  Rule 30 date after the payment. This is the only honest reading: the challan
-  pays it on that date.
+  late-deposit leg is zero by construction: the challan pays it on that date.
+- The "due date of deposit" column is the Rule 30 date of the **original
+  deduction or booking** — the 7th of the next month, 30-Apr for a March
+  deduction (`depositDue`'s own carve-out). It is never the date after the
+  payment: that is a fact about the challan, not about when the liability
+  arose, and on it every shortfall row read 07-Nov-2026 regardless of its age.
 - A 194Q party-month row is dated to the **month's first day**, exactly as the
   review dates it, so the statement and the review agree on every date.
 - `calendarMonths` is Rule 119A(b) calendar-inclusive, so a payment inside the

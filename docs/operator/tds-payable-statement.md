@@ -11,7 +11,15 @@ statement workbook priced to the payment date.
 1. **Run the TDS review.** `tb_tds_review` caches the critical findings and
    the private books facts the payable projection needs. Both tools below
    read that one cached run; a fresh review between them invalidates the
-   workbook (see *Binding*).
+   workbook (see *Binding*). **Re-run the review with exactly the inputs your
+   finalised review used** — the same day book, the same operator template, the
+   same Winman export, and the same ledger-masters channel. The statement's
+   critical set and every PAN in it come from that run, so a review taken with
+   a different evidence channel states a different liability: running the
+   review against live masters when your finalised run degraded to the day
+   book's own masters raises the 206AA no-PAN rows and the set with them. The
+   run records which channel it used (`books.mastersSource`, and the review's
+   own `winman` block), so compare those before you price anything.
 2. **Generate the decisions workbook.** `tb_write_tds_payable_decisions`
    writes `tds-payable-decisions-<company>-<date>.xlsx` into the report
    directory and returns its **path**. One row per critical finding, in the
@@ -54,9 +62,17 @@ s.201(1A) interest — the review's own schedule, never a second formula:
 | (i) late deduction | 1% per month or part of a month | the booking date → the payment date (a shortfall that was never deducted is deemed deducted on the payment date) |
 | (ii) late deposit | 1.5% per month or part of a month | the deduction date → the payment date, and only where the payment is after the Rule 30 due date shown in the last column |
 
-The **rate of deduction** is read from the deductee's PAN — `C` in its 4th
-character is a Company, anything else a non-company — so 194C prices at 2%
-for one and 1% for the other. When no PAN can be found (no master PAN and no
+The last column is the **Rule 30 due date of the original deduction or booking** —
+the 7th of the following month, and 30 April for a March deduction. It is not
+the date after the payment: that says when you are paying, not when the
+liability fell due.
+
+The **rate of deduction** is the **statutory rate for that deductee and
+section** — the same rate the review charged, never a ratio of the row's
+figures. It is read from the deductee's PAN: `C` in its 4th character is a
+Company, anything else a non-company, so 194C prices at 2% for one and 1% for
+the other, and a s.197 certificate rate is honoured where the books carry
+one. A row whose rate cannot be resolved prints it blank. When no PAN can be found (no master PAN and no
 GSTIN to derive one from) the s.206AA floor of 20% applies and the row reads
 **Not determinable (no PAN)**; the rate itself is the floor, and the Summary
 sheet breaks the totals out by that classification so a 20% block is visible

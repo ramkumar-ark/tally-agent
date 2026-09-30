@@ -147,8 +147,8 @@ describe("payableCandidates", () => {
     expect(out[0]).toMatchObject({ party: "", date: "", amountPaid: 0, taxPayable: 0, rate: null, shortfall: 4200 });
   });
 
-  it("takes the rate from the cached liability, then from the row's own ratio", () => {
-    const [exact, loose, ratio] = payableCandidates({
+  it("takes the rate from the cached liability, then from the statutory rate — never a ratio", () => {
+    const [exact, loose, statutory] = payableCandidates({
       findings: [
         finding({ id: "TDS-001-1" }),
         finding({ id: "TDS-001-2", section: "194Q", amount: 250 }),
@@ -156,19 +156,35 @@ describe("payableCandidates", () => {
       ],
       clause21b: [
         bookRow({ findingId: "TDS-001-1" }),
-        // A 194Q party-month row: no voucher number, and its gross is
-        // liable tax / rate, so both fallbacks must still resolve.
+        // A 194Q party-month row: no voucher number, so the engine's own
+        // per-booking key cannot match it; the party|date|section key does.
         bookRow({ findingId: "TDS-001-2", party: "Monthly Vendor", date: "20250801", voucherNumber: "", section: "194Q", gross: 250000, liability: 250 }),
+        // No liability matched at all. The old fallback divided liability by
+        // gross, which read 0.2% for a 194Q party whose real rate is 0.1% —
+        // the base is the engine's threshold-adjusted base, not the bill.
         bookRow({ findingId: "TDS-001-3", party: "Ratio Vendor", date: "20250901", voucherNumber: "", section: "194Q", gross: 200000, liability: 400 }),
       ],
       liabilities: [
         liability("Sample Traders", "20250510", "P/12", 0.01),
         liability("Monthly Vendor", "20250801", "P/30", 0.001, "194Q"),
       ],
+      // The engine's own rateFor, as the session binds it.
+      statutoryRateOf: (party, section) => (section === "194Q" ? 0.001 : 0.02),
     });
     expect(exact.rate).toBe(0.01);
     expect(loose.rate).toBe(0.001);
-    expect(ratio.rate).toBe(0.002);
+    expect(statutory.rate).toBe(0.001);
+    expect(statutory.rate).not.toBeCloseTo(400 / 200000, 6);
+  });
+
+  it("carries no rate at all when neither a liability nor the law resolves one", () => {
+    const out = payableCandidates({
+      findings: [finding({ id: "TDS-001-4", section: "999X" })],
+      clause21b: [bookRow({ findingId: "TDS-001-4", section: "999X", gross: 200000, liability: 400 })],
+      liabilities: [],
+      statutoryRateOf: () => null,
+    });
+    expect(out[0].rate).toBeNull();
   });
 });
 
@@ -221,13 +237,29 @@ describe("s.201(1A) interest on the statement", () => {
     expect(calendarMonths("20250510", PAYMENT)).toBe(18);
     expect(row.interestI).toBeCloseTo(expectedI, 2);
     expect(row.interestI).toBeCloseTo(900, 2);
-    // Deemed deduction on payment: no late-deposit leg, and the deposit is due
-    // in the month after the payment.
+    // Deemed deduction on payment: no late-deposit leg.
     expect(row.interestII).toBe(0);
-    expect(row.depositDueDate).toBe(depositDue(PAYMENT));
-    expect(row.depositDueDate).toBe("20261107");
+    // The due date is the BOOKING's Rule 30 date — 7th of the next month —
+    // never the date after the payment the challan is dated to.
+    expect(row.depositDueDate).toBe(depositDue("20250510"));
+    expect(row.depositDueDate).toBe("20250607");
+    expect(row.depositDueDate).not.toBe("20261107");
     expect(row.deductionDate).toBe(PAYMENT);
     expect(row.interest).toBe(row.interestI);
+  });
+
+  it("shows a March booking's Rule 30 date of 30-Apr, on the shortfall rows too", () => {
+    // Rule 30's own carve-out: a March deduction is due on 30 April.
+    for (const check of ["tds_not_deducted", "tds_short_deducted"]) {
+      const row = statementRow({
+        candidate: candidate({ findingId: "TDS-001-9", check, date: "20260315", shortfall: 250 }),
+        paymentDate: PAYMENT,
+        pan: null,
+        panFromGstin: false,
+      });
+      expect(row.depositDueDate).toBe("20260430");
+      expect(row.depositDueDate).toBe(depositDue("20260315"));
+    }
   });
 
   it("charges a not-deposited shortfall 1.5% from its deduction date, and 1% when the credit was late", () => {
@@ -564,7 +596,7 @@ describe("the decisions workbook", () => {
     });
     const buf = buildPayableStatement({ statement: st, company: IDENTITY.company, generatedOn: "20261001" });
     expect(readWorkbook(buf).map((s) => s.name)).toEqual(["Payable statement", "Summary"]);
-    const head = headersAt(sheet(buf, "Payable statement"), 6); // five title lines first
+    const head = headersAt(sheet(buf, "Payable statement"), 9); // eight title lines first
     for (const h of [
       "Date of booking", "Party", "Party PAN", "Company or non-company",
       "Amount paid or credited", "TDS that should have been deducted", "TDS actually deducted",

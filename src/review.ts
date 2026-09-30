@@ -61,7 +61,7 @@ import { readXlsm, writeXlsm } from "./xlsm.js";
 import { readSchema, readHandshake, writeSheetRows, findSheetPart, readListValues, type WinmanRow } from "./winman3cd.js";
 import { type OperatorFile, type WinmanFacts } from "./tds-file.js";
 import { projectLedgerRows, counterpartyOf, readDayBook, type DayBookInput } from "./tds-daybook.js";
-import { timingOnlySection } from "./tds-law.js";
+import { lawOf, timingOnlySection } from "./tds-law.js";
 import {
   EMPTY_LOANS_OPERATOR,
   LOANS_SHEET_LABELS,
@@ -126,7 +126,7 @@ const TCS_NAME_KEYWORDS: ReadonlyArray<readonly [RegExp, string]> = [
   [/remittance/i, "lrs"],
   [/notified/i, "notified-goods"],
 ];
-import { analyzeTds, type Clause21bBookRow, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows, type TdsLiability } from "./tds.js";
+import { analyzeTds, rateFor, type Clause21bBookRow, type SubsequentDeposit, type TdsCtx, type TdsEvents, type TdsLedgerRows, type TdsLiability } from "./tds.js";
 import { analyzeTcs } from "./tcs.js";
 import { tds3cdRows, type Tds3cdResult } from "./tds3cd.js";
 import { tcsNatureByWinman } from "./tcs-law.js";
@@ -431,6 +431,15 @@ interface TdsBooksCache {
   events: TdsEvents;
   liabilities: TdsLiability[];
   clause21b: Clause21bBookRow[];
+  /**
+   * The statutory rate the review charged a deductee at for a section — its own
+   * `rateFor` over the review's own context (s.197 certificate, then the PAN's
+   * 4th character, then the s.206AA floor when there is no PAN). The payable
+   * statement reads it for its "rate of deduction" column, so the column can
+   * only ever be a rate the law applies, never a ratio of the row's figures.
+   * Null for a section outside the law table.
+   */
+  rateOf: (party: string, section: string, date: string) => number | null;
   panOf: (party: string) => string | null;
   panDerivedFromGstinOf: (party: string) => boolean;
   panAliasOf: (party: string) => string | null;
@@ -2794,6 +2803,8 @@ export function createSession(
       events: analysis.events,
       liabilities: analysis.liabilities,
       clause21b: analysis.clause21b,
+      rateOf: (party: string, section: string, date: string) =>
+        lawOf(section) ? rateFor(ctx, party, section, date).rate : null,
       panOf: (party: string) => panOf.get(canonicalKey(party)) ?? null,
       panDerivedFromGstinOf: (party: string) => panDerived.has(canonicalKey(party)),
       panAliasOf: (party: string) => panAliasOf.get(canonicalKey(party)) ?? null,
@@ -4662,6 +4673,7 @@ export function createSession(
       findings: lastTds.findings,
       clause21b: lastTdsBooks.clause21b,
       liabilities: lastTdsBooks.liabilities,
+      statutoryRateOf: lastTdsBooks.rateOf,
     });
   }
 

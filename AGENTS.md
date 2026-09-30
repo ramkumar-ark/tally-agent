@@ -1679,6 +1679,55 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - The workflow step is APPENDED after `loans` (`test/workflow-registry.test.ts`
   pins the order); the tool surface is now 46 tools, pinned by
   `test/server-tools.test.ts` and `test/leak.test.ts` — a new tool fails both.
+- **The payable statement must be priced off a review taken with the SAME
+  evidence channel as the run the operator finalised** (firstmate review,
+  2026-10-01). The critical set and every PAN come from that run: the
+  reproduced Narayanan v15 channel is day book + operator template + the Winman
+  TDS export (`winmanPath`) + the verbose ledger masters UNAVAILABLE (so
+  `books.mastersSource` is `"bundle"` and PANs are the Winman's, `panAdopted`
+  72). Re-run with live masters reachable and the same files gives 48 criticals
+  and 27 no-PAN rows at the s.206AA 20% — a different liability, not a payable
+  bug. The channel is visible in the review JSON (`books.mastersSource`,
+  `winman.used`, `mastersAvailable`), so prove the ids match the finalised
+  review before reporting a total.
+- **The rate column is a statutory rate, never `liability / gross`.** `gross`
+  is the engine's base, smaller than the bill for a threshold/cumulative
+  section, so the ratio read 10.0151% for a 10% rate and 0 where `taxPayable`
+  was 0. Resolution is now liability `rate` → `party|date|section` (the 194Q
+  party-month key) → `rateFor` over the review's own context, bound into
+  `TdsBooksCache.rateOf`; null only when the section is out of the law table.
+- **The "due date of deposit" is the Rule 30 date of the ORIGINAL deduction or
+  booking** (7th of the next month, 30-Apr for March) — never the date after
+  the payment, which made every shortfall row read 07-Nov-2026 regardless of
+  age. `statementRow` uses `depositDue(deemed ? bookingDate : deductionDate)`.
+- **s.201(1A) leg (ii) is measured from the DEDUCTION date**, not from the Rule
+  30 due date: `analyzeTds` and `tds3cd.ts:287` both gate on the due date and
+  measure from the deduction, and a leg from the due date forgives every month
+  the tax was held before it fell due.
+- **The statement sheet's title notes are part of the deliverable and its
+  header row index is a test constant.** The notes on `Payable statement` are
+  what the operator reads for the deemed-deduction, due-date and rate rules, so
+  a rule change must edit them (`buildPayableStatement`'s `title` in
+  `src/tds-payable-template.ts`) — the v18 fix changed the due-date and rate
+  notes only after the shipped workbook still told the operator the old
+  "Rule 30 date after that payment" rule. Each title line is one sheet row, so
+  adding a line moves the header down and breaks
+  `test/tds-payable.test.ts`'s `headersAt(sheet(...), N)` (now 9).
+- **A statement workbook is verifiable without any PAN reaching the log**
+  (2026-10-01). `readWorkbook` on the operator's disk gives the columns
+  `Party PAN` (not "PAN") and `Rate of deduction` as a DECIMAL with a percent
+  number format, so a verifier must compare numbers, not formatted strings.
+  Two checks settle both rates and the kind column offline:
+  `rate == lawOf(section).rates.pan4thChar?.[pan[3]] ?? law.rates.standard`
+  and `pan[3] === "C" ⇔ kind === "Company"`. On Narayanan every one of the 14
+  rows is `P` (12) or `F` (2) — so the two 194-I(a) rows at **2% with a
+  Non-company kind are a FIRM's reduced rate** (4th char `F`), not a
+  mis-resolved rate, and no operator certificate was involved: the
+  Certificates sheet of the DRAFT-20260928 template parses to zero rows
+  (`op.certificates.length === 0`), so a certificate is never the explanation
+  for a rate on that channel. Read the certificate sheet through
+  `parseOperatorTemplate` rather than sheet XML, whose cells were numeric
+  only.
 
 ## Winman 3CD depreciation (clause 18 additions/deletions, 2026-09-27)
 

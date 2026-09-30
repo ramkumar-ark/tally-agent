@@ -224,9 +224,12 @@ describe("the session surface", () => {
     // was never deducted: it is deemed deducted on the payment date.
     expect(n(r.totals.interestI)).toBeCloseTo(2500 * 0.01 * 18 + 5000 * 0.01 * 17 + 50000 * 0.01 * 16, 2);
     expect(n(r.totals.interestII)).toBe(0);
-    for (const row of r.rows) {
-      expect(row.depositDueDate).toBe("07-Nov-2026");
-    }
+    // Each row's due date is its own booking's Rule 30 date, never the date
+    // after the payment: 10-May -> 07-Jun-2025, 10-Jun -> 07-Jul, 10-Jul ->
+    // 07-Aug.
+    expect(r.rows.map((row) => row.depositDueDate)).toEqual([
+      "07-Jun-2025", "07-Jul-2025", "07-Aug-2025",
+    ]);
     // The by-section and by-kind splits each reconcile to the headline total.
     expect(r.bySection.reduce((a, g) => a + n(g.payable), 0)).toBeCloseTo(n(r.totals.payable), 2);
     expect(r.byPartyKind.reduce((a, g) => a + n(g.payable), 0)).toBeCloseTo(n(r.totals.payable), 2);
