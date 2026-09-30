@@ -953,6 +953,46 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   only when the value is `> 0`; the `40(a)(iii)` sheet has neither column key
   and stays unchanged. Test: `test/notds-write.test.ts` "writes an explicit 0…".
 
+## Sharp edges found building the tax-audit workflow (2026-09-30)
+
+- The four `tb_audit_workflow_*` tools (`src/workflow.ts`, registry
+  `src/workflow-registry.ts`, state `src/workflow-state.ts`, packaging
+  `src/workflow-package.ts`; operator walkthrough
+  `docs/operator/audit-workflow.md`) bundle every review lane. Handlers run
+  **in-process through the handlers map** (`ctx.call`), never over the MCP
+  wire; `tb_audit_workflow_run` runs **one step per call** because a step can
+  take minutes and each call must fit the existing timeout chain. The
+  workflow folder always stays under `cfg.reportDir`; `guardTargets` refuses
+  any `outDir`/`outPath` outside it or containing a user input.
+- `after` in `WORKFLOW_STEPS` is **ordering only** — planning and readiness
+  live in `planPass`/`stepReadiness` (`src/workflow-state.ts`); required-input
+  gating, not sequence, holds a step back. The notds step refreshes the TDS
+  review cache itself (fingerprint-guarded per workflow) — it never relies on
+  the tds step's cache entry.
+- Every string that leaves the workflow tools passes the same scrubbers as
+  the rest of the gateway: `scrubReason`/`scrubbed`/`noteScrub` (`src/mask.ts`
+  via the session vault). A generator's or spawn's raw error text is NOT safe
+  — `test/workflow-leak.test.ts` plants a PAN-shaped error and asserts the
+  intake reasons, step errors, INDEX.md and summary.json are clean. Shape
+  scans over INDEX/summary must strip hex runs first: sha256 digest
+  fragments match `PAN_SHAPE` case-insensitively.
+- **To add a review lane to the workflow: append to `WORKFLOW_STEPS` and
+  `WORKFLOW_INPUTS` (`src/workflow-registry.ts`) and extend
+  `test/workflow-registry.test.ts`.** The step order is pinned by tests
+  (`01-…`–`10-…` dir names); inserting a step reshuffles every later prefix,
+  which old workflow folders on disk would misread.
+- `tb_audit_workflow_export_daybook` (the brief's Q2) shells out to
+  `scripts/export-daybook.mjs` as its own child process — never route a
+  whole-FY day book through the stdio transport (the 26AS sharp edge). The
+  upstream entry script is the first `.js` argument of `cfg.downstreamArgs`
+  (`TALLY_MCP_ARGS`); unresolvable ⇒ the day book stays missing with a
+  plain configuration message, never a throw. A **user-supplied** day-book
+  path always wins; the tool's own earlier export (`source: "generated"`) is
+  moved aside (`daybook.json.old`) and replaced. The export is validated
+  with `readDayBook` before it is recorded `present`, and the child's stderr
+  is scrubbed before it reaches the model. Tests inject `spawnDayBookExport`
+  through `registerWorkflowTools`' third argument — the fake never spawns.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

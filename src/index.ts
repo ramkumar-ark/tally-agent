@@ -1824,7 +1824,10 @@ async function main(): Promise<void> {
         "workbook is written with tb_write_fixed_asset_report. " +
         "Write the report with tb_write_report (or tb_write_gst_report, tb_write_ledger_report) using the pseudonyms; " +
         "real names are restored on write. GST returns data is passed by file path only - " +
-        "never paste return rows into chat.",
+        "never paste return rows into chat. " +
+        "To run every review for one company and period, use the tax-audit workflow tools " +
+        "(tb_audit_workflow_start, tb_audit_workflow_status, tb_audit_workflow_export_daybook, " +
+        "tb_audit_workflow_run): one step per run call, all reports collected in one workflow folder.",
     },
   );
 

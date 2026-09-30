@@ -45,13 +45,22 @@ tool that fills a **copy** of the operator's Winman workbook — the source
 workbook is never modified. The design of record for each lane is the
 corresponding document in [`docs/design/`](docs/design/).
 
-## Tool registry (40 read-only tools)
+## Tool registry (44 read-only tools)
 
 Every tool below is registered in [`src/index.ts`](src/index.ts); the
 one-line summaries are condensed from each tool's own registered description.
 **Read-only**: none of them write to Tally. The `tb_write_*` tools write
 artifacts to the report directory on the operator's own disk, and `tb_write_3cd_*`
 writes a copy of a Winman workbook.
+
+### Tax-audit workflow
+
+| Tool | What it does |
+|---|---|
+| `tb_audit_workflow_start` | Start a tax-audit workflow for one company and period: create the workflow folder, check every input, generate the missing templates into `to-fill/` and return the intake table. |
+| `tb_audit_workflow_status` | Report a workflow's intake table, or list every workflow; applies patches (setInputs / accept / approve / regenerate). |
+| `tb_audit_workflow_export_daybook` | Export the day book for the workflow's company and period into the workflow folder (its own child process against the upstream server), validate it and record it as present; a user-supplied day book always wins. |
+| `tb_audit_workflow_run` | Run ONE planned step of the workflow per call, writing into the pass folder and refreshing INDEX.md and summary.json; returns the next step. |
 
 ### Basics — trial balance and single-ledger scrutiny
 
@@ -132,6 +141,26 @@ Excel read/write has since shipped as well: the operator templates, the review
 workbooks and the Winman workbook fillers all read and write `.xlsx`/`.xlsm`
 through the project's own zero-dependency zip+XML stacks (`src/xlsx.ts`,
 `src/xlsx-read.ts`, `src/xlsm.ts`).
+
+## Tax-audit workflow
+
+The four `tb_audit_workflow_*` tools bundle every review lane into one guided
+sequence. The loop is: `tb_audit_workflow_start` (intake table; missing
+dependency-free templates are generated into `to-fill/`) → the operator fills
+the templates and hands them back → `tb_audit_workflow_status` (point the
+workflow at the filled files, accept them, approve the GST working sheet) →
+`tb_audit_workflow_run` (one step per call, each returning the next) until
+every step is done.
+
+The workflow folder under `audit-workflows/<company>-<from>-<to>-<stamp>/` is
+the only state — every call reads and writes `workflow.json` on disk, so a run
+survives the process and can be resumed by id. Each pass gets its own
+`pass-NN-<stamp>/` folder with one `NN-<step-id>/` sub-folder per step; after
+every step the folder's `INDEX.md` and `summary.json` are rewritten. One step
+per call keeps each call inside the tool timeout chain. When no day book is
+supplied, `tb_audit_workflow_export_daybook` produces and validates one in the
+workflow folder itself. The operator walkthrough is
+[`docs/operator/audit-workflow.md`](docs/operator/audit-workflow.md).
 
 Later milestones, in order: the finalization checklist; and only then the
 guarded write path.
