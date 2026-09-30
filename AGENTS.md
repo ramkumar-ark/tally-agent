@@ -1521,26 +1521,48 @@ When updating this file, preserve this bar for all agents and keep entries conci
   `Σ not_deducted + short_deducted`. On the real book that leaves 13 of 375 aggs out by >₹1,
   all accounted for: 2 × 194T (timing-only, never reports), 9 under `SHORT_DEDUCTION_MIN`,
   one ₹1.21 rounding, and one genuine (a 194-C party's ₹202 credit of 31-Jul-2025 has no bill
-  inside the 30-day pairing window, so its credit sum overstates what is spendable).
-- **The carry-forward is BIDIRECTIONAL within the year (run 11).** The bank is a LIST of
-  unspent credit (`pool: {ded; date; remaining}[]` in pass 2's plan phase, which replaced
+  inside the 30-day pairing window, so its credit sum overstates what is spendable — run 12
+  brings that party's out-of-tie figure from ₹364.79 to ₹162.50 once the pool defect below is
+  fixed; the instrument reads `.scratch/recon-vNN.json`, `recon-v11-check.mjs` takes it as argv).
+- **The carry-forward is BIDIRECTIONAL within the year (run 11, hardened run 12).** The bank is a
+  LIST of unspent credit (`pool: {ded; date; remaining}[]` in pass 2's plan phase, which replaced
   v10's `excessBank` scalar), not a running figure in date order. After the forward pass it is
-  offered again to EARLIER unpaid bookings of the same deductee+section+FY, oldest open first,
+  offered again to EARLIER unpaid bookings of the deductee+section+FY, oldest open first,
   and a booking settled that way is reported as `tds_late_deducted` (interest (i) from its own
-  deductible date to the credit date), never as not-deducted. Two invariants: a booking may
-  never take back a rupee its OWN credit banked (`if (row.ownTax >= row.base) continue` in the
-  forward pass — without it the captain's inbox-014 case reports 1,114.90 on a party that paid
-  everything), and a credit dated BEFORE a booking is an advance, never a late deduction
-  (`e.date >= row.b.date`). 194Q settles at MONTH grain the same way (`QSlot`/`qpool` in the
-  194Q block): a month's excess settles the oldest earlier uncovered month, never a same-or-
-  earlier one. A back-settled booking is barred from the whole deposit chain (`if (!ded)
-  continue`) — the credit's deposit facts and its 40(a)(ia) base are already reported on its own
-  primary booking, and re-running them would double-count. **Known limit: a per-booking backward
-  settlement is not a `TdsShare`, so its interest (i) is in the findings, the schedule and the
-  totals but NOT in the 3CD interest sheets** (`src/tds3cd.ts` sums per-deduction stamps; the
-  v11 run's interest payable is unchanged at 38,651.00 while `totals.interestI` rises). The
-  194Q block's stamp is ADDITIVE (`round2((back.ded.interestI ?? 0) + interest)`) because that
-  same credit may already carry a stamp from the per-booking walk.
+  deductible date to the credit date), never as not-deducted. Invariants, all load-bearing:
+  (a) a booking may never take back a rupee its OWN credit banked (`if (row.ownTax >= row.base)
+  continue` in the forward pass — without it the captain's inbox-014 case reports 1,114.90 on a
+  party that paid everything); (b) a credit dated BEFORE a booking is an advance, never a late
+  deduction (`e.date >= row.b.date` in the backward pass); (c) **the forward pass carries its own
+  date filter `if (e.date > row.b.date) continue` — a credit dated after a booking is the backward
+  pass's business alone.** Without (c) the captain's own case reports nothing at all: the
+  01-Jan-2026 payment would discharge the November bills in the forward pass, with no finding and
+  no interest. And **the backward cover must NOT be folded into the forward pass's `want`**:
+  keep a separate `fromBank` accumulator and do `row.liability -= fromBank` only, or the forward
+  pass takes a second bite of the same credit for a booking already settled backwards (run 12 lost
+  ₹202.29 of false short-deduction and ₹0.50 of interest to that). The late-deduction `covers` loop
+  likewise measures covers against `liability + Σ backs` — the PRE-pool amount — since a booking
+  settled entirely backwards has a zero liability and would otherwise raise no row at all.
+  194Q settles at MONTH grain the same way (`QSlot`/`qpool` in the 194Q block): a month's excess
+  settles the oldest earlier uncovered month, never a same-or-earlier one. A back-settled booking
+  is barred from the whole deposit chain (`if (!ded) continue`) — the credit's deposit facts and
+  its 40(a)(ia) base are already reported on its own primary booking, and re-running them would
+  double-count.
+- **A backward settlement's interest reaches the 3CD interest sheets (run 12;
+  `TdsDeduction.backInterestI`).** The sheets sum interest stamped on each DEDUCTION, and a
+  backward settlement is not a deduction — it is what one deduction did to another booking's bill,
+  so run 11 could report the interest in the findings while the workbook showed none. A separate
+  additive field now carries exactly that interest (the per-booking `else cover.ded.backInterestI
+  = round2((… ?? 0) + interest)`, and the 194Q block's stamp moved OFF `interestI` onto it, so one
+  carrier owns all backward interest and nothing counts twice). `tds3cd.ts`'s `interestTdsRows`
+  adds every `backInterestI` to its own quarter of the financial year — the quarter of the CREDIT's
+  date via `quarterOfDate` (FY-based: a January deduction is Q4, not Q1) — gated on
+  `operator.lateDeductionInterest`, and the gate is applied to the whole loop so the component
+  vanishes with the setting. It is added in BOTH the books and the Winman bases and **merged into
+  neither**: on the Winman basis the return's own late-payment computation already charges the
+  payment's own interest (i) on the same deduction, so adding that again would double count, and
+  only the backward charge (bills the return never saw) is added. Narayanan: interest payable
+  38,651.00 → **38,705.00** (+54.00), all in the Q4 row.
 - **A voucher NUMBER is not a voucher identity (run 11; `sameVoucher` in `src/tds.ts`).** Tally
   numbers each voucher type in its own series, so "P/12" is a purchase bill of the year and also
   a journal of the year. A credit joins a booking as sitting on the booking's own voucher only

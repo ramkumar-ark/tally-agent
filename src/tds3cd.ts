@@ -312,6 +312,25 @@ function interestTdsRows(
       byQuarter.set(q, round2((byQuarter.get(q) ?? 0) + amt));
     }
   }
+  // A duty credit that settles bills which were already due when it was
+  // booked (the backward pool, 2026-09-30) earns s.201(1A)(i) on each of them,
+  // and that charge is invisible to both bases above: the books' stamps belong
+  // to a credit's OWN deductions, and the return's allocations know nothing of
+  // a bill the books never deducted. The engine stamps it on the credit
+  // (`TdsDeduction.backInterestI`), gated exactly like every other
+  // late-deduction interest by the operator's toggle, and it is added HERE in
+  // both branches — the payable basis differs with and without a Winman file,
+  // the charge does not. Quarter of the CREDIT, as the books' branch quarters
+  // every other stamp, and additive, so a credit settling several bills
+  // contributes each bill's own interest exactly once (inbox 018).
+  if (operator.lateDeductionInterest) {
+    for (const d of events.deductions) {
+      const amt = d.backInterestI ?? 0;
+      if (amt <= 0) continue;
+      const q = quarterOfDate(d.date);
+      byQuarter.set(q, round2((byQuarter.get(q) ?? 0) + amt));
+    }
+  }
   const rows: Tds3cdInterestRow[] = [];
   for (const q of Q_ORDER) {
     const payable = byQuarter.get(q);

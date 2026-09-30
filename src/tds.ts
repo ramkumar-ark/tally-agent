@@ -243,6 +243,19 @@ export interface TdsDeduction {
   interestI?: number;
   interestII?: number;
   /**
+   * The s.201(1A)(i) interest this credit earns by settling bills that were
+   * already due when it was booked (the backward pool, 2026-09-30) — 1% from
+   * each settled bill's own deductible date to this credit's date. It rides
+   * here, not on `interestI`, because a backward settlement is not one of this
+   * credit's own deductions and the 3CD interest sheets have no other way to
+   * see it (a bill the return never deducted has no allocation of its own).
+   * Additive: one credit can settle several bills, and for 194Q both the
+   * month pass and the per-booking walk may settle the same credit.
+   * `tds3cd` adds it, gated by the operator's `lateDeductionInterest` exactly
+   * like every other late-deduction interest.
+   */
+  backInterestI?: number;
+  /**
    * The draw's expense share (2026-09-26o item 038/039): a lump duty credit
    * split across same-sign debits (per partner) carries each draw's own debit
    * amount, so the clause 21(b) not-deposited rows can name the partner's
@@ -1795,15 +1808,29 @@ export function analyzeTds(
         // 1,114.90 on a party that paid everything (inbox 015, still true in
         // v10's order-of-operations terms).
         if (row.ownTax >= row.base) continue;
-        let want = row.liability;
+        // Only what the backward pass did NOT already settle: the pool is one
+        // pot, and a rupee it gave this booking above can never be spent on it
+        // twice (the captain's 194-C fixture left 9.00 of a 2,750 payment over
+        // and the first bill was shorted by exactly that 9.00).
+        let want = round2(row.liability - row.backs.reduce((t, c) => t + c.tax, 0));
+        let fromBank = 0;
         for (const e of pool) {
           if (want <= ZERO) break;
           if (e.remaining <= ZERO) continue;
+          // An ADVANCE — the credit predates the bill — is the only thing this
+          // direction is for. A credit dated after the bill settles it
+          // BACKWARD, with s.201(1A)(i) interest (the pass above); taking it
+          // here instead would discharge the bill silently.
+          if (e.date > row.b.date) continue;
           const taken = round2(Math.min(e.remaining, want));
           e.remaining = round2(e.remaining - taken);
           want = round2(want - taken);
+          fromBank = round2(fromBank + taken);
         }
-        row.liability = want;
+        // Only what this pass actually took from the pool reduces the
+        // liability; the backward cover stays in it, so the shortfall it leaves
+        // is still reported (inbox 018).
+        row.liability = round2(row.liability - fromBank);
       }
     }
 
@@ -1980,7 +2007,13 @@ export function analyzeTds(
       if (found && ded) covers.push({ ded, tax: row.ownTax, own: true });
       for (const c of row.backs) covers.push({ ...c, own: false });
       covers.sort((x, y) => x.ded.date.localeCompare(y.ded.date));
-      let remaining = liability;
+      // The covers discharge the booking's liability as it stood BEFORE the
+      // forward bank: an advance (the forward pass) is not a cover and carries
+      // no lateness, so adding the backward settlement back is what lets a bill
+      // settled by a LATER credit still report its s.201(1A)(i). `liability` is
+      // the plan's post-bank figure, and `row.liability` is exactly
+      // `base - backs - advance` (inbox 018).
+      let remaining = round2(liability + row.backs.reduce((t, c) => t + c.tax, 0));
       for (const cover of covers) {
         if (remaining <= TDS_TOLERANCE) break;
         const dueAtDate = Math.min(remaining, cover.tax);
@@ -2019,11 +2052,14 @@ export function analyzeTds(
           shielded ? undefined : [{ kind: "i", amount: interest, from: deductibleDate, to: creditDate, basis: `1% of ${months} month(s)` }],
         );
         interestI += interest;
-        // Only a credit the engine PAIRED to this booking is stamped: the 3CD
-        // interest rows are read off the deduction and its shares, and a
-        // backward settlement is neither. Its interest is in the findings and
-        // the totals (a known, recorded limit).
+        // The 3CD interest sheets are read off the deduction and its shares.
+        // A PAIRED credit stamps there; a backward settlement is neither one of
+        // this credit's own deductions nor a share, so it carries its own
+        // s.201(1A)(i) on the credit and `tds3cd` adds it (inbox 018) —
+        // additive, since one credit can settle several bills and the 194Q
+        // month pass settles the same credit again at month grain.
         if (cover.own) stampInterestI(interest);
+        else cover.ded.backInterestI = round2((cover.ded.backInterestI ?? 0) + interest);
       }
       // Deposit checks: the joined deposit was matched in joinEvents.
       // 2026-09-26t (inbox 075, captain): where a Winman return challan covers
@@ -2277,11 +2313,11 @@ export function analyzeTds(
               : undefined,
           );
           interestI += interest;
-          // Additive: the per-booking walk may already have stamped this very
-          // credit for its own booking, and the 3CD interest rows are read off
-          // the deduction (so unlike a per-booking backward settlement, this
-          // one IS visible there).
-          back.ded.interestI = round2((back.ded.interestI ?? 0) + interest);
+          // Additive, and on `backInterestI` rather than `interestI`: the
+          // per-booking walk may already have settled this very credit for a
+          // bill of its own, and the 3CD interest rows add the backward stamp
+          // of its own so the two can never be counted twice (inbox 018).
+          back.ded.backInterestI = round2((back.ded.backInterestI ?? 0) + interest);
         }
         const paidTotal = round2(cred + s.backs.reduce((t, c) => t + c.tax, 0));
         const resid = round2(Math.max(0, liab - paidTotal));

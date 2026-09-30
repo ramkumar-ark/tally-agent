@@ -425,3 +425,105 @@ const emptyEvents = (): TdsEvents => ({ bookings: [], payments: [], deductions: 
 const emptyTotals = (): TdsTotals => ({ bySection: [], notDeducted: 0, shortDeducted: 0, interestI: 0, interestIi: 0 });
 const emptyTcs = (): TcsAnalysis => ({ collections: [], deposits: [], totals: { byNature: [], notDeposited: 0 } });
 const round = (n: number): number => Math.round(n * 100) / 100;
+/**
+ * The backward pool (2026-09-30, inbox 018): a duty credit that settles bills
+ * which were already due when it was booked earns s.201(1A)(i) on each of them,
+ * and that charge is invisible to both interest bases — the books' stamps carry
+ * a credit's OWN deductions, and the return's allocations know nothing of a
+ * bill the books never deducted. The engine stamps it on the credit
+ * (`backInterestI`) and `tds3cd` adds it, gated by the operator's
+ * `lateDeductionInterest` exactly like every other late-deduction interest.
+ */
+describe("3CD interest on a backward settlement (inbox 018)", () => {
+  // The captain's own shape (N. R. BABU, 194-C, FY 25-26): three bills of
+  // 1,12,000 (10-Nov, crossing the 1,00,000 aggregate so the whole booking is
+  // liable), 13,000 (22-Nov) and 12,050 (23-Dec) = 2,240 + 260 + 241 at 2%. One
+  // payment of 2,750 on 01-Jan-2026 pairs to the 23-Dec bill (9 days, inside
+  // the window) and its 2,509 of excess settles the two earlier bills
+  // backward, oldest open first: 2,240 and 260, 3 months late each at 1%
+  // (Nov -> Dec -> Jan) = 67.20 + 7.80.
+  const expenseRows: TdsLedgerRows[] = [
+    {
+      ledger: expenseLedger,
+      rows: [
+        row("20251110", "PU/1", 112000, plainParty),
+        row("20251122", "PU/2", 13000, plainParty),
+        row("20251223", "PU/3", 12050, plainParty),
+      ],
+    },
+  ];
+  const dutyRows: TdsLedgerRows[] = [
+    { ledger: dutyLedger, rows: [row("20260101", "JV/9", -2750, plainParty)] },
+  ];
+  const operatorFor = (lateDeductionInterest: boolean): OperatorFile => ({
+    ...OPERATOR,
+    statements: [{ form: "26Q", quarter: "Q4", filedDate: "20260731", tdsAmount: 2750 }],
+    lateDeductionInterest,
+  });
+  const analysis = (lateDeductionInterest = true) =>
+    analyzeTds(dutyRows, expenseRows, [], { ...ctx, lateDeductionInterest });
+  const run = (lateDeductionInterest: boolean, depositDate: string | null) => {
+    const operator = operatorFor(lateDeductionInterest);
+    const tds = analysis(lateDeductionInterest);
+    // With a Winman return the payable basis is the department's own per-
+    // allocation computation, which knows nothing of the two bills the books
+    // settled by hand — this challan is the credit's own, and what it charges
+    // is added to the backward charge, never merged with it.
+    const challanAllocations = depositDate
+      ? [{ section: "194C", tax: 2750, dedDate: "20260101", paidDate: "", depositDate, interestPaid: 0, challanId: "1" }]
+      : [];
+    return tds3cdRows({ company, tan: null, tds, tcs: emptyTcs(), operator, asOnDate: "20260331", challanAllocations });
+  };
+
+  it("stamps the settlement's interest on the credit, beside its own deduction's", () => {
+    const tds = analysis();
+    const [credit] = tds.events.deductions;
+    // The credit is paired to the 23-Dec bill and carries that bill's own
+    // s.201(1A)(i) (2 months, Dec -> Jan); the two bills it settles backward
+    // ride the separate backward stamp, so the two can never be confused.
+    expect(credit.booking?.voucherNumber).toBe("PU/3");
+    expect(credit.interestI).toBeCloseTo(4.82, 2);
+    expect(credit.backInterestI).toBeCloseTo(75, 2);
+    expect(tds.totals.interestI).toBeCloseTo(79.82, 2);
+    // Nothing is left not-deducted: the pool covered both earlier bills.
+    expect(tds.totals.notDeducted).toBe(0);
+    expect(tds.findings.filter((f) => f.check === "tds_not_deducted")).toEqual([]);
+    // Two of the three late deductions are the backward settlements.
+    const late = tds.findings.filter((f) => f.check === "tds_late_deducted");
+    expect(late.map((f) => f.amount).sort((a, b) => b - a)).toEqual([2240, 260, 241]);
+  });
+
+  it("adds it to the interest rows on the books' basis, with no Winman file", () => {
+    // Own interest (4.82) + backward (75.00), rounded once at the quarter. The
+    // quarter is the CREDIT's, and a January deduction is Q4 of the financial
+    // year (Apr-Mar), like every other stamp on the sheet.
+    expect(run(true, null).interestTds).toEqual([{ form: "26Q", quarter: "Q4", payable: 80 }]);
+  });
+
+  it("adds it to the Winman per-allocation basis too, once, beside the challan's own interest", () => {
+    // With a return in hand the payable basis is the department's own per-
+    // allocation computation, which charges nothing for a challan inside the
+    // Rule 30 window (07-Feb) and never saw the two bills at all — so the
+    // sheet carries the settlement alone, 75.00. The credit's own 4.82 is
+    // deliberately NOT added here: the books' basis already counts it, and the
+    // return's computation is the one that governs once a return is in hand.
+    expect(run(true, "20260207").interestTds).toEqual([{ form: "26Q", quarter: "Q4", payable: 75 }]);
+    // Deposited late, the challan is charged by its own allocation first — a
+    // January deduction was due 07-Feb, so 07-Apr is 4 months late at 1.5% of
+    // 2,750 = 165.00 — and the backward charge is added on top, never merged
+    // into it: 165.00 + 75.00 = 240.00.
+    expect(run(true, "20260407").interestTds).toEqual([{ form: "26Q", quarter: "Q4", payable: 240 }]);
+  });
+
+  it("carries nothing when the operator turns late-deduction interest off", () => {
+    // The engine raises no late-deduction finding and stamps nothing, so the
+    // books' basis has no payable at all and the row is absent.
+    expect(run(false, null).interestTds).toEqual([]);
+    // An on-time challan leaves the Winman basis with no payable either, so
+    // there is no row to print.
+    expect(run(false, "20260207").interestTds).toEqual([]);
+    // A late challan still carries its own s.201(1A)(ii) — only the
+    // late-DEDUCTION component follows the toggle.
+    expect(run(false, "20260407").interestTds).toEqual([{ form: "26Q", quarter: "Q4", payable: 165 }]);
+  });
+});
