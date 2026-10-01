@@ -12,9 +12,10 @@ import type { Clause21bBookRow, TdsLiability } from "./tds.js";
  * re-runs the engine — it reads the run's own rows and joins them by id.
  *
  * The interest is the review's OWN schedule: `calendarMonths`, `depositDue` and
- * `interestOn` from `src/tds-law.ts`, at the same 1% / 1.5% rates, simply
- * re-parameterised to the payment date. There is deliberately no second
- * interest formula in this project.
+ * `interestOn` from `src/tds-law.ts`, at the same 1% / 1.5% rates — leg (i)
+ * from booking to deduction date, leg (ii) from deduction date to payment date
+ * when the payment is past the deduction's Rule 30 due date. There is
+ * deliberately no second interest formula in this project.
  *
  * Real party names and PANs appear on these rows, so they belong on the
  * operator's disk and in the session cache only — never in a finding, an error
@@ -202,7 +203,8 @@ export interface TdsPayableStatementRow {
   amountPaid: number;
   taxPayable: number;
   taxDeducted: number;
-  deductionDate: string | null;
+  /** The date of deduction the row is priced on — the operator's, or the period's end. */
+  deductionDate: string;
   rate: number | null;
   shortfall: number;
   interestI: number;
@@ -243,6 +245,25 @@ const emptyTotals = (): TdsPayableTotals => ({
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
+/**
+ * The base a row's figures hang off: `TDS to be paid ÷ rate`, so that
+ * `amount × rate = TDS to be paid` exactly, to the paisa
+ * (`round2(round2(s / r) * r) === s` for every rate the law table holds).
+ * The statement's "Amount paid or credited" and the decisions workbook's
+ * amount column are both this figure — the expense the shortfall sits on is
+ * not what the statement is about when the threshold section charged the tax
+ * on a smaller base.
+ *
+ * A row with no rate (the section is outside the law table) keeps its own
+ * expense figure: there is nothing to divide by, and guessing a rate would
+ * break the identity silently.
+ */
+export function payableBase(
+  c: Pick<TdsPayableCandidate, "shortfall" | "rate" | "amountPaid">,
+): number {
+  return c.rate !== null && c.rate > 0 ? round2(c.shortfall / c.rate) : round2(c.amountPaid);
+}
+
 const addTotals = (t: TdsPayableTotals, r: TdsPayableStatementRow): TdsPayableTotals => ({
   amountPaid: round2(t.amountPaid + r.amountPaid),
   taxPayable: round2(t.taxPayable + r.taxPayable),
@@ -271,19 +292,26 @@ export function openFindings(
 
 /**
  * One Accepted finding as a statement row, with the s.201(1A) interest the
- * existing schedule gives, measured to the payment date:
+ * existing schedule gives, measured to the payment date.
  *
- * - a `not_deposited` finding's tax WAS deducted and was not deposited, so the
- *   late-deposit leg runs from its deduction date to the payment date (the
- *   Rule 30 due date only decides whether leg (ii) is charged at all), and the
- *   late-deduction leg runs when the credit postdates the booking;
- * - an undeducted or short-deducted shortfall is deemed deducted when the
- *   challan is paid, so its late-deposit leg is zero by construction and its
- *   deposit-due date is the Rule 30 date after the payment.
+ * `deductionDate` is the date the operator declares on the decisions workbook
+ * (or the review period's end when they declare none): the date the tax is
+ * treated as deducted. Then, exactly as `analyzeTds` measures it:
+ *
+ * - leg (i) at 1% runs from the booking to that deduction date;
+ * - leg (ii) at 1.5% runs from that deduction date to the payment date, and is
+ *   charged only when the payment is past the deduction's own Rule 30 due date;
+ * - the deposit due date is that Rule 30 date (7th of the next month,
+ *   30-Apr for March) — never the date after the payment.
+ *
+ * A `not_deposited` finding's tax WAS deducted and was not deposited, so its
+ * deduction date is the books' own — the operator's declaration never moves it.
  */
 export function statementRow(args: {
   candidate: TdsPayableCandidate;
   paymentDate: string;
+  /** The declared deduction date, YYYYMMDD; used by every check but not_deposited. */
+  deductionDate: string;
   pan: string | null;
   panFromGstin: boolean;
 }): TdsPayableStatementRow {
@@ -291,26 +319,27 @@ export function statementRow(args: {
   const shortfall = round2(c.shortfall);
   const deemed = c.check !== "tds_not_deposited";
   // The date the credit is treated as made: the books' own deduction date for
-  // a not-deposited row, and the payment date itself for a shortfall that was
-  // never deducted at all.
-  const creditDate = deemed ? paymentDate : c.deductionDate ?? c.date;
+  // a not-deposited row, and the operator's declaration for a shortfall.
+  const creditDate = deemed ? args.deductionDate : c.deductionDate ?? c.date;
   // The Rule 30 due date of the ORIGINAL deduction or booking — 7th of the
-  // next month, 30-Apr for a March deduction. Never the payment date's: a
-  // shortfall that was never deducted is due on the booking's own Rule 30
-  // date, and showing the date after the payment would tell the operator
-  // nothing about when the liability arose.
-  const depositDueDate = depositDue(deemed ? c.date : creditDate);
-  const interestI = deemed
-    ? interestOn(0.01, calendarMonths(c.date, paymentDate), shortfall)
-    : creditDate > c.date
-      ? interestOn(0.01, calendarMonths(c.date, creditDate), shortfall)
-      : 0;
+  // next month, 30-Apr for a March deduction. Never the payment date's: the
+  // date after the payment tells the operator nothing about when the liability
+  // arose, and it is what made every late row look on time.
+  const depositDueDate = depositDue(creditDate);
+  // Leg (i): 1% per month-or-part from the booking to the deduction date. A
+  // deduction made before the booking owes nothing. Both legs are rounded as
+  // they are shown, and the row's total is the sum of those two figures —
+  // never round2 of the unrounded sum, or two rows carried a paisa the
+  // displayed columns did not add up to (1631.80 of legs vs 1631.82 total).
+  const interestI = round2(creditDate > c.date
+    ? interestOn(0.01, calendarMonths(c.date, creditDate), shortfall)
+    : 0);
   // Leg (ii) is measured from the DEDUCTION date to the payment date, exactly
   // as `analyzeTds` and the 3CD interest schedule measure it; the Rule 30 due
   // date is the trigger for charging at all, never the start of the clock.
-  const interestII = deemed || paymentDate <= depositDueDate
+  const interestII = round2(paymentDate <= depositDueDate
     ? 0
-    : interestOn(0.015, calendarMonths(creditDate, paymentDate), shortfall);
+    : interestOn(0.015, calendarMonths(creditDate, paymentDate), shortfall));
   const interest = round2(interestI + interestII);
   return {
     findingId: c.findingId,
@@ -320,14 +349,14 @@ export function statementRow(args: {
     panFromGstin: args.panFromGstin,
     partyKind: partyKindOf(pan),
     section: c.section,
-    amountPaid: round2(c.amountPaid),
+    amountPaid: payableBase(c),
     taxPayable: round2(c.taxPayable),
     taxDeducted: round2(c.taxDeducted),
     deductionDate: creditDate,
     rate: c.rate,
     shortfall,
-    interestI: round2(interestI),
-    interestII: round2(interestII),
+    interestI,
+    interestII,
     interest,
     depositDueDate,
   };
@@ -338,11 +367,20 @@ export function statementRow(args: {
  * finding is undecided, naming the open ones: an undecided row is not a
  * decision, and a statement that silently dropped it would understate the
  * challan.
+ *
+ * `periodEnd` is the review period's end (the run's `toDate`) — the date of
+ * deduction used for any row whose operator did not enter one in
+ * `deductionDates`. Both it and every entered date are checked for the
+ * YYYYMMDD shape before any figure is computed from them.
  */
 export function buildStatement(args: {
   candidates: readonly TdsPayableCandidate[];
   decisions: ReadonlyMap<string, PayableDecision>;
   paymentDate: string;
+  /** The run's toDate, YYYYMMDD — the default date of deduction. */
+  periodEnd: string;
+  /** Operator-entered dates of deduction, by finding id. Missing ⇒ periodEnd. */
+  deductionDates?: ReadonlyMap<string, string>;
   panOf: (party: string) => string | null;
   panDerivedFromGstinOf: (party: string) => boolean;
 }): TdsPayableStatement {
@@ -350,9 +388,20 @@ export function buildStatement(args: {
   if (!isYmd(paymentDate)) {
     throw new Error("payment date must be written YYYYMMDD");
   }
+  if (!isYmd(args.periodEnd)) {
+    throw new Error("the review period end must be written YYYYMMDD");
+  }
   if (candidates.length === 0) {
     throw new Error("this review has no critical findings: there is nothing to pay");
   }
+  const deductionDateOf = (id: string): string => {
+    const entered = args.deductionDates?.get(id);
+    if (entered === undefined) return args.periodEnd;
+    if (!isYmd(entered)) {
+      throw new Error(`${id}: the date of deduction must be written YYYYMMDD`);
+    }
+    return entered;
+  };
   const open = openFindings(candidates, decisions);
   if (open.length > 0) {
     throw new Error(
@@ -368,6 +417,7 @@ export function buildStatement(args: {
       statementRow({
         candidate: c,
         paymentDate,
+        deductionDate: deductionDateOf(c.findingId),
         pan: c.party ? args.panOf(c.party) : null,
         panFromGstin: c.party ? args.panDerivedFromGstinOf(c.party) : false,
       }),

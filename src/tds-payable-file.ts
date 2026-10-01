@@ -5,6 +5,8 @@ import {
   bindColumns,
   colLetter,
   dataRows,
+  dateCell,
+  normHeader,
   raw,
   textCell,
   type CellRef,
@@ -33,12 +35,21 @@ export interface TdsPayableOperatorFile {
   decisions: Map<string, PayableDecision>;
   /** Ids present on the sheet with no Decision cell — the open ones. */
   undecided: string[];
+  /**
+   * finding id → the operator's own date of deduction (YYYYMMDD). Absent for a
+   * row whose cell is blank or whose sheet carries no such column — the
+   * statement then prices the row at the review period's end. Optional by
+   * design: an older workbook (v18 and earlier) has the column with no dates
+   * in it, and a workbook without the column at all still parses.
+   */
+  deductionDates: Map<string, string>;
 }
 
 /** What an absent or wholly blank decisions workbook parses to. */
 export const EMPTY_PAYABLE_OPERATOR: TdsPayableOperatorFile = {
   decisions: new Map(),
   undecided: [],
+  deductionDates: new Map(),
 };
 
 const RUN_FIELDS = [
@@ -168,7 +179,19 @@ export function parsePayableDecisions(
   );
   const idCol = cols.get("Finding ID")!;
   const decCol = cols.get("Decision")!;
+  // The Date of deduction column is operator input and therefore OPTIONAL:
+  // looked up by header text (never by position), and simply absent when the
+  // workbook carries no such header — which is how v18 reads.
+  let dateCol: number | undefined;
+  for (const [idx, c] of findings.rows[0]?.cells ?? new Map()) {
+    if (typeof c.value !== "string" || c.value.trim() === "") continue;
+    if (normHeader(c.value) === normHeader("Date of deduction")) {
+      dateCol = idx;
+      break;
+    }
+  }
   const decisions = new Map<string, PayableDecision>();
+  const deductionDates = new Map<string, string>();
   const undecided: string[] = [];
   const firstRow = new Map<string, number>();
   for (const row of dataRows(findings)) {
@@ -191,11 +214,22 @@ export function parsePayableDecisions(
     const d = decision({ sheet: findings, row, col: decCol, header: "Decision" }, row.cells.get(decCol));
     decisions.set(id, d);
     if (d === null) undecided.push(id);
+    if (dateCol !== undefined) {
+      // Blank means "not entered": the statement falls back to the period's
+      // end, which is exactly what the instructions tell the operator.
+      const v = raw(row.cells.get(dateCol)).value;
+      if (v !== null && String(v).trim() !== "") {
+        deductionDates.set(
+          id,
+          dateCell({ sheet: findings, row, col: dateCol, header: "Date of deduction" }, row.cells.get(dateCol)),
+        );
+      }
+    }
   }
   // A row the operator deleted is not a decision: report it open rather than
   // silently shrinking the statement.
   for (const id of expectedFindingIds) {
     if (!firstRow.has(id)) undecided.push(id);
   }
-  return { decisions, undecided };
+  return { decisions, undecided, deductionDates };
 }

@@ -417,6 +417,8 @@ export interface TdsPayableStatementResult {
     amountPaid: number;
     taxPayable: number;
     taxDeducted: number;
+    /** The date of deduction the row was priced on — the operator's, or the period's end. */
+    deductionDate: string;
     rate: number | null;
     shortfall: number;
     interestI: number;
@@ -4736,12 +4738,16 @@ export function createSession(
           },
           candidates.map((c) => c.findingId),
         )
-      : input.operator ?? { decisions: new Map<string, PayableDecision>(), undecided: [] };
+      : input.operator ?? { decisions: new Map<string, PayableDecision>(), undecided: [], deductionDates: new Map() };
 
     const statement = buildStatement({
       candidates,
       decisions: operator.decisions,
       paymentDate: input.paymentDate,
+      // The default date of deduction for a row the operator left blank: the
+      // review period's own end. Their entry always wins.
+      periodEnd: books.toDate,
+      deductionDates: operator.deductionDates,
       panOf: books.panOf,
       panDerivedFromGstinOf: books.panDerivedFromGstinOf,
     });
@@ -4795,6 +4801,7 @@ export function createSession(
         amountPaid: r.amountPaid,
         taxPayable: r.taxPayable,
         taxDeducted: r.taxDeducted,
+        deductionDate: displayDate(r.deductionDate),
         rate: r.rate,
         shortfall: r.shortfall,
         interestI: r.interestI,

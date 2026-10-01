@@ -1724,10 +1724,28 @@ When updating this file, preserve this bar for all agents and keep entries conci
   Non-company kind are a FIRM's reduced rate** (4th char `F`), not a
   mis-resolved rate, and no operator certificate was involved: the
   Certificates sheet of the DRAFT-20260928 template parses to zero rows
-  (`op.certificates.length === 0`), so a certificate is never the explanation
+  (  `op.certificates.length === 0`), so a certificate is never the explanation
   for a rate on that channel. Read the certificate sheet through
   `parseOperatorTemplate` rather than sheet XML, whose cells were numeric
   only.
+- **The v19 rework (design addendum §13)** supersedes the bullets above on
+  three points, all firstmate's spec: (a) the amount column on BOTH workbooks
+  is `payableBase(c) = round2(shortfall / rate)` so `amount × rate = TDS to be
+  paid` to the paisa (falls back to the row's expense only when no rate
+  resolves); (b) the statement drops `TDS that should have been deducted` /
+  `TDS actually deducted` and renames `Shortfall to pay` → **`TDS to be paid`**
+  (the decisions workbook keeps those columns as context), so a statement
+  title/summary edit must move in step with `statementColumns` — the header
+  row index is still 9 with exactly 8 title lines; (c) the **date of deduction
+  is operator input defaulting to `periodEnd`** (`buildStatement` takes
+  `periodEnd` + the `deductionDates` map, both YYYYMMDD-checked) and the
+  interest re-parameterises to IT, not to the payment date: leg (i) booking →
+  that date, leg (ii) that date → payment only past `depositDue(that date)`,
+  which is also the deposit-due-date column (30-Apr-2026 for 31-Mar-2026).
+  `tds_not_deposited` keeps the books' own date. The `Date of deduction`
+  column is OPTIONAL in `parsePayableDecisions` (absent header / blank cell ⇒
+  no date) so the filled v18 workbook still parses, and the statement result
+  rows now carry `deductionDate` for the ready report.
 
 ## Winman 3CD depreciation (clause 18 additions/deletions, 2026-09-27)
 

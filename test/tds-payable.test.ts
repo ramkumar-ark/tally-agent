@@ -225,40 +225,78 @@ describe("openFindings", () => {
 
 describe("s.201(1A) interest on the statement", () => {
   const PAYMENT = "20261031";
+  /** The default date of deduction: the review period's own end. */
+  const PERIOD_END = "20260331";
 
-  it("charges an undeducted shortfall 1% from its deductible date to the payment date", () => {
+  it("prices an undeducted shortfall on its declared deduction date, not on the payment date", () => {
     const row = statementRow({
       candidate: candidate({ findingId: "TDS-001-1", date: "20250510", shortfall: 5000 }),
       paymentDate: PAYMENT,
+      deductionDate: PERIOD_END,
       pan: null,
       panFromGstin: false,
     });
-    const expectedI = interestOn(0.01, calendarMonths("20250510", PAYMENT), 5000);
-    expect(calendarMonths("20250510", PAYMENT)).toBe(18);
-    expect(row.interestI).toBeCloseTo(expectedI, 2);
-    expect(row.interestI).toBeCloseTo(900, 2);
-    // Deemed deduction on payment: no late-deposit leg.
-    expect(row.interestII).toBe(0);
-    // The due date is the BOOKING's Rule 30 date — 7th of the next month —
-    // never the date after the payment the challan is dated to.
-    expect(row.depositDueDate).toBe(depositDue("20250510"));
-    expect(row.depositDueDate).toBe("20250607");
+    // Leg (i) at 1% runs from the booking to the deduction date — 11 months,
+    // not the 18 to the payment date the old schedule measured.
+    expect(calendarMonths("20250510", PERIOD_END)).toBe(11);
+    expect(row.interestI).toBeCloseTo(interestOn(0.01, calendarMonths("20250510", PERIOD_END), 5000), 2);
+    expect(row.interestI).toBeCloseTo(550, 2);
+    // Leg (ii) at 1.5% runs from the deduction date to the payment date, and
+    // is owed because the payment is past that deduction's Rule 30 due date.
+    const due = depositDue(PERIOD_END);
+    expect(due).toBe("20260430");
+    expect(row.depositDueDate).toBe(due);
+    expect(PAYMENT > due).toBe(true);
+    expect(row.interestII).toBeCloseTo(interestOn(0.015, calendarMonths(PERIOD_END, PAYMENT), 5000), 2);
+    expect(row.interestII).toBeCloseTo(600, 2);
+    expect(row.interest).toBeCloseTo(row.interestI + row.interestII, 2);
+    expect(row.deductionDate).toBe(PERIOD_END);
     expect(row.depositDueDate).not.toBe("20261107");
-    expect(row.deductionDate).toBe(PAYMENT);
-    expect(row.interest).toBe(row.interestI);
+    // The base is TDS to be paid ÷ rate, so amount × rate = TDS to be paid.
+    expect(Math.round(row.amountPaid * (row.rate ?? 0) * 100) / 100).toBe(row.shortfall);
   });
 
-  it("shows a March booking's Rule 30 date of 30-Apr, on the shortfall rows too", () => {
+  it("totals the two displayed legs, never the unrounded sum behind them", () => {
+    // 2982.04 for 2 months at 1% = 59.6408 (shown 59.64) and for 8 months at
+    // 1.5% = 357.8448 (shown 357.84). The unrounded sum rounds to 417.49,
+    // which is a paisa more than the two columns the operator reads add up to.
+    const row = statementRow({
+      candidate: candidate({ findingId: "TDS-001-9", date: "20260201", shortfall: 2982.04 }),
+      paymentDate: PAYMENT,
+      deductionDate: PERIOD_END,
+      pan: null,
+      panFromGstin: false,
+    });
+    expect(row.interestI).toBe(59.64);
+    expect(row.interestII).toBe(357.84);
+    expect(row.interest).toBe(417.48);
+    expect(row.interest).toBeCloseTo(row.interestI + row.interestII, 2);
+  });
+
+  it("charges no leg (ii) while the payment sits inside the deduction's Rule 30 window", () => {
+    const row = statementRow({
+      candidate: candidate({ findingId: "TDS-001-2", date: "20260315", shortfall: 250 }),
+      paymentDate: "20260420",
+      deductionDate: "20260331",
+      pan: null,
+      panFromGstin: false,
+    });
+    expect(row.depositDueDate).toBe("20260430");
+    expect(row.interestII).toBe(0);
+  });
+
+  it("shows a March deduction's Rule 30 date of 30-Apr, on the shortfall rows too", () => {
     // Rule 30's own carve-out: a March deduction is due on 30 April.
     for (const check of ["tds_not_deducted", "tds_short_deducted"]) {
       const row = statementRow({
         candidate: candidate({ findingId: "TDS-001-9", check, date: "20260315", shortfall: 250 }),
         paymentDate: PAYMENT,
+        deductionDate: "20260331",
         pan: null,
         panFromGstin: false,
       });
       expect(row.depositDueDate).toBe("20260430");
-      expect(row.depositDueDate).toBe(depositDue("20260315"));
+      expect(row.depositDueDate).toBe(depositDue("20260331"));
     }
   });
 
@@ -273,6 +311,9 @@ describe("s.201(1A) interest on the statement", () => {
         deductionDate: "20250620",
       }),
       paymentDate: PAYMENT,
+      // The books' own date wins whatever the operator declares: the tax WAS
+      // deducted, on a date the books know.
+      deductionDate: PERIOD_END,
       pan: null,
       panFromGstin: false,
     });
@@ -300,6 +341,7 @@ describe("s.201(1A) interest on the statement", () => {
         deductionDate: "20250510",
       }),
       paymentDate: PAYMENT,
+      deductionDate: PERIOD_END,
       pan: null,
       panFromGstin: false,
     });
@@ -321,6 +363,7 @@ describe("s.201(1A) interest on the statement", () => {
       ],
       decisions: decisionsOf(["TDS-001-1", "TDS-001-2"], "Accept"),
       paymentDate: PAYMENT,
+      periodEnd: PERIOD_END,
       panOf: (p) => (p === "Sample Ltd" ? COMPANY_PAN : null),
       panDerivedFromGstinOf: () => false,
     });
@@ -328,6 +371,16 @@ describe("s.201(1A) interest on the statement", () => {
     expect(st.rows.every((r) => r.interest === Math.round((r.interestI + r.interestII) * 100) / 100)).toBe(true);
     expect(st.totals.shortfall).toBeCloseTo(2234.56, 2);
     expect(st.totals.payable).toBeCloseTo(st.totals.shortfall + st.totals.interest, 2);
+    // The amount column is the base, so amount × rate = TDS to be paid on
+    // every row, to the paisa — the identity the statement is built on.
+    for (const r of st.rows) {
+      expect(r.rate).not.toBeNull();
+      expect(Math.round(r.amountPaid * (r.rate ?? 0) * 100) / 100).toBe(r.shortfall);
+    }
+    expect(st.totals.amountPaid).toBeCloseTo(
+      st.rows.reduce((a, r) => a + r.amountPaid, 0),
+      2,
+    );
     // A candidate carrying no PAN is its own bucket, and it still reconciles.
     expect(st.byPartyKind.map((g) => g.kind)).toEqual(["Company", "Not determinable (no PAN)"]);
     const sum = st.byPartyKind.reduce((a, g) => a + g.totals.payable, 0);
@@ -343,6 +396,7 @@ describe("buildStatement", () => {
         candidates: cands,
         decisions: new Map([["TDS-001-1", "Accept"]]),
         paymentDate: "20261031",
+        periodEnd: "20260331",
         panOf: () => null,
         panDerivedFromGstinOf: () => false,
       }),
@@ -352,6 +406,7 @@ describe("buildStatement", () => {
         candidates: cands,
         decisions: new Map([["TDS-001-1", "Accept"]]),
         paymentDate: "20261031",
+        periodEnd: "20260331",
         panOf: () => null,
         panDerivedFromGstinOf: () => false,
       });
@@ -361,13 +416,62 @@ describe("buildStatement", () => {
   });
 
   it("refuses a payment date that is not YYYYMMDD, and a run with nothing to pay", () => {
-    const base = { candidates: [candidate({ findingId: "TDS-001-1" })], panOf: () => null, panDerivedFromGstinOf: () => false };
+    const base = {
+      candidates: [candidate({ findingId: "TDS-001-1" })],
+      periodEnd: "20260331",
+      panOf: () => null,
+      panDerivedFromGstinOf: () => false,
+    };
     expect(() =>
       buildStatement({ ...base, decisions: decisionsOf(["TDS-001-1"], "Accept"), paymentDate: "31-10-2026" }),
     ).toThrow(/payment date must be written YYYYMMDD/);
     expect(() =>
+      buildStatement({ ...base, periodEnd: "31-03-2026", decisions: decisionsOf(["TDS-001-1"], "Accept"), paymentDate: "20261031" }),
+    ).toThrow(/review period end must be written YYYYMMDD/);
+    expect(() =>
       buildStatement({ ...base, candidates: [], decisions: new Map(), paymentDate: "20261031" }),
     ).toThrow(/no critical findings/);
+  });
+
+  it("prices every row on the operator's date of deduction, else on the period's end", () => {
+    const cands = [
+      candidate({ findingId: "TDS-001-1", date: "20250510" }),
+      candidate({ findingId: "TDS-002-1", date: "20250610", shortfall: 900 }),
+    ];
+    const st = buildStatement({
+      candidates: cands,
+      decisions: decisionsOf(["TDS-001-1", "TDS-002-1"], "Accept"),
+      paymentDate: "20261031",
+      periodEnd: "20260331",
+      // Only the first row carries an entered date; the second falls back.
+      deductionDates: new Map([["TDS-001-1", "20251007"]]),
+      panOf: () => null,
+      panDerivedFromGstinOf: () => false,
+    });
+    const byId = new Map(st.rows.map((r) => [r.findingId, r]));
+    expect(byId.get("TDS-001-1")!.deductionDate).toBe("20251007");
+    expect(byId.get("TDS-001-1")!.depositDueDate).toBe(depositDue("20251007"));
+    expect(byId.get("TDS-002-1")!.deductionDate).toBe("20260331");
+    expect(byId.get("TDS-002-1")!.depositDueDate).toBe("20260430");
+    // Leg (i) on the first row stops at its own deduction date.
+    expect(byId.get("TDS-001-1")!.interestI).toBeCloseTo(
+      interestOn(0.01, calendarMonths("20250510", "20251007"), 5000),
+      2,
+    );
+  });
+
+  it("refuses an operator date of deduction that is not YYYYMMDD", () => {
+    expect(() =>
+      buildStatement({
+        candidates: [candidate({ findingId: "TDS-001-1" })],
+        decisions: decisionsOf(["TDS-001-1"], "Accept"),
+        paymentDate: "20261031",
+        periodEnd: "20260331",
+        deductionDates: new Map([["TDS-001-1", "07-10-2025"]]),
+        panOf: () => null,
+        panDerivedFromGstinOf: () => false,
+      }),
+    ).toThrow(/TDS-001-1: the date of deduction must be written YYYYMMDD/);
   });
 
   it("prices only the Accepted rows and counts the rejected ones", () => {
@@ -378,6 +482,7 @@ describe("buildStatement", () => {
       ],
       decisions: new Map([["TDS-001-1", "Accept"], ["TDS-002-1", "Reject"]]),
       paymentDate: "20261031",
+      periodEnd: "20260331",
       panOf: () => null,
       panDerivedFromGstinOf: () => false,
     });
@@ -435,6 +540,58 @@ describe("the decisions workbook", () => {
     const parsed = parsePayableDecisions(buf, IDENTITY, IDENTITY.findingIds);
     expect([...parsed.decisions.entries()]).toEqual([["TDS-001-1", null], ["TDS-002-1", null]]);
     expect(parsed.undecided).toEqual(["TDS-001-1", "TDS-002-1"]);
+    // Blank Date of deduction cells parse to nothing, so the statement falls
+    // back to the period's end for both rows.
+    expect(parsed.deductionDates.size).toBe(0);
+    // The amount column is the base: round2(TDS to be paid ÷ rate), not the
+    // expense the books charged.
+    const amounts = headersAt(sheet(buf, "Findings"), 1).indexOf("Amount paid or credited");
+    const amountOf = (id: string): number => {
+      const s = sheet(buf, "Findings");
+      const r = s.rows.find((x) => String(x.cells.get(0)?.value ?? "") === id);
+      return Number(r?.cells.get(amounts)?.value ?? 0);
+    };
+    expect(amountOf("TDS-001-1")).toBe(250000); // 5000 ÷ 0.02
+    expect(amountOf("TDS-002-1")).toBe(45000); // 900 ÷ 0.02
+    expect(Math.round(amountOf("TDS-001-1") * 0.02 * 100) / 100).toBe(5000);
+    expect(Math.round(amountOf("TDS-002-1") * 0.02 * 100) / 100).toBe(900);
+  });
+
+  it("reads an operator's date of deduction back, and tolerates a sheet with no such column", () => {
+    const withDate = buildWorkbook([
+      {
+        name: "Findings",
+        columns: [
+          { header: "Finding ID", format: "text" },
+          { header: "Date of deduction", format: "text" },
+          { header: "Decision", format: "text" },
+        ],
+        rows: [
+          ["TDS-001-1", "2025-11-07", "Accept"],
+          // Blank date: the period's end applies.
+          ["TDS-002-1", "", "Accept"],
+        ],
+      },
+      {
+        name: "Run",
+        columns: [{ header: "Field", format: "text" }, { header: "Value", format: "text" }],
+        rows: [
+          ["company", IDENTITY.company],
+          ["fromDate", IDENTITY.fromDate],
+          ["toDate", IDENTITY.toDate],
+          ["asOnDate", IDENTITY.asOnDate],
+          ["criticalCount", String(IDENTITY.criticalCount)],
+          ["digest", payableRunDigest(IDENTITY)],
+        ],
+      },
+    ]);
+    const parsed = parsePayableDecisions(withDate, IDENTITY, IDENTITY.findingIds);
+    expect([...parsed.deductionDates.entries()]).toEqual([["TDS-001-1", "20251107"]]);
+    // The crafted() workbook below carries no Date of deduction column at all:
+    // an older file parses, it simply declares no dates.
+    const noColumn = parsePayableDecisions(crafted([["TDS-001-1", "Accept"]]), IDENTITY, IDENTITY.findingIds);
+    expect(noColumn.deductionDates.size).toBe(0);
+    expect(noColumn.decisions.get("TDS-001-1")).toBe("Accept");
   });
 
   it("reads Accept and Reject back off the sheet, case-insensitively", () => {
@@ -449,6 +606,7 @@ describe("the decisions workbook", () => {
       candidates: CANDIDATES,
       decisions: parsed.decisions,
       paymentDate: "20261031",
+      periodEnd: "20260331",
       panOf: () => COMPANY_PAN,
       panDerivedFromGstinOf: () => false,
     });
@@ -591,6 +749,7 @@ describe("the decisions workbook", () => {
       candidates: CANDIDATES,
       decisions: decisionsOf(["TDS-001-1", "TDS-002-1"], "Accept"),
       paymentDate: "20261031",
+      periodEnd: "20260331",
       panOf: (p) => (p === "Sample Ltd" ? COMPANY_PAN : GSTIN.slice(2, 12)),
       panDerivedFromGstinOf: (p) => p !== "Sample Ltd",
     });
@@ -599,12 +758,19 @@ describe("the decisions workbook", () => {
     const head = headersAt(sheet(buf, "Payable statement"), 9); // eight title lines first
     for (const h of [
       "Date of booking", "Party", "Party PAN", "Company or non-company",
-      "Amount paid or credited", "TDS that should have been deducted", "TDS actually deducted",
-      "Date of deduction", "Rate of deduction", "Shortfall to pay",
+      "Amount paid or credited", "Date of deduction", "Rate of deduction", "TDS to be paid",
+      "Interest (i) at 1%", "Interest (ii) at 1.5%",
       "Interest due u/s 201(1A) to the payment date", "Deposit due date",
+      "Finding ID", "Section",
     ]) {
       expect(head).toContain(h);
     }
+    // The review-fact columns are gone: the statement is a payable list, not a
+    // restatement of what the review charged.
+    expect(head).not.toContain("TDS that should have been deducted");
+    expect(head).not.toContain("TDS actually deducted");
+    expect(head).not.toContain("Shortfall to pay");
+    expect(head).toHaveLength(14);
     // The PANs are on the operator's disk: one from the master, one derived
     // from the GSTIN, and the company flag follows each.
     const text = allCellText(buf);
@@ -616,8 +782,14 @@ describe("the decisions workbook", () => {
     const labels = columnA(summarySheet);
     expect(labels).toContain("Total payable");
     expect(labels).toContain("Total interest due u/s 201(1A)");
+    expect(labels).toContain("Total TDS to be paid");
+    expect(labels).toContain("Total amount paid or credited");
     expect(labels).toContain("By section");
     expect(labels).toContain("By company status");
+    // The review-fact headlines are gone from the summary too.
+    expect(labels).not.toContain("TDS that should have been deducted");
+    expect(labels).not.toContain("TDS actually deducted");
+    expect(labels).not.toContain("Total tax payable to date");
     // The company / non-company split is on the summary and reconciles to the
     // headline total. A headline row carries its amount in column B; a group row
     // carries Payable in column G.
@@ -627,6 +799,11 @@ describe("the decisions workbook", () => {
     };
     const headline = cellOf("Total payable", 1);
     expect(headline).toBeGreaterThan(0);
+    // The total amount is the sum of the new bases — one per row.
+    const sumAmount = st.rows.reduce((a, r) => a + r.amountPaid, 0);
+    expect(cellOf("Total amount paid or credited", 1)).toBeCloseTo(sumAmount, 2);
+    const totalsRowCells = sheet(buf, "Payable statement").rows.find((r) => String(r.cells.get(1)?.value ?? "") === "Total");
+    expect(Number(totalsRowCells?.cells.get(4)?.value ?? 0)).toBeCloseTo(sumAmount, 2);
     expect(cellOf("Company", 6)).toBeGreaterThan(0);
     expect(cellOf("Company", 6) + cellOf("Non-company", 6)).toBeCloseTo(headline, 2);
     // And so does the by-section split.

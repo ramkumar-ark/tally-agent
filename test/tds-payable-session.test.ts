@@ -7,6 +7,8 @@ import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { EMPTY_WRONG_GROUP } from "../src/types.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { EMPTY_TDS_OPERATOR, type OperatorFile } from "../src/tds-file.js";
+import { calendarMonths, depositDue, interestOn } from "../src/tds-law.js";
+import { displayDate } from "../src/format.js";
 import {
   buildPayableDecisions,
   payableRunDigest,
@@ -110,6 +112,8 @@ const decideInPlace = (
   generated: Buffer,
   identity: PayableRunIdentity,
   decide: (findingId: string) => "Accept" | "Reject" | null,
+  /** The operator's own dates of deduction, by finding id — Excel typing them in. */
+  dates: Record<string, string> = {},
 ): string => {
   const grid = readWorkbook(generated).find((s) => s.name === "Findings");
   if (!grid) throw new Error("no Findings sheet");
@@ -122,11 +126,15 @@ const decideInPlace = (
   };
   const idCol = colOf("Finding ID");
   const decCol = colOf("Decision");
-  const rows = grid.rows.slice(1).map((r) =>
-    cols.map(([idx]) =>
-      idx === decCol ? decide(String(r.cells.get(idCol)?.value ?? "")) : r.cells.get(idx)?.value ?? null,
-    ),
-  );
+  const dateCol = cols.find(([, c]) => String(c.value) === "Date of deduction")?.[0];
+  const rows = grid.rows.slice(1).map((r) => {
+    const id = String(r.cells.get(idCol)?.value ?? "");
+    return cols.map(([idx]) => {
+      if (idx === decCol) return decide(id);
+      if (dateCol !== undefined && idx === dateCol) return dates[id] ?? r.cells.get(idx)?.value ?? null;
+      return r.cells.get(idx)?.value ?? null;
+    });
+  });
   const out = join(tmpDir(), "decisions-filled.xlsx");
   writeFileSync(
     out,
@@ -219,16 +227,28 @@ describe("the session surface", () => {
     // 2500 at 1% (the GSTIN-derived HUF PAN) + 5000 at 2% (a company) +
     // 50000 at the s.206AA 20% (no PAN found).
     expect(n(r.totals.shortfall)).toBeCloseTo(2500 + 5000 + 50000, 2);
-    // Leg (i) is 1% per month-or-part-month from each booking to the payment
-    // date (18 / 17 / 16 months), and leg (ii) is zero for a shortfall that
-    // was never deducted: it is deemed deducted on the payment date.
-    expect(n(r.totals.interestI)).toBeCloseTo(2500 * 0.01 * 18 + 5000 * 0.01 * 17 + 50000 * 0.01 * 16, 2);
-    expect(n(r.totals.interestII)).toBe(0);
-    // Each row's due date is its own booking's Rule 30 date, never the date
-    // after the payment: 10-May -> 07-Jun-2025, 10-Jun -> 07-Jul, 10-Jul ->
-    // 07-Aug.
+    // The amount column is the base the rate applies to: TDS to be paid ÷
+    // rate, so amount × rate = TDS to be paid to the paisa on every row.
+    const rate = new Map(cands.map((c) => [c.findingId, c.rate]));
+    const shortfallOf = new Map(cands.map((c) => [c.findingId, c.shortfall]));
+    for (const row of r.rows) {
+      const rt = rate.get(row.findingId) ?? 0;
+      expect(rt).toBeGreaterThan(0);
+      expect(Math.round(row.amountPaid * rt * 100) / 100).toBe(shortfallOf.get(row.findingId));
+      // The date of deduction is the run's period end when the operator
+      // entered none (this workbook entered none).
+      expect(row.deductionDate).toBe("31-Mar-2026");
+    }
+    // No operator date was entered, so every row defaults to the review's own
+    // toDate: leg (i) runs booking → 31-Mar-2026 (11 / 10 / 9 months), and
+    // leg (ii) runs 31-Mar-2026 → the 31-Oct-2026 payment (8 months), which is
+    // charged because the payment is past the 30-Apr-2026 Rule 30 due date.
+    expect(n(r.totals.interestI)).toBeCloseTo(2500 * 0.01 * 11 + 5000 * 0.01 * 10 + 50000 * 0.01 * 9, 2);
+    expect(n(r.totals.interestII)).toBeCloseTo((2500 + 5000 + 50000) * 0.015 * 8, 2);
+    // Each row's due date is the Rule 30 date of ITS deduction date, never the
+    // date after the payment: 31-Mar-2026 → 30-Apr-2026 for all three.
     expect(r.rows.map((row) => row.depositDueDate)).toEqual([
-      "07-Jun-2025", "07-Jul-2025", "07-Aug-2025",
+      "30-Apr-2026", "30-Apr-2026", "30-Apr-2026",
     ]);
     // The by-section and by-kind splits each reconcile to the headline total.
     expect(r.bySection.reduce((a, g) => a + n(g.payable), 0)).toBeCloseTo(n(r.totals.payable), 2);
@@ -260,6 +280,36 @@ describe("the session surface", () => {
     expect(rows.rows.find((x) => x.party === "Orchid Traders")!.panFromGstin).toBe(true);
     expect(rows.rows.find((x) => x.party === "Cedex Civil Works")!.panFromGstin).toBe(false);
     expect(rows.rows.find((x) => x.party === "Blank Vendor")!.pan).toBeNull();
+  });
+
+  it("prices a row on the operator's own date of deduction when the decisions workbook carries one", async () => {
+    const s = await mainSession();
+    const identity = s.tdsPayableIdentity()!;
+    const target = s.tdsPayableCandidates()!.find((c) => c.date === "20250510")!;
+    const filled = decideInPlace(
+      buildPayableDecisionsForTest(s),
+      identity,
+      () => "Accept",
+      { [target.findingId]: "2025-10-07" },
+    );
+    const r = await s.tdsPayableStatement({ decisionsPath: filled, paymentDate: "20261031" });
+    const row = r.rows.find((x) => x.findingId === target.findingId)!;
+    expect(row.deductionDate).toBe("07-Oct-2025");
+    expect(row.depositDueDate).toBe(displayDate("20251107"));
+    expect(depositDue("20251007")).toBe("20251107");
+    // Leg (i) stops at the entered date; leg (ii) runs from it to the payment.
+    expect(row.interestI).toBeCloseTo(
+      interestOn(0.01, calendarMonths(target.date, "20251007"), target.shortfall),
+      2,
+    );
+    expect(row.interestII).toBeCloseTo(
+      interestOn(0.015, calendarMonths("20251007", "20261031"), target.shortfall),
+      2,
+    );
+    // The other rows still default to the run's toDate.
+    const others = r.rows.filter((x) => x.findingId !== target.findingId);
+    expect(others.every((x) => x.deductionDate === "31-Mar-2026")).toBe(true);
+    expect(others.every((x) => x.depositDueDate === "30-Apr-2026")).toBe(true);
   });
 
   it("refuses the statement while a critical finding is undecided, naming the open one", async () => {

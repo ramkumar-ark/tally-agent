@@ -33,12 +33,21 @@ statement workbook priced to the payment date.
        only those two words; anything else is refused). Blank is not a
        decision: the statement refuses while any critical row is undecided
        (a deleted row counts as undecided too), naming the open findings.
-     - `Remarks` — free text, optional. The statement quotes no remark, so
-       this is your own working note and the answer to "why is this not in
-       the challan" for the correction letter to the department.
-     - The preceding columns (finding id, check, party pseudonym, section,
-       date, amount, shortfall) are the review's facts — read-only in
-       practice; a changed number there is not used.
+      - `Date of deduction` — **yours to fill**: the date the tax was or will
+        be deducted (Excel date, or `YYYYMMDD`). **Blank means the end of the
+        review period**, which is what most shortfalls are actually deducted
+        on; that date drives both interest legs and the deposit due date. A
+        not-deposited finding keeps the books' own deduction date whatever
+        this cell says — the books know when that tax was taken out.
+      - `Remarks` — free text, optional. The statement quotes no remark, so
+        this is your own working note and the answer to "why is this not in
+        the challan" for the correction letter to the department.
+      - The preceding columns (finding id, check, party, section, date,
+        amount, tax payable, tax actually deducted, shortfall) are the
+        review's facts — read-only in practice; a changed number there is not
+        used. The **Amount paid or credited** column is the base the statement
+        prices: `round2(TDS to be paid ÷ rate)`, so `amount × rate = TDS to be
+        paid` to the paisa.
    - **Run** (hidden) — company, period, as-on date, critical count and the
      run digest. Do not touch it.
    - **Lists** (hidden) — the dropdown source; leave alone.
@@ -59,13 +68,18 @@ s.201(1A) interest — the review's own schedule, never a second formula:
 
 | Leg | Rate | Runs from → to |
 |---|---|---|
-| (i) late deduction | 1% per month or part of a month | the booking date → the payment date (a shortfall that was never deducted is deemed deducted on the payment date) |
-| (ii) late deposit | 1.5% per month or part of a month | the deduction date → the payment date, and only where the payment is after the Rule 30 due date shown in the last column |
+| (i) late deduction | 1% per month or part of a month | the booking date → **the date of deduction** (yours on the decisions workbook, else the end of the review period) |
+| (ii) late deposit | 1.5% per month or part of a month | that same deduction date → the payment date, and **only** where the payment is after the Rule 30 due date in the deposit-due-date column |
 
-The last column is the **Rule 30 due date of the original deduction or booking** —
+The **Amount paid or credited** column is `round2(TDS to be paid ÷ rate)`, so
+`amount × rate = TDS to be paid` to the paisa on every row — the base the
+statutory rate is applied to, not necessarily the whole bill (a threshold or
+cumulative section charges its tax on a smaller base).
+
+The deposit-due-date column is the **Rule 30 due date of the deduction** —
 the 7th of the following month, and 30 April for a March deduction. It is not
 the date after the payment: that says when you are paying, not when the
-liability fell due.
+liability fell due. The same date decides whether leg (ii) is owed at all.
 
 The **rate of deduction** is the **statutory rate for that deductee and
 section** — the same rate the review charged, never a ratio of the row's
@@ -84,14 +98,16 @@ as one block.
   what you decided and why.
 - **Statement** is the challan working paper: one row per Accepted finding,
   in the captain's column order — date of booking, party, PAN, company /
-  non-company, amount paid, TDS that should have been deducted, TDS actually
-  deducted, date of deduction, rate, shortfall to pay, interest (i),
-  interest (ii), interest due to the payment date, due date of deposit — and
-  a totals row. The **Summary** sheet carries the three headline totals, the
-  same split by section and by company class, the accepted/rejected counts,
-  and a note on what the expense base means for each finding kind (the
-  undeducted portion for a shortfall, the whole booking for a
-  not-deposited one).
+  non-company, amount paid or credited, date of deduction, rate, **TDS to be
+  paid**, interest (i), interest (ii), interest due to the payment date, due
+  date of deposit, finding id, section — and a totals row. The review-fact
+  columns (`TDS that should have been deducted`, `TDS actually deducted`) are
+  deliberately **not** on the statement: it is a payable list, and those
+  facts stay on the decisions workbook and in the review JSON. The
+  **Summary** sheet carries the three headline totals — TDS to be paid,
+  interest, payable — plus the total amount (the sum of the per-row bases),
+  the same split by section and by company class, and the accepted/rejected
+  counts.
 
 ## Binding, and what is refused
 

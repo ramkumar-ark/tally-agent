@@ -261,3 +261,41 @@ templates and the original Winman workbooks are never modified. The sample
 statement is built from a **copy with every critical finding marked Accept** and
 payment date **2026-10-31**. Counts and totals go in the status `done` line;
 **PANs never leave the workbook** — not into the status file, not into chat.
+## 13. Addendum — the v19 rework of both workbooks (2026-10-01)
+
+Firstmate's five-point revision, superseding §4's interest table and §9's
+column list wherever they disagree:
+
+1. **The amount column is the base, on both workbooks.**
+   `amountPaid = payableBase(c) = round2(shortfall / rate)` (falling back to
+   the row's expense only when no rate resolves), so `amount × rate = TDS to
+   be paid` to the paisa — `round2(round2(s/r) * r) === s` for every rate in
+   the law table. The statement's "Amount paid or credited" and the decisions
+   Findings sheet's amount column are the same figure. For a threshold or
+   cumulative section this is smaller than the bill, which is the point.
+2. **The statement drops its review-fact columns.** `TDS that should have been
+   deducted` and `TDS actually deducted` are gone from the statement sheet and
+   from the Summary headlines, and `Shortfall to pay` is renamed **`TDS to be
+   paid`**. The Summary's "total amount" is the sum of the new bases. The
+   decisions workbook keeps those columns as operator context (its amount cell
+   is now the base) — it is the working paper, not the challan list.
+3. **Date of deduction is operator input, defaulting to the period end.**
+   `buildStatement` takes `periodEnd` (the run's `toDate`) and the parsed
+   `deductionDates` map; a row with no entered date uses `periodEnd`. Interest
+   per s.201(1A) then runs leg (i) at 1% from booking → that date, and leg
+   (ii) at 1.5% from that date → the payment date **only when the payment is
+   past `depositDue(that date)`**, which is also the deposit-due-date column
+   (30-Apr-2026 for a 31-Mar-2026 deduction). `calendarMonths`, `depositDue`
+   and `interestOn` are reused — no second formula. A `tds_not_deposited` row
+   keeps the books' own deduction date: the operator's declaration never moves
+   it.
+4. **Backward compatibility.** `Date of deduction` is an *optional* column in
+   the parse-back: an absent header parses (the v18 workbook does), a blank
+   cell means "not entered". The digest binding and every refusal are
+   unchanged, so the filled v18 decisions workbook is still accepted.
+5. **The statement result rows now carry `deductionDate`** (displayDate), so
+   the ready report can show the date each row was priced on.
+
+Tests updated to the new schedule; the `amount × rate` identity is asserted
+per row in both `test/tds-payable.test.ts` and
+`test/tds-payable-session.test.ts`.
