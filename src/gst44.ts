@@ -1,5 +1,5 @@
 // src/gst44.ts
-import type { VoucherRow } from "./downstream.js";
+import { partyName, type VoucherRow } from "./downstream.js";
 import { money } from "./format.js";
 import { canonicalKey } from "./key.js";
 import { gstHeadOf, type GstCtx } from "./gst.js";
@@ -120,7 +120,9 @@ export function gst44(vouchers: VoucherRow[], ctx: GstCtx, operator: OperatorGst
       continue;
     }
     vouchersScanned += 1;
-    let party = v.partyLedgerName || null;
+    // An object-shaped party carries its name (or nothing at all); it must
+    // never be printed as "[object Object]" into a finding's detail.
+    let party = partyName(v.partyLedgerName) || null;
     if (!party) {
       for (const e of v.entries) {
         if (ctx.roleOf(ctx.groupOf(e.ledger)) === "creditor") {

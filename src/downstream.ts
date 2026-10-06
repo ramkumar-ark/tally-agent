@@ -221,6 +221,34 @@ const withCompany = (
   company: string | undefined,
 ): Record<string, unknown> => (company ? { ...args, company } : args);
 
+/** `partyLedgerName` is a plain string on a live Tally row, but an export can
+ * hand it down as an object (a Tally list/blank record). `String()` on an
+ * object yields the literal "[object Object]", which then reads as a real
+ * ledger name all the way to the report. Coerce to a name: a string trims, an
+ * object yields its first usable name field, an empty object has no name and
+ * must be ABSENT (so callers fall back to the voucher's own entries) rather
+ * than stringified. Never let an object reach a `.trim()`/`canonicalKey`
+ * consumer. */
+export function partyName(raw: unknown): string {
+  if (typeof raw === "string") return raw.trim();
+  if (raw !== null && typeof raw === "object") {
+    const o = raw as Record<string, unknown>;
+    for (const key of [
+      "LEDGERNAME",
+      "ledgerName",
+      "PARTYLEDGERNAME",
+      "partyLedgerName",
+      "NAME",
+      "name",
+    ]) {
+      const v = o[key];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return "";
+  }
+  return raw === null || raw === undefined ? "" : String(raw).trim();
+}
+
 /**
  * Parse a Day Book envelope into typed rows. A date range, when given,
  * re-filters at the boundary: the downstream already filters client-side,
@@ -259,7 +287,7 @@ export function parseVoucherRows(
       date,
       voucherType: String(row.voucherType ?? ""),
       voucherNumber: String(row.voucherNumber ?? ""),
-      partyLedgerName: String(row.partyLedgerName ?? "").trim(),
+      partyLedgerName: partyName(row.partyLedgerName),
       cancelled: truthy(row.isCancelled),
       ...(text(row.narration) ? { narration: text(row.narration) } : {}),
       entries,

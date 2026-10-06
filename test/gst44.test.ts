@@ -14,7 +14,7 @@ describe("gst44 check ids", () => {
 
 import { EMPTY_GST44, gst44, partySpend, statusOf, type OperatorGst44 } from "../src/gst44.js";
 import type { GstCtx } from "../src/gst.js";
-import type { VoucherRow } from "../src/downstream.js";
+import { parseVoucherRows, type VoucherRow } from "../src/downstream.js";
 
 const ctxOf = (gstins: Record<string, string>): GstCtx => ({
   groupOf: (ledger) => groupOf[ledger] ?? "",
@@ -128,5 +128,39 @@ describe("gst44 walk", () => {
     const books = gst44([v("Ghost Vendor", [["Rental A/c", 7000], ["Ghost Vendor", -7000]])], ctxOf({}), EMPTY_GST44);
     // "Ghost Vendor" has no groupOf entry -> group "" -> not in masters.
     expect(books.findings.some((f) => f.check === "gst44_party_not_in_masters" && f.ledger === "Ghost Vendor")).toBe(true);
+  });
+  it("an object-shaped party prints its real name, never [object Object]", () => {
+    const ghost = { LEDGERNAME: "Ghost Vendor" } as unknown as string;
+    const books = gst44([v(ghost, [["Rental A/c", 7000], ["Ghost Vendor", -7000]])], ctxOf({}), EMPTY_GST44);
+    const f = books.findings.find((x) => x.check === "gst44_party_not_in_masters")!;
+    expect(f).toBeDefined();
+    expect(f.ledger).toBe("Ghost Vendor");
+    expect(f.detail).toContain("Ghost Vendor");
+    for (const x of books.findings) {
+      expect(x.detail).not.toContain("[object Object]");
+      expect(x.ledger).not.toContain("[object Object]");
+    }
+  });
+  it("an empty object party is absent, so the voucher's own creditor entry names it", () => {
+    // The real DSV export shape: partyLedgerName arrives as {} — it must be
+    // read as NO name (not "[object Object]") so the creditor fallback runs.
+    const rows = parseVoucherRows([
+      {
+        date: "20250401", voucherType: "PURCHASE", voucherNumber: "P1",
+        partyLedgerName: {},
+        entries: [
+          { LEDGERNAME: "Rental A/c", AMOUNT: -7000 },
+          { LEDGERNAME: "Nova Traders", AMOUNT: 7000 },
+        ],
+      },
+    ], null, null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.partyLedgerName).toBe("");
+    const books = gst44(rows, ctxOf({ "Nova Traders": GSTIN_REG }), EMPTY_GST44);
+    const text = books.findings.map((f) => `${f.ledger} ${f.detail}`).join(" ");
+    expect(text).not.toContain("[object Object]");
+    expect(books.findings.filter((f) => f.check === "gst44_party_not_in_masters")).toHaveLength(0);
+    expect(books.parties.map((p) => p.party)).toContain("Nova Traders");
+    expect(books.unattributed).toEqual({ capital: 0, revenue: 0, events: 0 });
   });
 });

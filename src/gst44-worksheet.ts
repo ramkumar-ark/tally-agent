@@ -1,5 +1,5 @@
 // src/gst44-worksheet.ts
-import type { VoucherRow } from "./downstream.js";
+import { partyName, type VoucherRow } from "./downstream.js";
 import { money } from "./format.js";
 import { canonicalKey } from "./key.js";
 import { gstHeadOf, type GstCtx } from "./gst.js";
@@ -192,7 +192,7 @@ export function gst44Worksheet(
       continue;
     }
     vouchersScanned += 1;
-    let party = v.partyLedgerName || null;
+    let party = partyName(v.partyLedgerName) || null;
     if (!party) {
       for (const e of v.entries) {
         if (ctx.roleOf(ctx.groupOf(e.ledger)) === "creditor") {

@@ -383,6 +383,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   new comparison must too. A `===` between a string date and a numeric one
   fails silently and looks like "no data" — the Task 9 join probe hit
   exactly that before switching to `String(...)` on both sides.
+- The same export can carry an **object** where the field is typed `string`:
+  `partyLedgerName` arrived as `{}` on 167 of 2,968 vouchers of a real FY
+  bundle, and `String()` turned it into the literal `[object Object]`, which
+  then read as a ledger name all the way into a finding detail
+  (`gst44_party_not_in_masters`) and a report cell. `partyName`
+  (`src/downstream.ts`) is the single coercion — string trims, object yields
+  its first usable name field, empty object is ABSENT so the voucher's own
+  creditor-entry fallback runs — and `gst44`/`gst44-worksheet` run their party
+  through it too. Never `String()` a raw Tally field; an absent name beats a
+  fabricated one (post-fix the affected journals land honestly in
+  `gst44_unattributed_expenditure`, not under a phantom party's bucket).
 - `readFile` + `JSON.parse` on a 67 MB day book measured **483 MB peak RSS
   in 3.0 s** (300k synthetic vouchers; scales roughly linearly, so the 64 MB
   `TALLY_AGENT_DAYBOOK_MAX_MB` default is safe on any machine with ≥4 GB
