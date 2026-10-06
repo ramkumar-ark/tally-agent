@@ -464,7 +464,12 @@ async function snapshotInputs(m: WorkflowManifest, passDir: string): Promise<voi
   await writeTextFile(join(inputsDir, "inputs.json"), JSON.stringify(record, null, 2));
 }
 
-/** INDEX.md, summary.json for the pass; LATEST.txt for the newest closed pass. */
+/** LATEST.txt names the pass folder in play, from the moment that folder opens. */
+async function markLatest(wfDir: string, passDir: string): Promise<void> {
+  await writeTextFile(join(wfDir, "LATEST.txt"), `${passDir}\n`);
+}
+
+/** INDEX.md, summary.json for the pass; LATEST.txt for that same pass folder. */
 async function writeArtifacts(
   m: WorkflowManifest,
   wfDir: string,
@@ -473,8 +478,7 @@ async function writeArtifacts(
   const dir = join(wfDir, pass.dir);
   await writeTextFile(join(dir, "INDEX.md"), renderIndex(m, pass.n));
   await writeTextFile(join(dir, "summary.json"), JSON.stringify(summaryJson(m, pass.n), null, 2));
-  const closed = [...m.passes].reverse().find((p) => p.closedAt !== undefined);
-  if (closed) await writeTextFile(join(wfDir, "LATEST.txt"), `${closed.dir}\n`);
+  await markLatest(wfDir, pass.dir);
   await saveManifest(wfDir, m);
 }
 
@@ -1142,6 +1146,7 @@ export function registerWorkflowTools(
           const dirName = `pass-${String(planned.n).padStart(2, "0")}-${stamp()}`;
           const dir = join(wfDir, dirName);
           await mkdir(dir);
+          await markLatest(wfDir, dirName);
           pass = {
             n: planned.n,
             dir: dirName,

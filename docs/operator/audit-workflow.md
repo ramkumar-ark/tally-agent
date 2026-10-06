@@ -51,16 +51,22 @@ A step that comes out `needs-input` is waiting for a file — fill it, point
 audit-workflows/<company>-<from>-<to>-<stamp>/
 ├── workflow.json      the workflow's only state (safe to resume from)
 ├── to-fill/           generated templates waiting for you
-├── in/                accepted input snapshots
 ├── pass-01-<stamp>/   one folder per pass
 │   ├── 01-gst_working_sheet/   one sub-folder per step: reports,
 │   ├── 03-tds/                 findings, filled Winman copies
 │   ├── ...
-│   ├── inputs.json   the input snapshot this pass ran against
+│   ├── inputs/        the input snapshot this pass ran against
+│   │   └── inputs.json  every input's path, digest and status
 │   ├── INDEX.md      human-readable index of everything so far
 │   └── summary.json  the machine-readable summary of the pass
-└── LATEST.txt         the last pass folder's name
+└── LATEST.txt         the current pass folder's name (written when that
+                       folder opens and after every step)
 ```
+
+There is no `in/` folder: accepted inputs are never copied to the top of the
+workflow, they are snapshotted into each pass's `inputs/` folder when the pass
+opens. `LATEST.txt` names the pass folder in play even while that pass is still
+running, so it is there after the very first step.
 
 When everything is done, the pass folder is the deliverable: every report,
 findings sheet and filled Winman copy sits inside it, and `INDEX.md` /

@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { ToolRegistrar } from "../src/index.js";
@@ -144,6 +144,47 @@ describe("tb_audit_workflow_run", () => {
     expect(existsSync(join(passDir, "INDEX.md"))).toBe(true);
     expect(existsSync(join(passDir, "summary.json"))).toBe(true);
     expect(existsSync(join(passDir, "inputs", "tdsTemplate-tds-template.xlsx"))).toBe(true);
+  });
+
+  it("writes LATEST.txt after the first run step, while the pass is still open", async () => {
+    const h = harness();
+    standardTdsFakes(h);
+    h.setFake("tb_pf_esi_review", reviewer(["warning"]));
+    h.setFake("tb_write_pf_esi_report", fileWriter("pf-report.xlsx", "markdownPath"));
+    h.setFake("tb_write_3cd_pf_esi", fileWriter("pf-filled.xlsm", "workbookPath"));
+    await h.makeWorkflow({
+      selectedSteps: ["tds", "pf_esi"],
+      inputs: { ...TDS_INPUTS, pfEsiTemplate: { file: "pf.xlsx", content: "x", status: "accepted" } },
+    });
+    const r1 = await h.run({ workflowId: "wf-test" });
+    expect(r1.step.id).toBe("tds");
+    expect(r1.passClosed).toBe(false); // pf_esi still pending
+    const wfDir = join(h.reportDir, "audit-workflows", "wf-test");
+    const latest = readFileSync(join(wfDir, "LATEST.txt"), "utf8");
+    expect(latest.trim()).toBe(basename(r1.passDir));
+    expect(latest).toContain("pass-01-");
+    expect(existsSync(join(r1.passDir, "INDEX.md"))).toBe(true);
+  });
+
+  it("LATEST.txt names the newest pass folder once a second pass opens", async () => {
+    const h = harness();
+    standardTdsFakes(h);
+    h.setFake("tb_pf_esi_review", reviewer(["warning"]));
+    h.setFake("tb_write_pf_esi_report", fileWriter("pf-report.xlsx", "markdownPath"));
+    h.setFake("tb_write_3cd_pf_esi", fileWriter("pf-filled.xlsm", "workbookPath"));
+    await h.makeWorkflow({
+      selectedSteps: ["tds", "pf_esi"],
+      inputs: { ...TDS_INPUTS, pfEsiTemplate: { file: "pf.xlsx", content: "x", status: "accepted" } },
+    });
+    await h.run({ workflowId: "wf-test" }); // tds
+    await h.run({ workflowId: "wf-test" }); // pf_esi, pass 1 closes
+    const wfDir = join(h.reportDir, "audit-workflows", "wf-test");
+    expect(readFileSync(join(wfDir, "LATEST.txt"), "utf8")).toContain("pass-01-");
+    const r3 = await h.run({ workflowId: "wf-test", rerun: ["tds"] });
+    expect(r3.pass).toBe(2);
+    const latest = readFileSync(join(wfDir, "LATEST.txt"), "utf8");
+    expect(latest.trim()).toBe(basename(r3.passDir));
+    expect(latest).toContain("pass-02-");
   });
 
   it("a review throw fails the step and the next run runs the next step", async () => {
