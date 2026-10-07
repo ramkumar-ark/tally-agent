@@ -1758,6 +1758,30 @@ When updating this file, preserve this bar for all agents and keep entries conci
   no date) so the filled v18 workbook still parses, and the statement result
   rows now carry `deductionDate` for the ready report.
 
+## Sharp edges found resolving a month-end duty journal's section (2026-10-08)
+
+- An ambiguous (multi-mapped) duty ledger's credit is resolved per row by
+  `evidenceSection` (`src/tds.ts`) in this order: same-voucher expense →
+  same-date bill → **same-month bill (new, 2026-10-08)** → nearest-bill
+  fallback. The same-month step asks only whether the deductee's candidate
+  charge bills of the credit's OWN calendar month all point to ONE section
+  (the universe `allocateSplitCredits`' month consolidation covers); two
+  sections or none falls through unchanged. Never raise
+  `NEAREST_BILL_CAP_DAYS` instead — the cap is not what it looks like.
+- **`NEAREST_BILL_CAP_DAYS` compares `YYYYMMDD` numerals, not days**
+  (`dnum`, `src/tds.ts`): any cross-month pair differs by ≥ 70, so the
+  "nearest bill, N days" fallback can only ever answer a SAME-month bill
+  within 15 days, and its "N days" label is a day count only inside one
+  month. A month-end two-line journal 21 days after its bill on a
+  two-section duty ledger was therefore dropped before the credit ever
+  entered `deductions` — a false `TDS-001-3` not-deducted — and the
+  same-month step is what closes it. Raising the cap would not have reached
+  cross-month pairs either.
+- The step's diagnostic label is `resolvedBy: "same-month bill"` with
+  `linkedBill` = the month's nearest bill; after this change the
+  `nearest bill, N days` branch is reachable only when the month's bills span
+  two candidate sections (pinned by test/tds.test.ts).
+
 ## Winman 3CD depreciation (clause 18 additions/deletions, 2026-09-27)
 
 - Design of record: `docs/design/2026-09-27-winman-3cd-depreciation-design.md`; engine `src/dep3cd.ts`

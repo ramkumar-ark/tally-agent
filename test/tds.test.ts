@@ -1276,7 +1276,7 @@ describe("2026-09-26e/f deposit coverage + nearest bill", () => {
   // the shape the captain confirmed in Tally (26f). The resolver's same-date
   // path finds nothing; the strictly additive nearest-bill fallback links the
   // same month's bill whose expense ledger resolves inside the candidates.
-  it("a different-date journal resolves via the nearest-bill fallback and joins", () => {
+  it("a different-date journal in the bill's own month resolves via the same-month bill and joins", () => {
     const op: OperatorFile = {
       ...EMPTY_TDS_OPERATOR,
       sections: [
@@ -1291,13 +1291,44 @@ describe("2026-09-26e/f deposit coverage + nearest bill", () => {
     const out = run(tdsCtx(op), duty, expense, party);
     expect(out.events.deductions).toHaveLength(1);
     expect(out.events.deductions[0].section).toBe("194-I(a)");
-    expect(out.events.deductions[0].resolvedBy).toBe("nearest bill, 2 days");
+    // 2026-10-08: a bill of the credit's own calendar month resolves through
+    // the same-month step (2026-09-26f's nearest-bill cap no longer decides
+    // same-month evidence); the section and the linked bill are unchanged.
+    expect(out.events.deductions[0].resolvedBy).toBe("same-month bill");
     expect(out.events.deductions[0].linkedBill).toBe("20250529|B/1");
     expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
     // the null-section lump deposit joins the same-ledger deduction (26c)
     const dep = [{ ledger: "TDS Machinery", rows: [row("20250610", "P/44", 1200, "Bank A/c")] }];
     const out2 = run(tdsCtx(op), [...duty, ...dep], expense, party);
     expect(ofCheck(out2, "tds_not_deposited")).toEqual([]);
+  });
+
+  it("an ambiguous month falls through to the nearest-bill fallback, unchanged", () => {
+    const op: OperatorFile = {
+      ...EMPTY_TDS_OPERATOR,
+      sections: [
+        { ledger: "Machinery Rent", section: "194-I(a)" },
+        { ledger: "Furniture Rent", section: "194-I(b)" },
+        { ledger: "TDS Machinery", section: "194-I(a)" },
+        { ledger: "TDS Machinery", section: "194-I(b)" },
+      ],
+    };
+    const expense = [
+      { ledger: "Machinery Rent", rows: [row("20250529", "B/1", 60000, partyA)] },
+      { ledger: "Furniture Rent", rows: [row("20250525", "B/2", 40000, partyA)] },
+    ];
+    const duty = [{ ledger: "TDS Machinery", rows: [row("20250531", "J/2", -1200, partyA)] }];
+    const party = [
+      { ledger: partyA, rows: [{ ...row("20250529", "B/1", -60000, "Machinery Rent"), voucherType: "Purchase" }] },
+      { ledger: partyA, rows: [{ ...row("20250525", "B/2", -40000, "Furniture Rent"), voucherType: "Purchase" }] },
+    ];
+    const out = run(tdsCtx(op), duty, expense, party);
+    expect(out.events.deductions).toHaveLength(1);
+    // The month's bills span both candidate sections, so the same-month step
+    // declines (never a guess) and 26f's nearest bill still answers as before.
+    expect(out.events.deductions[0].resolvedBy).toBe("nearest bill, 2 days");
+    expect(out.events.deductions[0].linkedBill).toBe("20250529|B/1");
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
   });
 
   it("a journal beyond the 15-day cap stays unresolved", () => {
@@ -1419,6 +1450,75 @@ describe("2026-09-26e/f deposit coverage + nearest bill", () => {
     // window — so one reports on the liable bill and one on the pre-crossing
     // bill it was booked against (firstmate 2026-09-30).
     expect(ofCheck(out, "tds_not_deposited")).toHaveLength(2);
+  });
+});
+
+describe("same-month bill resolves an ambiguous month-end duty journal (2026-10-08)", () => {
+  // The month-end shape, on invented ledgers and a fictional party: one charge bill
+  // early in the month, then the two-line month-end journal `Dr party / Cr
+  // duty` on a duty ledger mapped to BOTH 194-I sections, 21 days later —
+  // past NEAREST_BILL_CAP_DAYS, so the old nearest-bill fallback dropped the
+  // credit and the booking reported tds_not_deducted. The deposit lands the
+  // following month, as Rule 30 allows.
+  const op: OperatorFile = {
+    ...EMPTY_TDS_OPERATOR,
+    sections: [
+      { ledger: "Machinery Rent", section: "194-I(a)" },
+      { ledger: "Furniture Rent", section: "194-I(b)" },
+      { ledger: "TDS Rent", section: "194-I(a)" },
+      { ledger: "TDS Rent", section: "194-I(b)" },
+    ],
+  };
+  const rent = "Machinery Rent";
+  const furnish = "Furniture Rent";
+  const ambiguous = "TDS Rent";
+
+  it("resolves from the deductee's single-section bills of the credit's own month and joins the booking", () => {
+    const expense = [{ ledger: rent, rows: [row("20260207", "P/51", 700000, partyA)] }];
+    const duty = [
+      { ledger: ambiguous, rows: [row("20260228", "JV/88", -14000, partyA)] },
+      { ledger: ambiguous, rows: [row("20260305", "PMT/9", 14000, "Bank Alpha")] },
+    ];
+    const party = [
+      { ledger: partyA, rows: [{ ...row("20260207", "P/51", -700000, rent), voucherType: "Purchase" }] },
+    ];
+    const out = run(tdsCtx(op), duty, expense, party);
+    expect(out.events.deductions).toHaveLength(1);
+    expect(out.events.deductions[0]).toEqual(
+      expect.objectContaining({ section: "194-I(a)", resolvedBy: "same-month bill", linkedBill: "20260207|P/51" }),
+    );
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
+    expect(ofCheck(out, "tds_not_deposited")).toEqual([]);
+  });
+
+  it("same-month bills of two different sections stay unresolved — never a guess", () => {
+    const expense = [
+      { ledger: rent, rows: [row("20260205", "P/51", 700000, partyA)] },
+      { ledger: furnish, rows: [row("20260212", "P/52", 50000, partyA)] },
+    ];
+    const duty = [{ ledger: ambiguous, rows: [row("20260228", "JV/88", -14000, partyA)] }];
+    const party = [
+      { ledger: partyA, rows: [{ ...row("20260205", "P/51", -700000, rent), voucherType: "Purchase" }] },
+      { ledger: partyA, rows: [{ ...row("20260212", "P/52", -50000, furnish), voucherType: "Purchase" }] },
+    ];
+    const out = run(tdsCtx(op), duty, expense, party);
+    expect(out.events.deductions).toHaveLength(0);
+    // Both bills are beyond the 15-day cap, so neither path answers: the
+    // crossing bill keeps its finding and the ledger keeps its advisory.
+    expect(ofCheck(out, "tds_not_deducted")).toHaveLength(1);
+    expect(ofCheck(out, "tds_master_gap")).toHaveLength(1);
+  });
+
+  it("no bill in the credit's own month stays unresolved", () => {
+    const expense = [{ ledger: rent, rows: [row("20260110", "P/51", 700000, partyA)] }];
+    const duty = [{ ledger: ambiguous, rows: [row("20260228", "JV/88", -14000, partyA)] }];
+    const party = [
+      { ledger: partyA, rows: [{ ...row("20260110", "P/51", -700000, rent), voucherType: "Purchase" }] },
+    ];
+    const out = run(tdsCtx(op), duty, expense, party);
+    expect(out.events.deductions).toHaveLength(0);
+    expect(ofCheck(out, "tds_not_deducted")).toHaveLength(1);
+    expect(ofCheck(out, "tds_master_gap")).toHaveLength(1);
   });
 });
 

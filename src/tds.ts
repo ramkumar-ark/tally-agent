@@ -218,7 +218,7 @@ export interface TdsDeduction {
   consolidated?: "month" | "window";
   /** The duty ledger the credit was read from (set on ambiguous-ledger rows). */
   ledger?: string;
-  /** How the credit's section was resolved (2026-09-26f): same-voucher, same-date bill, or nearest bill, N days. */
+  /** How the credit's section was resolved (2026-09-26f / 2026-10-08): same-voucher, same-date bill, same-month bill, or nearest bill, N days. */
   resolvedBy?: string;
   /** The bill (date|voucherNumber) that resolved an ambiguous credit, when one was linked. */
   linkedBill?: string;
@@ -555,10 +555,12 @@ export function extractEvents(
    * line of the same voucher (the three-line `Dr Expense / Cr Party (net) /
    * Cr Duty` shape), else the linked same-date bill's expense line (the
    * two-line journal `Dr Party / Cr Duty` whose bill is booked the same day,
-   * linked by the party), else — 2026-09-26f, strictly additive — the same
-   * party's nearest charge bill within a bounded window (the books post the
-   * duty journal days after the charge voucher). Only one distinct section
-   * resolves it — never a guess.
+   * linked by the party), else — 2026-10-08 — the deductee's charge bills of
+   * the credit's own calendar month when they all point to one section (the
+   * month-end journal's own evidence; never a guess), else — 2026-09-26f,
+   * strictly additive — the same party's nearest charge bill within a bounded
+   * window (the books post the duty journal days after the charge voucher).
+   * Only one distinct section resolves it — never a guess.
    */
   const evidenceSection = (
     row: LedgerVoucherRow,
@@ -576,6 +578,44 @@ export function extractEvents(
       });
       return { section, source: "same-date bill", bill: linked ? `${linked.row.date}|${linked.row.voucherNumber}` : undefined };
     }
+    // The deductee's own candidate charge bills, minus the journal's own
+    // voucher — the universe both the same-month step and the nearest-bill
+    // fallback below search.
+    const bills = (billByParty.get(canonicalKey(row.counterparty)) ?? [])
+      .filter((e) => !(e.row.date === row.date && e.row.voucherNumber === row.voucherNumber))
+      .filter((e) => {
+        const res = ctx.resolveSection(e.ledger);
+        return res.section !== null && candidates.includes(res.section);
+      });
+    const dnum = (d: string) => Number(d.slice(0, 4)) * 10000 + Number(d.slice(4, 6)) * 100 + Number(d.slice(6, 8));
+    // Same-month bill (2026-10-08): a month-end duty journal is routinely
+    // booked up to ~28 days after its charge bill — past NEAREST_BILL_CAP_DAYS
+    // — so when the deductee's charge bills of the credit's OWN calendar month
+    // all point to one candidate section, that is the section, the same
+    // universe the month consolidation covers. Never a guess: bills spanning
+    // two sections, or none at all, leave the credit to the nearest-bill
+    // fallback below, unchanged, which still answers cross-month cases.
+    const month = row.date.slice(0, 6);
+    const monthBills = bills.filter((e) => e.row.date.slice(0, 6) === month);
+    if (monthBills.length > 0) {
+      const monthSections = new Set<string>();
+      for (const e of monthBills) {
+        const s = ctx.resolveSection(e.ledger).section;
+        if (s !== null) monthSections.add(s);
+      }
+      if (monthSections.size === 1) {
+        const section = [...monthSections][0];
+        // Deterministic link: the month's bill nearest this journal, then
+        // earlier date, then voucher number.
+        const near = [...monthBills].sort(
+          (a, b) =>
+            Math.abs(dnum(a.row.date) - dnum(row.date)) - Math.abs(dnum(b.row.date) - dnum(row.date)) ||
+            a.row.date.localeCompare(b.row.date) ||
+            a.row.voucherNumber.localeCompare(b.row.voucherNumber),
+        )[0];
+        return { section, source: "same-month bill", bill: `${near.row.date}|${near.row.voucherNumber}` };
+      }
+    }
     // Nearest-bill fallback (2026-09-26f): the same party's charge bills whose
     // expense ledger resolves to a candidate section, nearest first — same
     // calendar month preferred, then nearest before the journal, then after —
@@ -584,13 +624,6 @@ export function extractEvents(
     // two-section voucher must stay unresolved (26c never-guess). The nearest
     // bill decides; its section is single by construction. Deterministic
     // ties: earlier date, then voucher number.
-    const bills = (billByParty.get(canonicalKey(row.counterparty)) ?? [])
-      .filter((e) => !(e.row.date === row.date && e.row.voucherNumber === row.voucherNumber))
-      .filter((e) => {
-        const res = ctx.resolveSection(e.ledger);
-        return res.section !== null && candidates.includes(res.section);
-      });
-    const dnum = (d: string) => Number(d.slice(0, 4)) * 10000 + Number(d.slice(4, 6)) * 100 + Number(d.slice(6, 8));
     const ranked = bills
       .map((e) => ({ e, diff: Math.abs(dnum(e.row.date) - dnum(row.date)) }))
       .filter(({ diff }) => diff <= NEAREST_BILL_CAP_DAYS)
