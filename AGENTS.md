@@ -1585,6 +1585,10 @@ When updating this file, preserve this bar for all agents and keep entries conci
   payment's own interest (i) on the same deduction, so adding that again would double count, and
   only the backward charge (bills the return never saw) is added. Narayanan: interest payable
   38,651.00 → **38,705.00** (+54.00), all in the Q4 row.
+  Under `Late Deduction Interest = N` the 194Q month-pool pass drops the `tds_late_deducted` ROW
+  itself, exactly as the per-booking `covers` loop does (2026-10-08): only the `push` is guarded —
+  the credit still settles the month's pool, so not-deducted/short figures and every s.40(a)(ia)
+  exposure stay put and interest totals stay 0.
 - **A voucher NUMBER is not a voucher identity (run 11; `sameVoucher` in `src/tds.ts`).** Tally
   numbers each voucher type in its own series, so "P/12" is a purchase bill of the year and also
   a journal of the year. A credit joins a booking as sitting on the booking's own voucher only

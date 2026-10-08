@@ -2345,21 +2345,28 @@ export function analyzeTds(
           const interest = (ctx.lateDeductionInterest ?? true) === false || shielded
             ? 0
             : interestOn(0.01, months, back.tax);
-          const paid = `duty credit of ${money(back.tax)} on ${displayDate(back.ded.date)} settles the ${money(liab)} payable on purchases of ${money(s.gross)} for ${label} under section ${section} (payable on ${displayDate(s.date)})`;
-          push(
-            "tds_late_deducted",
-            "warning",
-            s.party,
-            section,
-            back.tax,
-            shielded
-              ? `${paid}, booked after that date; s.201(1) proviso shields interest (i) (deductee filed a return).`
-              : `${paid}, booked after that date; s.201(1A) interest (i) of ${money(interest)} for ${months} month(s) at 1%.`,
-            interest > 0
-              ? [{ kind: "i", amount: interest, from: s.date, to: back.ded.date, basis: `1% of ${months} month(s)` }]
-              : undefined,
-          );
-          interestI += interest;
+          // The operator's Late Deduction Interest = N drops the ROW itself,
+          // exactly as the per-booking covers loop does — it never zeroes the
+          // settlement (the credit still clears `s.backs`, so the month's
+          // residue, the not-deducted/short figures and every exposure stay
+          // put) and interest is 0 either way, so interest totals stay 0.
+          if ((ctx.lateDeductionInterest ?? true) !== false) {
+            const paid = `duty credit of ${money(back.tax)} on ${displayDate(back.ded.date)} settles the ${money(liab)} payable on purchases of ${money(s.gross)} for ${label} under section ${section} (payable on ${displayDate(s.date)})`;
+            push(
+              "tds_late_deducted",
+              "warning",
+              s.party,
+              section,
+              back.tax,
+              shielded
+                ? `${paid}, booked after that date; s.201(1) proviso shields interest (i) (deductee filed a return).`
+                : `${paid}, booked after that date; s.201(1A) interest (i) of ${money(interest)} for ${months} month(s) at 1%.`,
+              interest > 0
+                ? [{ kind: "i", amount: interest, from: s.date, to: back.ded.date, basis: `1% of ${months} month(s)` }]
+                : undefined,
+            );
+            interestI += interest;
+          }
           // Additive, and on `backInterestI` rather than `interestI`: the
           // per-booking walk may already have settled this very credit for a
           // bill of its own, and the 3CD interest rows add the backward stamp

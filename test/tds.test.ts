@@ -1783,6 +1783,39 @@ describe("2026-09-26m 194-I aggregate threshold + 194Q month matching", () => {
       tdsDeposited: 0,
     });
   });
+
+  it("194Q: Late Deduction Interest = N drops the month-pool late row, never the settlement", () => {
+    // January owes 1,100 with no credit of its own; a February credit of
+    // 1,100 (36 days after the last January bill, so it joins nothing) settles
+    // the month from the pool. Under Y that is one tds_late_deducted warning
+    // and no not-deducted row; under N the ROW goes away — the pool still
+    // clears January, so not-deducted/short findings, the clause 21(b) rows
+    // and every total are identical, and interest totals stay 0.
+    const duty = [{ ledger: "TDS Purchase 194Q", rows: [row("20260220", "J/10", -1100, partyA)] }];
+    const y = run(tdsCtx(qOp, { lateDeductionInterest: true }), duty, qExpense);
+    const n = run(tdsCtx(qOp, { lateDeductionInterest: false }), duty, qExpense);
+
+    // The late row comes from the 194Q month pool, not the per-booking walk:
+    // the credit never joined a booking.
+    expect(y.events.deductions.some((d) => d.booking)).toBe(false);
+
+    const yLate = ofCheck(y, "tds_late_deducted");
+    expect(yLate).toEqual([expect.objectContaining({ amount: 1100, section: "194Q", severity: "warning" })]);
+    expect(yLate[0].schedule).toEqual([
+      expect.objectContaining({ kind: "i", amount: 22, from: "20260115", to: "20260220" }),
+    ]);
+    expect(y.totals.interestI).toBe(22);
+
+    expect(ofCheck(n, "tds_late_deducted")).toEqual([]);
+    expect(n.totals.interestI).toBe(0);
+
+    expect(ofCheck(n, "tds_not_deducted")).toEqual(ofCheck(y, "tds_not_deducted"));
+    expect(ofCheck(n, "tds_short_deducted")).toEqual(ofCheck(y, "tds_short_deducted"));
+    expect(n.totals.notDeducted).toBe(y.totals.notDeducted);
+    expect(n.totals.shortDeducted).toBe(y.totals.shortDeducted);
+    expect(n.clause21b).toEqual(y.clause21b);
+    expect(y.totals.notDeducted).toBe(0);
+  });
 });
 
 describe("debit-note netting (2026-09-26o items 4/5)", () => {
