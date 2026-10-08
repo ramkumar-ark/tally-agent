@@ -59,6 +59,10 @@ audit-workflows/<company>-<from>-<to>-<stamp>/
 │   │   └── inputs.json  every input's path, digest and status
 │   ├── INDEX.md      human-readable index of everything so far
 │   └── summary.json  the machine-readable summary of the pass
+├── latest/            the newest copy of every step's output folder
+│   ├── README.md      which pass folder each step's files came from
+│   ├── 03-tds/        a real copy (never a symlink) of that step's files
+│   └── ...
 └── LATEST.txt         the current pass folder's name (written when that
                        folder opens and after every step)
 ```
@@ -67,6 +71,16 @@ There is no `in/` folder: accepted inputs are never copied to the top of the
 workflow, they are snapshotted into each pass's `inputs/` folder when the pass
 opens. `LATEST.txt` names the pass folder in play even while that pass is still
 running, so it is there after the very first step.
+
+`latest/` answers the "where is that file now?" question: each pass folder only
+holds the steps that pass ran, so after a few TDS-only passes the clause 44
+Winman file sits several folders back. `latest/` holds one copy of each step's
+output folder from the most recent pass that produced it, plus a `README.md`
+naming that pass, so every step's newest files are one place away. It is
+rebuilt when a pass closes and by any `tb_audit_workflow_status` call that
+names a workflow (that is enough to populate it for an older workflow).
+Everything in it is derived: it never touches a `pass-*` folder or your own
+input files, so do not edit it — edit the workflow and let it rebuild.
 
 When everything is done, the pass folder is the deliverable: every report,
 findings sheet and filled Winman copy sits inside it, and `INDEX.md` /

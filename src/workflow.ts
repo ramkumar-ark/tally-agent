@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, mkdir, readdir, rename, readFile } from "node:fs/promises";
-import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { access, cp, mkdir, readdir, rename, readFile, rm } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { ToolRegistrar, ToolsConfig } from "./index.js";
@@ -38,10 +38,12 @@ import {
   countFindings,
   listDir,
   renderIndex,
+  renderLatestIndex,
   summaryJson,
   uniquePath,
   workflowFindingsCsv,
   writeTextFile,
+  type LatestStepSource,
   type WorkflowCsvFinding,
 } from "./workflow-package.js";
 import type { StepCtx } from "./workflow-registry.js";
@@ -480,6 +482,116 @@ async function writeArtifacts(
   await writeTextFile(join(dir, "summary.json"), JSON.stringify(summaryJson(m, pass.n), null, 2));
   await markLatest(wfDir, pass.dir);
   await saveManifest(wfDir, m);
+  // The newest copy of every step's outputs is rebuilt when a pass closes —
+  // the moment there is a new pass folder to take it from.
+  if (pass.closedAt !== undefined) await rebuildLatest(wfDir, m);
+}
+
+/** The derived `latest/` folder: real copies (the captain opens them from Windows), never symlinks. */
+const LATEST_DIR = "latest";
+const LATEST_STAGING = "latest.build";
+const LATEST_OLD = "latest.old";
+
+/** `03-tds`, plus the `03-tds (2)` names uniquePath hands out when the plain one is taken. */
+function stepFolderPattern(dirName: string): RegExp {
+  return new RegExp(`^${dirName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: \\(\\d+\\))?$`);
+}
+
+async function countFiles(dir: string): Promise<number> {
+  let n = 0;
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    n += e.isDirectory() ? await countFiles(join(dir, e.name)) : 1;
+  }
+  return n;
+}
+
+/**
+ * The named step's folders inside one pass that hold files (an empty folder is
+ * a needs-input step that never produced anything there), the ones the
+ * manifest's own outputs point into first — that is how `03-tds (2)` wins over
+ * an abandoned `03-tds`.
+ */
+async function stepFoldersOf(
+  passDir: string,
+  pattern: RegExp,
+  preferred: ReadonlySet<string>,
+): Promise<string[]> {
+  const entries = await readdir(passDir, { withFileTypes: true }).catch(() => null);
+  if (!entries) return [];
+  const out: string[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || !pattern.test(e.name)) continue;
+    const full = resolve(join(passDir, e.name));
+    if ((await listDir(full)).length === 0) continue;
+    out.push(full);
+  }
+  out.sort((a, b) => Number(preferred.has(b)) - Number(preferred.has(a)) || b.localeCompare(a));
+  return out;
+}
+
+/**
+ * Rebuild `<workflow dir>/latest/`: for each step, a real copy of its output
+ * folder from the most recent pass folder that produced one (a step that only
+ * ever ran in an older pass keeps its files), plus a README naming that pass.
+ * The folder is built in `latest.build/` and swapped in, so a failed copy
+ * never leaves a half-empty `latest/` — the rebuild fails visibly instead.
+ * Pass folders and operator inputs are only ever read here: `latest/` is
+ * derived output.
+ */
+export async function rebuildLatest(
+  wfDir: string,
+  m: WorkflowManifest,
+): Promise<LatestStepSource[]> {
+  const passesNewestFirst = [...m.passes].reverse();
+  const sources: LatestStepSource[] = [];
+  const picks: Array<{ source: LatestStepSource; from: string }> = [];
+  for (const [index, step] of WORKFLOW_STEPS.entries()) {
+    const dirName = stepDirName(step, index);
+    const source: LatestStepSource = { id: step.id, title: step.title, dirName, fromPass: null, files: 0 };
+    sources.push(source);
+    const preferred = new Set((m.steps[step.id]?.outputs ?? []).map((o) => resolve(dirname(o))));
+    const pattern = stepFolderPattern(dirName);
+    for (const p of passesNewestFirst) {
+      const [folder] = await stepFoldersOf(join(wfDir, p.dir), pattern, preferred);
+      if (!folder) continue;
+      source.fromPass = p.dir;
+      picks.push({ source, from: folder });
+      break;
+    }
+  }
+
+  const staging = join(wfDir, LATEST_STAGING);
+  const latestDir = join(wfDir, LATEST_DIR);
+  const previous = join(wfDir, LATEST_OLD);
+  await rm(staging, { recursive: true, force: true });
+  try {
+    await mkdir(staging, { recursive: true });
+    for (const { source, from } of picks) {
+      const dest = join(staging, source.dirName);
+      await cp(from, dest, { recursive: true, dereference: true });
+      source.files = await countFiles(dest);
+    }
+    await writeTextFile(join(staging, "README.md"), renderLatestIndex(sources));
+  } catch (e) {
+    await rm(staging, { recursive: true, force: true });
+    throw new Error(`latest/ rebuild failed: ${errMsg(e)}`);
+  }
+
+  await rm(previous, { recursive: true, force: true });
+  let hadPrevious = false;
+  if (await exists(latestDir)) {
+    await rename(latestDir, previous);
+    hadPrevious = true;
+  }
+  try {
+    await rename(staging, latestDir);
+  } catch (e) {
+    if (hadPrevious) await rename(previous, latestDir).catch(() => undefined);
+    await rm(staging, { recursive: true, force: true });
+    throw new Error(`latest/ rebuild failed: ${errMsg(e)}`);
+  }
+  if (hadPrevious) await rm(previous, { recursive: true, force: true });
+  return sources;
 }
 
 export function registerWorkflowTools(
@@ -565,9 +677,11 @@ export function registerWorkflowTools(
     "tb_audit_workflow_status",
     "Report a tax-audit workflow's intake table, or list every workflow when no id is given. " +
       "Re-checks the files on disk (a filled generated file reads 'filled'), generates whatever has " +
-      "become generatable, and applies patches: setInputs (key to PATH), accept, approve (the GST " +
+      "become generatable, applies patches: setInputs (key to PATH), accept, approve (the GST " +
       "working sheet only — set only when the user has explicitly approved the working-sheet totals; " +
-      "never infer approval) and regenerate (a fresh generated copy).",
+      "never infer approval) and regenerate (a fresh generated copy). With an id it also rebuilds " +
+      "the workflow's latest/ folder (the newest copy of every step's outputs), so one status call " +
+      "populates it for a workflow created before that folder existed.",
     {
       workflowId: z.string().optional().describe("The workflow folder name; omit to list all workflows"),
       setInputs: z.record(z.string()).optional().describe("Map of input key to PATH to add or replace"),
@@ -661,6 +775,9 @@ export function registerWorkflowTools(
         }
 
         await saveManifest(wfDir, m);
+        // One status call is enough to populate latest/ for a workflow created
+        // before it existed (or whose last pass closed long ago).
+        const latest = await rebuildLatest(wfDir, m);
         await ctx.audit(
           "tb_audit_workflow_status",
           {
@@ -673,7 +790,11 @@ export function registerWorkflowTools(
           Object.values(m.inputs).filter((e) => e.path).length,
           0,
         );
-        return JSON.stringify(workflowView(m, wfDir), null, 2);
+        return JSON.stringify(
+          { ...workflowView(m, wfDir), latest: { dir: join(wfDir, LATEST_DIR), steps: latest } },
+          null,
+          2,
+        );
       } catch (e) {
         throw scrubbed(e, session);
       }

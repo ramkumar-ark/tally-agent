@@ -336,6 +336,42 @@ export function summaryJson(m: WorkflowManifest, passN: number): Record<string, 
   };
 }
 
+export interface LatestStepSource {
+  id: string;
+  title: string;
+  dirName: string;
+  /** The pass folder this step's newest files were copied from, null when it has none yet. */
+  fromPass: string | null;
+  files: number;
+}
+
+/**
+ * The latest/ README: one row per step naming the pass folder its files came
+ * from. Pass folder names carry a timestamp, so they appear as-is (LATEST.txt
+ * and the pass links in INDEX.md already do the same).
+ */
+export function renderLatestIndex(sources: LatestStepSource[]): string {
+  const lines: string[] = [];
+  lines.push("# Latest step outputs", "");
+  lines.push(
+    "The newest copy of every step's output folder, taken from the most recent pass " +
+      "folder that produced it. Derived output: it is rebuilt from the pass folders " +
+      "after every pass closes and by `tb_audit_workflow_status`, never edited, and the " +
+      "`pass-*` folders stay the record.",
+    "",
+    "| Step | Source pass | Folder | Files |",
+    "|---|---|---|---|",
+  );
+  for (const s of sources) {
+    lines.push(
+      `| ${s.title} | ${s.fromPass ?? "not produced yet"} | \`${s.dirName}\` | ` +
+        `${s.fromPass ? count(s.files) : "—"} |`,
+    );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 export async function writeTextFile(path: string, text: string): Promise<void> {
   await writeFile(path, text, "utf8");
 }

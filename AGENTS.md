@@ -975,6 +975,22 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   take minutes and each call must fit the existing timeout chain. The
   workflow folder always stays under `cfg.reportDir`; `guardTargets` refuses
   any `outDir`/`outPath` outside it or containing a user input.
+- **`<workflow dir>/latest/` is derived output**: the newest copy of every
+  step's output folder (real copies, never symlinks — the captain opens them
+  from Windows) plus a `README.md` naming the source pass. `rebuildLatest`
+  (`src/workflow.ts`) rebuilds it when a pass closes (`writeArtifacts`, gated
+  on `pass.closedAt`) and on every `tb_audit_workflow_status` call that names a
+  workflow — that second path is what backfills a workflow created before the
+  folder existed (one status call). Selection walks `m.passes` newest-first
+  for a NON-EMPTY step folder (`stepDirName`, plus `uniquePath`'s ` (N)`
+  names, preferring the folder the step's own outputs point into): an empty
+  folder is a needs-input/failed step that produced nothing there, so an older
+  pass keeps its files — which is the whole point of the folder. It is built
+  in `latest.build/` and swapped in (old `latest.old/`), so a failed copy
+  throws instead of leaving a half-empty `latest/`, and the rebuild only ever
+  READS `pass-*` and operator inputs. `test/workflow-latest.test.ts` covers
+  newest-pass-per-step selection, stale-file replacement, the status backfill
+  and the pass-close rebuild.
 - `after` in `WORKFLOW_STEPS` is **ordering only** — planning and readiness
   live in `planPass`/`stepReadiness` (`src/workflow-state.ts`); required-input
   gating, not sequence, holds a step back. The notds step refreshes the TDS
