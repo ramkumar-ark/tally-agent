@@ -117,15 +117,26 @@ export interface TdsBooking {
   rateApplied?: number;
   viaCertificate?: boolean;
   /**
-   * The tax this booking is charged on its OWN account: `rate x liable` less
-   * what the earlier bookings of the same deductee + section + year already
-   * carried (captain 2026-09-30, `chargedSoFar` in the analysis walk, inbox
-   * 016). Only a cumulative-limit CROSSING booking differs from
-   * `rate x liable`, and it is the figure a duty credit settles, so the amount
-   * tiebreak must match against it — a credit booked on the crossing bill's
-   * own date was computed by the operator from the same netting.
+   * The tax this booking is charged on its OWN account: `rate x liable`. The
+   * crossing netting (captain 2026-09-30, `chargedSoFar` in the analysis walk,
+   * inbox 016) now lives in `liable` itself — `stampLiabilities` nets a
+   * cumulative-limit crossing booking's base against the liable already
+   * charged to earlier bookings of the same deductee + section + year
+   * (clause 34, 2026-10-09) — so this is `rate x liable` for every booking
+   * and equals the walk's pre-pool charge. It is the figure a duty credit
+   * settles, so the amount tiebreak must match against it — a credit booked
+   * on the crossing bill's own date was computed by the operator from the
+   * same netting.
    */
   chargeNet?: number;
+  /**
+   * Stamped only on a cumulative-limit CROSSING booking: the deductee's FY
+   * gross through this booking, before the clause 34 netting. `liable` then
+   * equals this LESS the liable already charged to earlier bookings, which is
+   * what lets a finding say so honestly instead of claiming the whole
+   * cumulative sits on this one booking.
+   */
+  crossGross?: number;
 }
 
 export interface TdsPayment {
@@ -1292,16 +1303,19 @@ function stampLiabilities(agg: Agg, ctx: TdsCtx & { operator: OperatorFile }): v
   }
 
   let cumulative = 0;
-  // The running statutory charge of the earlier bookings (inbox 016). Only the
-  // CROSSING booking is netted against it — the same rule and the same index
-  // the analysis walk applies — so `chargeNet` publishes per booking the
-  // liability the engine will actually charge it, which is what a duty credit
-  // booked against that bill settles. (The walk's own running total is taken
-  // after the over-deduction bank, so the two can differ by the bank's
-  // effect on an earlier booking of the same party; the tiebreak only uses this
-  // figure to CHOOSE a pairing, and the walk's figure stays the authority for
-  // what is reported.)
-  let charged = 0;
+  // The running liable BASE already charged to this party's earlier bookings.
+  // The crossing booking carries the cumulative LESS it (clause 34, 2026-10-09):
+  // a pre-crossing booking over the per-bill single limit already carried its
+  // own gross as liable, so charging the crossing the whole year-to-date would
+  // count that payment twice and make the section's sum of liable exceed its
+  // total payments (DSV: 30-Oct 50,000 + crossing 1,18,990 on 1,18,990 paid).
+  // With this the whole party's liable sums to exactly its gross — every later
+  // booking carries its own gross, the crossing carries the rest of the
+  // cumulative, and a pre-crossing single-limit booking the part it owns.
+  // `chargeNet` therefore needs no separate netting: the base IS netted, so it
+  // is simply the booking's liability (the same figure the analysis walk's
+  // charge netting produced under one rate).
+  let chargedLiable = 0;
   for (let i = 0; i < bookings.length; i++) {
     const b = bookings[i];
     cumulative += b.gross;
@@ -1311,16 +1325,20 @@ function stampLiabilities(agg: Agg, ctx: TdsCtx & { operator: OperatorFile }): v
       if (law.cumulativeOnCross) {
         // 194-I(a)/(b) (captain 2026-09-30): no deduction while the party's
         // cumulative FY bookings are within the annual aggregate; the crossing
-        // booking carries the whole cumulative to date (earlier bookings
-        // included) and each later booking its own full gross. The section's
-        // year total is unchanged — only the pre-crossing bookings stop being
-        // reported. A party that never crosses (crossIdx -1) is never liable.
-        // The crossing booking is identified by INDEX, not by date: several
-        // bookings can share the crossing date and only the later one carries
-        // the crossing.
+        // booking carries the cumulative to date (earlier bookings included)
+        // LESS the liable already charged to those earlier bookings, so no
+        // payment is counted twice and the section's sum of liable never
+        // exceeds its total payments (clause 34). Each later booking carries
+        // its own full gross. The section's year total is unchanged — only the
+        // pre-crossing bookings stop being reported. A party that never
+        // crosses (crossIdx -1) is never liable. The crossing booking is
+        // identified by INDEX, not by date: several bookings can share the
+        // crossing date and only the later one carries the crossing.
         if (crossIdx < 0) liableBase = singleLiable ? b.gross : 0;
-        else if (i === crossIdx) liableBase = cumulative;
-        else if (i > crossIdx || singleLiable) liableBase = b.gross;
+        else if (i === crossIdx) {
+          b.crossGross = cumulative;
+          liableBase = Math.max(0, cumulative - chargedLiable);
+        } else if (i > crossIdx || singleLiable) liableBase = b.gross;
       } else if (agg.crossed || singleLiable) liableBase = b.gross;
     } else if (agg.crossed) {
       // Section 194Q: only the amount beyond the crossing (C8) — measured
@@ -1333,8 +1351,8 @@ function stampLiabilities(agg: Agg, ctx: TdsCtx & { operator: OperatorFile }): v
     const liability = round2(rate.rate * liableBase);
     b.liable = liableBase;
     b.rateApplied = rate.rate;
-    b.chargeNet = i === crossIdx ? round2(Math.max(0, liability - charged)) : liability;
-    charged = round2(charged + Math.max(0, liability));
+    b.chargeNet = liability;
+    chargedLiable = chargedLiable + liableBase;
     b.viaCertificate = ctx.certificateRateOf(b.party, section, b.date) !== null;
     if (liability > TDS_TOLERANCE) {
       agg.taxDue = true;
@@ -1685,21 +1703,10 @@ export function analyzeTds(
     const section = agg.section;
     const law = lawOf(section)!;
     const wholeYear = law.wholeYearOnCross;
-    const threshold = law.threshold;
 
     // Aggregation preserves date order (built from a date-sorted walk), but
     // the running cumulative is correctness-critical, so pin it here.
     const bookings = [...agg.bookings].sort((a, b) => a.date.localeCompare(b.date));
-
-    let before = 0;
-    let crossIdx = -1;
-    for (let i = 0; i < bookings.length; i++) {
-      const after = before + bookings[i].gross;
-      if (crossIdx < 0 && threshold.aggregate !== undefined && after > threshold.aggregate) {
-        crossIdx = i;
-      }
-      before = after;
-    }
 
     // The credit this booking was actually credited: its own share of a split
     // credit (the 1:1 field points at the credit's FIRST share, so the
@@ -1764,7 +1771,7 @@ export function analyzeTds(
     type Cover = { ded: TdsDeduction; tax: number };
     interface PlanRow {
       b: TdsBooking;
-      /** The statutory tax on this booking's own base, less what earlier bookings were already charged. */
+      /** The statutory tax on this booking's own (already netted) base. */
       base: number;
       /** `base` less whatever the forward bank covered. */
       liability: number;
@@ -1776,36 +1783,22 @@ export function analyzeTds(
     }
     const pool: { ded: TdsDeduction; date: string; remaining: number }[] = [];
     const plan: PlanRow[] = [];
-    // Liability already charged on EARLIER bookings of this party and section
-    // (firstmate 2026-09-30, the double-count finding). A cumulative-limit
-    // crossing booking carries the tax on the year's cumulative to its date,
-    // which already includes the liability an earlier booking was charged on its
-    // own account — a per-bill single-limit bill inside the year. The captain's
-    // example: a 194-C bill of 55,764 on 15-Oct (over the 30,000 per-bill limit,
-    // so 1,115.28 was due and charged there) is inside the 2,17,681.20 the
-    // 26-Dec crossing charges, so charging the full 4,353.62 there makes
-    // 1,115.28 liable twice and reports 1,114.90 on a party that paid
-    // everything. The crossing therefore carries the cumulative LESS what is
-    // already charged; the year still sums to the tax on the year's base, never
-    // more (the invariant `test/tds-194i-threshold.test.ts` pins).
-    //
-    // `charged` accumulates the STATUTORY charge (`base`), not what was left
-    // payable after the bank: a booking whose liability a credit overpaid was
-    // still charged that tax, and letting the crossing charge it again would
-    // count the same rupee twice.
-    let charged = 0;
+    // The crossing netting lives in `b.liable` itself (stampLiabilities,
+    // clause 34, 2026-10-09): a cumulative-limit crossing booking carries the
+    // year's cumulative to its date LESS the liable already charged to this
+    // party's earlier bookings — a per-bill single-limit bill inside the year —
+    // so `rate x liable` below is each booking's whole statutory charge and
+    // needs no separate subtraction. The captain's example (firstmate
+    // 2026-09-30): a 194-C bill of 55,764 on 15-Oct (over the 30,000 per-bill
+    // limit, so 1,115.28 was due there) is inside the 2,17,681.20 the 26-Dec
+    // crossing charges; charging the full 4,353.62 there made 1,115.28 liable
+    // twice and reported 1,114.90 on a party that paid everything. The year
+    // still sums to the tax on the year's base, never more (the invariant
+    // `test/tds-194i-threshold.test.ts` pins).
     for (let i = 0; i < bookings.length; i++) {
       const b = bookings[i];
       const found = deductionOf(b);
-      // A cumulative-limit crossing booking carries the tax on the year's
-      // cumulative to its date, less the liability already charged on this
-      // party's earlier bookings (see `charged`): at the crossing `b.liable`
-      // IS the cumulative gross, so the ordinary rate x liable product is
-      // exactly the number to net.
-      const base =
-        i === crossIdx
-          ? round2((b.rateApplied ?? 0) * (b.liable ?? 0) - charged)
-          : round2((b.rateApplied ?? 0) * (b.liable ?? 0));
+      const base = round2((b.rateApplied ?? 0) * (b.liable ?? 0));
       const ownTax = found ? (found.split ? found.split.share.tax : found.ded.tax) : 0;
       // What this booking's own credit did beyond its own liability is a free
       // rupee for this party, section and year — the pool's raw material. A
@@ -1816,9 +1809,7 @@ export function analyzeTds(
         const excess = round2(Math.max(0, ownTax - base));
         if (excess > ZERO) pool.push({ ded: found.ded, date: found.ded.date, remaining: excess });
       }
-      charged = round2(charged + Math.max(0, base));
-      plan.push({ b, base, liability: base, own: found, ownTax, backs: [] });
-    }
+      plan.push({ b, base, liability: base, own: found, ownTax, backs: [] });    }
 
     if (section !== "194Q" && !timingOnlySection(section)) {
       // Oldest credit first: a party that overpaid in June should not have a
@@ -1962,7 +1953,9 @@ export function analyzeTds(
         // of its own gross, which is only true at a crossing.
         const crossNote =
           law.cumulativeOnCross && round2(b.liable ?? 0) !== round2(b.gross)
-            ? ` on the ${money(b.liable ?? 0)} booked to this date, including the earlier bookings within the annual limit`
+            ? b.crossGross !== undefined && round2(b.crossGross) !== round2(b.liable ?? 0)
+              ? ` on the ${money(b.liable ?? 0)} of the ${money(b.crossGross)} booked to this date, the rest already charged to an earlier booking within the annual limit`
+              : ` on the ${money(b.liable ?? 0)} booked to this date, including the earlier bookings within the annual limit`
             : "";
         const notDeductedId = push(
           "tds_not_deducted",
