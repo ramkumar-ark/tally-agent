@@ -1748,6 +1748,10 @@ export function analyzeTds(
   // credit's deducted tax — a short row carries only the undeducted portion,
   // captain 2026-09-26 — so this helper is no longer needed here.)
 
+  // Credits whose deposit facts the per-booking walk below has raised, so the
+  // challan sweep after it reports only the credits no booking carried.
+  const depositReported = new Set<TdsDeduction>();
+
   for (const agg of aggs.values()) {
     const section = agg.section;
     const law = lawOf(section)!;
@@ -1858,7 +1862,23 @@ export function analyzeTds(
         const excess = round2(Math.max(0, ownTax - base));
         if (excess > ZERO) pool.push({ ded: found.ded, date: found.ded.date, remaining: excess });
       }
-      plan.push({ b, base, liability: base, own: found, ownTax, backs: [] });    }
+      plan.push({ b, base, liability: base, own: found, ownTax, backs: [] });
+    }
+    // A credit no booking of this deductee+section took as its own is still a
+    // deduction the books made (2026-10-12): an orphan with no joined booking,
+    // or one that joined a booking another credit won (deductionOf picks one
+    // credit per booking). Left out of the pool it paid nothing, so a month-end
+    // journal covering earlier bills was reported as those bills "not deducted".
+    // A consolidated credit (`shares`) is spent on its own bookings and stays out.
+    if (section !== "194Q" && !timingOnlySection(section) && bookings.length > 0) {
+      const dkey = deducteeKeyOf(ctx, bookings[0].party);
+      const taken = new Set(plan.map((r) => r.own?.ded));
+      for (const d of events.deductions) {
+        if (d.section !== section || d.shares !== undefined || taken.has(d)) continue;
+        if (deducteeKeyOf(ctx, d.party) !== dkey) continue;
+        pool.push({ ded: d, date: d.date, remaining: d.tax });
+      }
+    }
 
     if (section !== "194Q" && !timingOnlySection(section)) {
       // Oldest credit first: a party that overpaid in June should not have a
@@ -2171,6 +2191,7 @@ export function analyzeTds(
       if (!ded) continue;
       const consolidated = ded.shares !== undefined;
       const creditReported = !consolidated || ded.booking === b;
+      if (creditReported) depositReported.add(ded);
       // The credit's own tax, never the total credited to this booking: a
       // backward settlement pays a DIFFERENT credit, whose tax belongs to that
       // credit's own booking.
@@ -2531,6 +2552,33 @@ export function analyzeTds(
       "warning",
       d.party,
       section,
+      d.tax,
+      `deposit on ${displayDate(d.subsequentDeposit)} after the Rule 30 due date of ${displayDate(due)} — per the return's challan; s.201(1A) interest (ii) of ${money(ii)} for ${months} month(s) at 1.5%${d.subsequentInterestPaid && d.subsequentInterestPaid > 0 ? ` (interest paid ${money(d.subsequentInterestPaid)})` : ""}.`,
+      [{ kind: "ii", amount: ii, from: d.date, to: d.subsequentDeposit, basis: `1.5% of ${months} month(s)` }],
+    );
+    interestIi += ii;
+    d.interestII = ii;
+  }
+  // A credit covered by a subsequent-year challan that no booking's deposit
+  // chain reported (2026-10-12): an orphan credit, one that lost its booking to
+  // another credit, or one that only settled earlier bills from behind. Its
+  // deposit facts are real (the return's challan) and were raised nowhere, so
+  // the late-deposit interest (ii) is raised here, once per credit. Timing-only
+  // sections have their own sweep above.
+  for (const d of events.deductions) {
+    if (d.section === null || timingOnlySection(d.section)) continue;
+    if (d.subsequentDeposit === undefined || depositReported.has(d)) continue;
+    if (d.date > ctx.asOnDate) continue;
+    const due = depositDue(d.date);
+    if (d.subsequentDeposit <= due) continue;
+    const months = calendarMonths(d.date, d.subsequentDeposit);
+    const ii = interestOn(0.015, months, d.tax);
+    if (ii <= 0) continue;
+    push(
+      "tds_late_deposit",
+      "warning",
+      d.party,
+      d.section,
       d.tax,
       `deposit on ${displayDate(d.subsequentDeposit)} after the Rule 30 due date of ${displayDate(due)} — per the return's challan; s.201(1A) interest (ii) of ${money(ii)} for ${months} month(s) at 1.5%${d.subsequentInterestPaid && d.subsequentInterestPaid > 0 ? ` (interest paid ${money(d.subsequentInterestPaid)})` : ""}.`,
       [{ kind: "ii", amount: ii, from: d.date, to: d.subsequentDeposit, basis: `1.5% of ${months} month(s)` }],

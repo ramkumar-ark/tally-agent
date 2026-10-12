@@ -1667,10 +1667,13 @@ describe("2026-09-26g by-voucher amount-tiebreak", () => {
     const party = [{ ledger: partyA, rows: [{ ...row("20250430", "B/8", -950000, "Machinery Rent"), voucherType: "Purchase" }] }];
     const out = run(tdsCtx(op), duty, expense, party);
     expect(out.events.deductions.find((d) => d.tax === 19000)!.booking?.gross).toBe(950000);
-    // The in-voucher 6,600 still wins the bill (2026-09-26g) and is now short
-    // of the bill's liability, which the 194-I annual limit makes the whole
-    // 9,50,000 booked to that date (captain 2026-09-30) — 19,000 payable.
-    expect(ofCheck(out, "tds_short_deducted").map((f) => f.amount)).toEqual([12400]);
+    // The in-voucher 6,600 still wins the bill (2026-09-26g) and is short of the
+    // bill's liability (9,50,000 at the 194-I annual limit, 19,000 payable). The
+    // 19,000 credit the bill did not take is the same deductee's, same section,
+    // same day: it is spent on the shortfall instead of being left unused
+    // (2026-10-12), so nothing is short.
+    expect(ofCheck(out, "tds_short_deducted")).toEqual([]);
+    expect(ofCheck(out, "tds_not_deducted")).toEqual([]);
   });
 });
 
