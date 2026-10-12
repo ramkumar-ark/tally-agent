@@ -1020,6 +1020,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   is scrubbed before it reaches the model. Tests inject `spawnDayBookExport`
   through `registerWorkflowTools`' third argument — the fake never spawns.
 
+## Sharp edges found on unjoined year-end credits (2026-10-12)
+
+- A duty credit that joins no booking (a 31-Mar journal outside the join window, or one that lost its bill to another credit) used to be invisible: earlier bills read "not deducted" and a covering challan raised no deposit row. `analyzeTds` (`src/tds.ts`) now pools such credits (same deductee+section, non-194Q, non-timing-only, no shares) for backward settlement and sweeps post-walk for `tds_late_deposit` on any challan-covered credit no booking reported (`depositReported`). `claimShares` matches the one challan whose rows sum to the credit — a deductee can hold rows of several challans for the same deduction month.
+- A workflow pass folder is only created when the last pass has `closedAt`; the `to-fill` notds/payable files are reused by name, so regenerating means moving them aside first.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
