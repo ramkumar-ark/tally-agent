@@ -1444,7 +1444,56 @@ export function analyzeTds(
   const unmatchedDeds = events.deductions
     .filter((d) => !d.subsequentDeposit)
     .sort((a, b) => a.date.localeCompare(b.date) || a.tax - b.tax);
+  // Deductee-level challan match (2026-10-12). The return allocates a credit's
+  // tax per DEDUCTEE, and a deductee may own several return rows for one
+  // challan, so a whole-credit match can miss in two ways: a consolidated
+  // credit (the 1179 journal: seven deductees, one 4,572 credit) and a 1:1 joined
+  // credit whose bill is not the return's row (the 1207 journal: 1,100 against
+  // two return rows of 300 and 800). Each deductee group takes ALL its unclaimed
+  // rows (same section, deduction month) and their sum must match the group tax
+  // within tolerance. All-or-nothing: a group without a matching sum leaves the
+  // credit untouched, and the matched rows must share one challan, because the
+  // credit carries one deposit date. The challan's interest is read ONCE — each
+  // row repeats its challan's Interest column, so summing would multiply it.
+  const claimShares = (d: TdsDeduction): boolean => {
+    const groups = new Map<string, number>();
+    if (d.shares) {
+      for (const share of d.shares) {
+        const key = deducteeKeyOf(ctx, share.booking.party);
+        groups.set(key, round2((groups.get(key) ?? 0) + share.tax));
+      }
+    } else {
+      groups.set(deducteeKeyOf(ctx, d.party), d.tax);
+    }
+    if (groups.size === 0) return false;
+    // A deductee may carry several return rows for one challan (the 1179
+    // journal's party with two bookings is two rows), so a group takes ALL its
+    // unclaimed matching rows and their sum must match the group's tax.
+    const picked: number[] = [];
+    for (const [key, tax] of groups) {
+      const rows: number[] = [];
+      usableAllocs.forEach((a, i) => {
+        if (
+          !claimedAlloc.has(i) &&
+          deducteeKeyOf(ctx, a.party) === key &&
+          a.section === d.section &&
+          a.dedDate.slice(0, 6) === d.date.slice(0, 6)
+        ) rows.push(i);
+      });
+      const sum = round2(rows.reduce((t, i) => t + usableAllocs[i].tax, 0));
+      if (rows.length === 0 || Math.abs(sum - tax) > TDS_TOLERANCE) return false;
+      picked.push(...rows);
+    }
+    const first = usableAllocs[picked[0]];
+    if (!picked.every((i) => usableAllocs[i].depositDate === first.depositDate && usableAllocs[i].challanId === first.challanId)) return false;
+    for (const i of picked) claimedAlloc.add(i);
+    d.subsequentDeposit = first.depositDate;
+    d.subsequentInterestPaid = first.interestPaid;
+    d.subsequentChallanId = first.challanId;
+    return true;
+  };
   for (const d of unmatchedDeds) {
+    if (claimShares(d)) continue;
     // A timing-only section's allocations are matched by section + month + tax
     // alone (2026-09-26o item 038/039): the duty credit debits the partners'
     // Capital Accounts, which no operator row declares as a Winman deductee,
