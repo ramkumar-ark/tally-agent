@@ -1741,23 +1741,37 @@ let lastGst44: Gst44ReviewResult | undefined;
       "block-wise and asset-wise (WDV, additional depreciation, s.50). Optionally pass the PATH of the " +
       "operator depreciation file (JSON) to seed verified opening WDV and overrides - never paste its rows " +
       "into chat. Without a file the block seed is the book balance, flagged unverified. " +
-      "Asset ledgers appear as pseudonyms such as 'Ledger 2'.",
+      "Pass dayBookPath (the PATH of a day-book JSON export for the period) to read the asset ledgers' " +
+      "vouchers from the export: the live Ledger-Vouchers report collapses same-day, same-amount vouchers, " +
+      "a day book keeps both. Asset ledgers appear as pseudonyms such as 'Ledger 2'.",
     {
       company: z.string().optional(),
       fromDate: z.string().describe("YYYYMMDD, the first day of the previous year"),
       toDate: z.string().describe("YYYYMMDD, the last day of the previous year"),
       depreciationFilePath: z.string().optional()
         .describe("Path to the operator depreciation file. The path is read inside the gateway; only the path is audited."),
+      dayBookPath: z.string().optional().describe(
+        "PATH to a day-book JSON export covering the period; read inside the gateway. Without it the asset ledger rows come from the live report.",
+      ),
     },
     async (args) => {
       const operatorText = args.depreciationFilePath
         ? await readFile(args.depreciationFilePath, "utf8")
         : null;
+      const company = args.company ?? cfg.defaultCompany;
+      const dayBook = args.dayBookPath
+        ? readDayBook(await loadDayBookText(args.dayBookPath, cfg.dayBookMaxBytes), {
+          company,
+          fromDate: args.fromDate,
+          toDate: args.toDate,
+        })
+        : undefined;
       const result = await session.depreciationReview(
-        args.company ?? cfg.defaultCompany,
+        company,
         args.fromDate,
         args.toDate,
         operatorText,
+        dayBook,
       );
       lastDep = result;
       // The file's PATH is audited, never its contents (the M2 returnsPath contract).
@@ -1768,6 +1782,7 @@ let lastGst44: Gst44ReviewResult | undefined;
           fromDate: args.fromDate,
           toDate: args.toDate,
           ...(args.depreciationFilePath ? { depreciationFilePath: args.depreciationFilePath } : {}),
+          ...(args.dayBookPath ? { dayBookPath: args.dayBookPath } : {}),
         },
         result.findings.length,
         maskedCount(result.findings),

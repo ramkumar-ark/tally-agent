@@ -708,6 +708,18 @@ export function analyzeDepreciation(input: DepAnalyzeInput, ctx: DepCtx): DepRes
       });
     }
 
+    // Rule R3 (in-period): a debit dated inside the period that no supplier
+    // acquisition took is a current-year addition with its own date. The
+    // opening WDV is the book seed as on period start and cannot contain a
+    // debit made after it (2026-10-13, Narayanan: a 01-Apr-2025 takeover debit
+    // was folded into opening WDV and lost from the additions column).
+    for (const r of rows) {
+      if (r.amount <= 0 || r.date < ctx.fromDate) continue;
+      if (netted.some((a) => a.debits.includes(r))) continue;
+      if (isNil(ctx.bookOpening(ledger))) continue;
+      netted.push({ ledger, firstUse: r.date, cost: r.amount, counterparty: r.counterparty, debits: [r], netted: 0 });
+    }
+
     // Every acquisition debit is an audit-trail movement (design §15.4).
     for (const a of netted) {
       for (const d of a.debits) {
@@ -719,11 +731,12 @@ export function analyzeDepreciation(input: DepAnalyzeInput, ctx: DepCtx): DepRes
     }
 
     // The carried obligation from the acquisitions task's review: rule-3
-    // debits (attach-to-nothing on a ledger with a NON-NIL opening balance)
-    // are silently dropped from groupAcquisitions' Acquisition[]. Design §10
-    // rule 3 says they join the opening written-down value at the FULL rate,
-    // so they are carried here into the asset's own opening seed (step 6)
-    // instead of being lost.
+    // debits dated BEFORE the period (attach-to-nothing on a ledger with a
+    // NON-NIL opening balance) are silently dropped from groupAcquisitions'
+    // Acquisition[]. Design §10 rule 3 says they join the opening written-down
+    // value at the FULL rate, so they are carried here into the asset's own
+    // opening seed (step 6) instead of being lost. In-period ones were made
+    // acquisitions above.
     const acquisitionDebits = new Set(netted.flatMap((a) => a.debits));
     let rule3Debits = 0;
     if (!isNil(ctx.bookOpening(ledger))) {

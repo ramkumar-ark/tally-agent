@@ -478,7 +478,10 @@ export const WORKFLOW_STEPS: WorkflowStep[] = [
   {
     id: "depreciation",
     title: "Depreciation review (IT Act)",
-    inputs: [{ key: "depreciationFile", need: "optional" }],
+    inputs: [
+      { key: "depreciationFile", need: "optional" },
+      { key: "dayBook", need: "optional" },
+    ],
     live: true,
     actions: [
       {
@@ -489,6 +492,7 @@ export const WORKFLOW_STEPS: WorkflowStep[] = [
           fromDate: c.params.fromDate,
           toDate: c.params.toDate,
           depreciationFilePath: c.path("depreciationFile"),
+          dayBookPath: c.path("dayBook"),
         }),
       },
       {

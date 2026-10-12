@@ -843,6 +843,7 @@ export interface Session {
     fromDate: string,
     toDate: string,
     operatorText: string | null,
+    dayBook?: DayBookInput,
   ): Promise<DepReviewResult>;
   /**
    * Fixed asset purchase & sale register (audit artifact). Fetches EVERY
@@ -2835,6 +2836,7 @@ export function createSession(
     fromDate: string,
     toDate: string,
     operatorText: string | null,
+    dayBook?: DayBookInput,
   ): Promise<DepReviewResult> {
     if (!/^\d{8}$/.test(fromDate) || !/^\d{8}$/.test(toDate) || fromDate > toDate) {
       throw new Error("fromDate and toDate must be YYYYMMDD, with fromDate on or before toDate");
@@ -2874,9 +2876,26 @@ export function createSession(
       .filter((r) => DEP_DISPOSAL_ROOTS.has(canon(rootOf(r.parent))) && DEP_DISPOSAL_NAME.test(r.name))
       .map((r) => r.name);
 
-    const pass1 = await fetchLedgerRows(
-      company, [...depreciationLedgers, ...disposalLedgers], fromDate, toDate,
-    );
+    // The ledger rows come from the operator's day book when one is given:
+    // voucher-level, so two same-day same-amount vouchers both count (the live
+    // Ledger-Vouchers report collapses them, 2026-10 Narayanan gap). Without a
+    // day book this is the live per-ledger report, as before.
+    const fetchRows = async (
+      ledgers: string[],
+    ): Promise<{ rows: Map<string, LedgerVoucherRow[]>; calls: number }> => {
+      if (!dayBook) return fetchLedgerRows(company, ledgers, fromDate, toDate);
+      const inPeriod = dayBook.vouchers.filter((v) => {
+        const date = String(v.date ?? "");
+        return date >= fromDate && date <= toDate;
+      });
+      const rows = new Map<string, LedgerVoucherRow[]>();
+      for (const { ledger, rows: list } of projectLedgerRows(inPeriod, ledgers)) {
+        rows.set(canonicalKey(ledger), list);
+      }
+      return { rows, calls: 0 };
+    };
+
+    const pass1 = await fetchRows([...depreciationLedgers, ...disposalLedgers]);
 
     // The book charge per asset ledger, read once from the expense side: a
     // debit row on the depreciation expense ledger names the charged asset
@@ -2911,7 +2930,7 @@ export function createSession(
       }
       return Math.abs(residual) > ZERO_TOLERANCE;
     });
-    const pass2 = await fetchLedgerRows(company, needFetch, fromDate, toDate);
+    const pass2 = await fetchRows(needFetch);
 
     // Every asset ledger of the company is an asset row, not only the ones
     // that moved: an idle ledger contributes its own opening WDV to the block's

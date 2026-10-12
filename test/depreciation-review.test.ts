@@ -130,6 +130,36 @@ const ctxFor = (over: Partial<DepCtx> = {}): DepCtx => ({
 });
 
 describe("analyzeDepreciation", () => {
+  it("R3: an in-period non-supplier debit on an in-use asset is an addition, not opening WDV", () => {
+    // Narayanan FY 25-26: a 01-Apr-2025 debit of 14,854.78 to Printer A/c was
+    // folded into opening WDV (rule R3 on the whole period). Opening stays the
+    // book seed; the debit is a current-year addition dated on its own day.
+    const r = analyzeDepreciation({
+      ledgerRows: [{ ledger: "Printer A/c", rows: [
+        row("20250401", "Partner Capital", 14854.78, "Journal"),
+        row("20260303", "Depreciation A/c", -2228.22),
+      ] }],
+      disposalSignals: [], depreciationLedgerDebits: 2228.22,
+    }, ctxFor({ bookOpening: () => 100000 }));
+    const asset = r.assets.find((a) => a.ledger === "Printer A/c");
+    expect(asset?.opening).toBeCloseTo(100000, 2);
+    expect(asset?.additionsFull).toBeCloseTo(14854.78, 2);
+    expect(asset?.additionsNet).toBeCloseTo(14854.78, 2);
+  });
+
+  it("R3: a pre-period debit on an in-use asset still joins opening WDV", () => {
+    const r = analyzeDepreciation({
+      ledgerRows: [{ ledger: "Printer A/c", rows: [
+        row("20240315", "Partner Capital", 5000, "Journal"),
+        row("20260303", "Depreciation A/c", -2228.22),
+      ] }],
+      disposalSignals: [], depreciationLedgerDebits: 2228.22,
+    }, ctxFor({ bookOpening: () => 100000 }));
+    const asset = r.assets.find((a) => a.ledger === "Printer A/c");
+    expect(asset?.opening).toBeCloseTo(105000, 2);
+    expect(asset?.additionsNet).toBeCloseTo(0, 2);
+  });
+
   it("reports the Act charge, the book charge and the difference per asset", () => {
     const r = analyzeDepreciation({
       ledgerRows: [{ ledger: "Mixer Plant 2", rows: [
@@ -404,7 +434,7 @@ describe("analyzeDepreciation carried obligations", () => {
   // §10 rule 3 says they join the opening written-down value at the FULL rate.
   it("adds a rule-3 debit to the block's opening WDV at the full rate, not the half rate", () => {
     const r = analyzeDepreciation({
-      ledgerRows: [{ ledger: "Mixer Plant 2", rows: [row("20260320", "Bank of Baroda", 40000)] }],
+      ledgerRows: [{ ledger: "Mixer Plant 2", rows: [row("20240320", "Bank of Baroda", 40000)] }],
       disposalSignals: [], depreciationLedgerDebits: 0,
     }, ctxFor({
       operator: { ...EMPTY_DEP_OPERATOR, openingWdv: [{ block: "Block 15%", rate: 15, amount: 100000 }] },
@@ -413,7 +443,7 @@ describe("analyzeDepreciation carried obligations", () => {
       bookClosing: (l) => (l === "Mixer Plant 2" ? 140000 : 0),
     }));
     expect(r.blocks[0].openingWdv).toBeCloseTo(140000, 2);   // 1,00,000 + 40,000
-    expect(r.blocks[0].totalDepreciation).toBeCloseTo(21000, 2); // 15% full, not the 20260320 half
+    expect(r.blocks[0].totalDepreciation).toBeCloseTo(21000, 2); // 15% full, not the 20240320 half
     const asset = r.assets.find((a) => a.ledger === "Mixer Plant 2");
     expect(asset?.opening).toBeCloseTo(140000, 2);
     expect(asset?.actDepreciation).toBeCloseTo(21000, 2);

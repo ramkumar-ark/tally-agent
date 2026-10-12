@@ -616,6 +616,59 @@ describe("depreciationReview two-pass fetch", () => {
 });
 
 /**
+ * Day-book depreciation fixture. Two same-day, same-amount purchase vouchers
+ * (715/716, 23-May-2025, 1,90,000 each) to one asset ledger. The live
+ * Ledger-Vouchers report collapses them into one row; the day book must not.
+ */
+function depDayBookFixture(calls: string[]) {
+  const purchase = (voucherNumber: string) => ({
+    date: "20250523", voucherType: "Purchase", voucherNumber, partyLedgerName: "R.V. Enterprises",
+    cancelled: false,
+    entries: [
+      { ledger: "Tractor Tanker A/c", amount: 190000 },
+      { ledger: "R.V. Enterprises", amount: -190000 },
+    ],
+  });
+  const dayBook = {
+    shape: "array", vouchers: [purchase("715"), purchase("716")], company: null, groups: null,
+    ledgers: null, observedFrom: "20250523", observedTo: "20250523", rejected: 0, emptyMonths: [],
+  } as never;
+  const session = createSession(
+    Object.assign(fakeDownstream(), {
+      groups: async () => [
+        { name: "Fixed Assets", parent: " Primary" },
+        { name: "Block 15%", parent: "Fixed Assets" },
+        { name: "Indirect Expenses", parent: " Primary" },
+      ],
+      trialBalance: async (_c: unknown, asOn: string) => ({
+        totalDebit: 0, totalCredit: 0,
+        rows: asOn === "20250331"
+          ? [{ name: "Tractor Tanker A/c", parent: "Block 15%", balance: 0 }]
+          : [{ name: "Tractor Tanker A/c", parent: "Block 15%", balance: 380000 }],
+      }),
+      ledgerVoucherRows: async (_c: unknown, ledger: string) => {
+        calls.push(ledger);
+        return { rows: [], dropped: 0 };
+      },
+    } as never),
+    EMPTY_OVERRIDES,
+    EMPTY_WRONG_GROUP,
+  );
+  return { session, dayBook };
+}
+
+describe("depreciationReview day-book path", () => {
+  it("counts two same-day same-amount purchases as two additions", async () => {
+    const calls: string[] = [];
+    const { session, dayBook } = depDayBookFixture(calls);
+    const r = await session.depreciationReview(undefined, "20250401", "20260331", null, dayBook);
+    const asset = r.assets.find((a) => a.ledger.startsWith("Ledger "));
+    expect(calls).toHaveLength(0); // the live Ledger-Vouchers report is not read
+    expect(asset?.additionsFull).toBeCloseTo(380000, 2);
+  });
+});
+
+/**
  * FA register fixture. One vehicle acquisition ("Tipper Lorry 3" under
  * Block 30%) from "Safe Motors", its insurance expensed in "Insurance
  * Expenses", an unmatched disposal signal, and an unsettled vendor.
