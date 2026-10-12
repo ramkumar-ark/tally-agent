@@ -25,6 +25,13 @@ import type { Clause21bBookRow, TdsLiability } from "./tds.js";
 /** The four characters of a PAN that decide company status, per the PAN shape. */
 const PAN_SHAPE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 
+/**
+ * Refusal raised when the cached review has no critical findings. The
+ * workflow step matches on it to complete as done (nothing payable), so the
+ * wording lives here once and is never retyped at the call site.
+ */
+export const NOTHING_PAYABLE_MESSAGE = "this review has no critical findings: there is nothing to pay";
+
 /** What a critical finding needs the operator to decide on it. */
 export interface TdsPayableFinding {
   id: string;
@@ -392,7 +399,7 @@ export function buildStatement(args: {
     throw new Error("the review period end must be written YYYYMMDD");
   }
   if (candidates.length === 0) {
-    throw new Error("this review has no critical findings: there is nothing to pay");
+    throw new Error(NOTHING_PAYABLE_MESSAGE);
   }
   const deductionDateOf = (id: string): string => {
     const entered = args.deductionDates?.get(id);

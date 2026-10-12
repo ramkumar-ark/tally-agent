@@ -10,6 +10,7 @@ import { EMPTY_OVERRIDES } from "../src/classify.js";
 import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { registerWorkflowTools } from "../src/workflow.js";
 import { newManifest, saveManifest, type WorkflowInputEntry, type WorkflowManifest, type WorkflowPass } from "../src/workflow-state.js";
+import { NOTHING_PAYABLE_MESSAGE } from "../src/tds-payable.js";
 
 const sha256 = (data: string | Buffer): string => createHash("sha256").update(data).digest("hex");
 
@@ -444,5 +445,74 @@ describe("tb_audit_workflow_run", () => {
     });
     await h.run({ workflowId: "wf-test" });
     await expect(h.run({ workflowId: "wf-test", step: "as26" })).rejects.toThrow(/recorded: needs-input/);
+  });
+});
+
+describe("tds_payable with no critical findings", () => {
+  // The engine refuses a statement for a review with nothing critical; the
+  // step must read that as "nothing payable" (done), never as a failure.
+  const zeroReview = () => {
+    const h = harness();
+    h.setFake("tb_tds_review", reviewer([]));
+    h.setFake("tb_tds_payable_statement", async () => {
+      throw new Error(NOTHING_PAYABLE_MESSAGE);
+    });
+    return h;
+  };
+  const DECISIONS_INPUT = {
+    payableDecisions: { file: "tds-payable-decisions.xlsx", content: "empty decisions", status: "accepted" },
+  };
+
+  it("completes as done on a first run, leaving no decisions workbook to accept", async () => {
+    const h = zeroReview();
+    h.setFake("tb_write_tds_payable_decisions", async (args) => {
+      await mkdir(args.outDir, { recursive: true });
+      const p = join(args.outDir, "tds-payable-decisions-zero.xlsx");
+      await writeFile(p, "empty", "utf8");
+      return JSON.stringify({ templatePath: p, critical: 0 });
+    });
+    const wfDir = await h.makeWorkflow({ selectedSteps: ["tds_payable"], inputs: { ...TDS_INPUTS } });
+
+    const r = await h.run({ workflowId: "wf-test", step: "tds_payable" });
+
+    expect(r.step.status).toBe("done");
+    expect(r.step.error).toBeUndefined();
+    expect(r.step.notes.join(" ")).toMatch(/nothing payable: the TDS review has no critical findings/);
+    expect(h.used("tb_tds_payable_statement")).toBe(false);
+    expect(readdirSync(join(wfDir, "to-fill"))).toEqual([]);
+  });
+
+  it("completes as done when the accepted empty workbook reaches the statement", async () => {
+    const h = zeroReview();
+    h.setFake("tb_write_tds_payable_decisions", async () => {
+      throw new Error("must not regenerate: an accepted workbook is already an input");
+    });
+    await h.makeWorkflow({
+      selectedSteps: ["tds_payable"],
+      inputs: { ...TDS_INPUTS, ...DECISIONS_INPUT },
+    });
+
+    const r = await h.run({ workflowId: "wf-test", step: "tds_payable" });
+
+    expect(r.step.status).toBe("done");
+    expect(r.step.error).toBeUndefined();
+    expect(r.step.notes.join(" ")).toMatch(/nothing payable/);
+    expect(h.used("tb_tds_payable_statement")).toBe(true);
+    // no payable statement is written for a run with nothing payable
+    expect(readdirSync(r.passDir, { recursive: true }).map(String).filter((f) => /payable-statement/i.test(f))).toEqual([]);
+  });
+
+  it("still fails on a real statement fault, so the zero-critical match is not a catch-all", async () => {
+    const h = harness();
+    h.setFake("tb_tds_review", reviewer(["critical"]));
+    h.setFake("tb_tds_payable_statement", async () => {
+      throw new Error("workbook is from another run");
+    });
+    await h.makeWorkflow({ selectedSteps: ["tds_payable"], inputs: { ...TDS_INPUTS, ...DECISIONS_INPUT } });
+
+    const r = await h.run({ workflowId: "wf-test", step: "tds_payable" });
+
+    expect(r.step.status).toBe("failed");
+    expect(r.step.error).toMatch(/another run/);
   });
 });

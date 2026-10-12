@@ -47,6 +47,7 @@ import {
   type WorkflowCsvFinding,
 } from "./workflow-package.js";
 import type { StepCtx } from "./workflow-registry.js";
+import { NOTHING_PAYABLE_MESSAGE } from "./tds-payable.js";
 
 /**
  * The tax-audit workflow tools: tb_audit_workflow_start,
@@ -488,6 +489,10 @@ async function writeArtifacts(
 }
 
 /** The derived `latest/` folder: real copies (the captain opens them from Windows), never symlinks. */
+/** The tds_payable step's note when the TDS review has no critical findings. */
+const NOTHING_PAYABLE_NOTE =
+  "nothing payable: the TDS review has no critical findings, so no payable statement was written";
+
 const LATEST_DIR = "latest";
 const LATEST_STAGING = "latest.build";
 const LATEST_OLD = "latest.old";
@@ -1081,6 +1086,27 @@ export function registerWorkflowTools(
     }
 
     if (step.custom === "tds_payable") {
+      // The statement prices the cached run's critical findings, so the TDS
+      // review it reads has to be this process's (the decisions workbook is
+      // bound to that run's identity and would be refused otherwise). It runs
+      // before the workbook check too: a first run needs the review to know
+      // whether there is anything to decide at all.
+      const tdsFp = fingerprint(stepById("tds")!, m);
+      if (tdsCache.get(m.workflowId) !== tdsFp) {
+        await ctx.call("tb_tds_review", {
+          fromDate: m.params.fromDate,
+          toDate: m.params.toDate,
+          asOnDate: m.params.asOnDate,
+          company: m.params.company,
+          templatePath: m.inputs.tdsTemplate?.path,
+          winmanPath: m.inputs.winmanTdsSummary?.path,
+          dayBookPath: m.inputs.dayBook?.path,
+        });
+        tdsCache.set(m.workflowId, tdsFp);
+        state.notes = [...(state.notes ?? []), "re-ran tb_tds_review (no fresh cache this process)"];
+      } else {
+        state.notes = [...(state.notes ?? []), "reused this process's TDS review"];
+      }
       const entry = m.inputs.payableDecisions;
       const usable =
         !!entry?.path && (await exists(entry.path)) && entry.status !== "generated-unfilled";
@@ -1090,7 +1116,19 @@ export function registerWorkflowTools(
             company: m.params.company,
             outDir: toFillDir,
           });
-          const { templatePath } = JSON.parse(raw) as { templatePath: string };
+          const { templatePath, critical } = JSON.parse(raw) as {
+            templatePath: string;
+            critical?: number;
+          };
+          if (critical === 0) {
+            // Nothing to decide, so the empty workbook is not an input to wait
+            // for: drop the file just written and complete the step.
+            await rm(templatePath, { force: true });
+            state.notes = [...(state.notes ?? []), NOTHING_PAYABLE_NOTE];
+            markStop("done");
+            await saveManifest(wfDir, m);
+            return state;
+          }
           const digest = sha256(await readFile(templatePath));
           entry.path = templatePath;
           entry.source = "generated";
@@ -1109,25 +1147,6 @@ export function registerWorkflowTools(
         await saveManifest(wfDir, m);
         return state;
       }
-      // The statement prices the cached run's critical findings, so the TDS
-      // review it reads has to be this process's (the decisions workbook is
-      // bound to that run's identity and would be refused otherwise).
-      const tdsFp = fingerprint(stepById("tds")!, m);
-      if (tdsCache.get(m.workflowId) !== tdsFp) {
-        await ctx.call("tb_tds_review", {
-          fromDate: m.params.fromDate,
-          toDate: m.params.toDate,
-          asOnDate: m.params.asOnDate,
-          company: m.params.company,
-          templatePath: m.inputs.tdsTemplate?.path,
-          winmanPath: m.inputs.winmanTdsSummary?.path,
-          dayBookPath: m.inputs.dayBook?.path,
-        });
-        tdsCache.set(m.workflowId, tdsFp);
-        state.notes = [...(state.notes ?? []), "re-ran tb_tds_review (no fresh cache this process)"];
-      } else {
-        state.notes = [...(state.notes ?? []), "reused this process's TDS review"];
-      }
       // The payment date is the workflow's as-on date: the statement is priced
       // to the day the audit is as at, and a later run re-prices it.
       const toolArgs = {
@@ -1141,6 +1160,14 @@ export function registerWorkflowTools(
         statement = JSON.parse(await ctx.call("tb_tds_payable_statement", toolArgs));
       } catch (e) {
         const msg = errMsg(e);
+        // A review with no critical findings has nothing to pay: the statement
+        // is not written and the step is complete, not failed.
+        if (msg.includes(NOTHING_PAYABLE_MESSAGE)) {
+          state.notes = [...(state.notes ?? []), NOTHING_PAYABLE_NOTE];
+          markStop("done");
+          await saveManifest(wfDir, m);
+          return state;
+        }
         // An undecided critical finding is the operator's next action, not a
         // failure: the workbook is on disk and waiting for a decision. Every
         // other fault (a workbook from another run, a bad Decision cell) is a
