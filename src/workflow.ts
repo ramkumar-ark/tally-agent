@@ -48,6 +48,8 @@ import {
 } from "./workflow-package.js";
 import type { StepCtx } from "./workflow-registry.js";
 import { NOTHING_PAYABLE_MESSAGE } from "./tds-payable.js";
+import { unclassifiedWorksheetRows } from "./gst44-worksheet-read.js";
+import { findingId } from "./types.js";
 
 /**
  * The tax-audit workflow tools: tb_audit_workflow_start,
@@ -990,12 +992,30 @@ export function registerWorkflowTools(
         return state;
       }
       const sheetCopy = await copyNoClobber(entry.path, stepDir);
-      let findings: WorkflowCsvFinding[] = [];
+      // Every finding except the unclassified ones comes from generation time
+      // (prior-year changes, rule conflicts). The unclassified ones are read
+      // from the sheet being packaged, so a row the operator has since filled
+      // stops being listed and a row cleared again reappears.
+      let cached: WorkflowCsvFinding[] = [];
       try {
-        findings = JSON.parse(state.gstWorksheetFindings ?? "[]") as WorkflowCsvFinding[];
+        cached = JSON.parse(state.gstWorksheetFindings ?? "[]") as WorkflowCsvFinding[];
       } catch {
-        findings = [];
+        cached = [];
       }
+      const findings: WorkflowCsvFinding[] = cached.filter((f) => f.check !== "gst44_ws_unclassified");
+      const blankRows = unclassifiedWorksheetRows(await readFile(entry.path));
+      blankRows.forEach((row, i) => {
+        findings.push({
+          id: findingId("gst44_ws_unclassified", i + 1),
+          check: "gst44_ws_unclassified",
+          severity: "review",
+          // Pseudonymised like every finding the tool returns; the CSV
+          // de-masks it through the session vault.
+          ledger: session.vault.pseudonym(row.ledger, "other"),
+          amount: Math.abs(row.amount),
+          detail: `matched no treatment rule and stays blank — fill its break-up columns before approval`,
+        });
+      });
       const csvPath = join(stepDir, "gst-working-sheet-findings.csv");
       await writeTextFile(csvPath, workflowFindingsCsv(findings, session.vault));
       state.findings = countFindings({ findings });

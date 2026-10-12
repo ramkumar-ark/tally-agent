@@ -848,21 +848,19 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `src/gst44-worksheet-template.ts` (writer); tool `tb_write_gst_working_sheet`;
   findings TB-028/029/030 (ordinals 28–30 after the merge: 19–27 are the
   concurrent loans lane; TDS-table-only numbering).
-- **Column B (captain 2026-09-26h): REVENUE is the ledger's net FY movement
-  (debits minus credits); CAPITAL is the debit total (additions only).** The
-  26e fix had made the walk debit-only throughout (`if (e.amount <= 0) continue`),
-  which left a real mismatch: the REVENUE "As per books" total was
-  ₹72,12,02,418.73 against Tally's purchase + direct + indirect expense total
-  ₹71,46,12,343.70 — the entire ₹65,90,075.03 difference was the credit side
-  (returns, discounts, credit notes) of 19 three-root ledgers that debit-only
-  column B dropped. Revenue now accumulates signed entries into `amount` and
-  every treatment pot, so B and the buckets tie Tally to the paisa (modulo
-  Tally's own aggregate rounding). Capital still skips credits: a year-end
-  depreciation credit is the annual charge, not a reversal of an addition
-  (netting it produced a negative capital sheet, −₹27.8 lakh, on the first real
-  run), so capital's `amount` stays a debit sum and the 26e zero-row drop still
-  holds. The Phase-A analysis doc's "≈₹3.16 cr" capital figure is the abs-sum of
-  both sides, not the debit total.
+- **Column B (captain 2026-09-26h, capital amended 2026-10-13): both sides are the
+  ledger's net FY movement (debits minus credits).** The 26e fix had made the walk
+  debit-only (`if (e.amount <= 0) continue`), leaving the REVENUE "As per books" total
+  ₹65,90,075.03 short of Tally's expense total: the credit side (returns, discounts,
+  credit notes) of 19 three-root ledgers. Revenue and capital now both accumulate
+  signed entries. The one exception is a **depreciation credit**: a voucher that debits
+  an expense ledger matching `/deprecia/i` under an expense root (`DEPRECIATION_NAME`,
+  `EXPENSE_ROOTS` in `src/gst44-worksheet.ts`) credits the asset as the annual charge,
+  not a reversal of an addition, so it never nets capital (netting it once produced a
+  −₹27.8 lakh capital sheet). Every other credit on an asset ledger nets it, including
+  disposal and discount credits. Capital therefore no longer ties to the Fixed Assets
+  closing balance by design. The Phase-A doc's "≈₹3.16 cr" capital figure is the
+  abs-sum of both sides, not the debit total.
 - The FY 25-26 day book's group parents arrive **HTML-escaped** in the raw
   export (`"&#4; Primary"` for the root-of-primaries control char); the gateway
   reader de-escapes. Any direct raw-JSON probe must account for that.

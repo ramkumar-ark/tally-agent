@@ -4,6 +4,7 @@ import { readWorkbook } from "../src/xlsx-read.js";
 import { zipEntries } from "../src/xlsx-read.js";
 import { GST44_TREATMENT_RULES } from "../src/gst44-treatments.js";
 import type { WsLedgerRow } from "../src/gst44-worksheet.js";
+import { unclassifiedWorksheetRows } from "../src/gst44-worksheet-read.js";
 
 const seededRow = (ledger: string, amount: number): WsLedgerRow => ({
   ledger,
@@ -137,5 +138,35 @@ describe("buildGstWorksheet", () => {
     expect(fyLabel("20260331")).toBe("FY 25-26");
     expect(fyLabel("20250331")).toBe("FY 24-25");
     expect(fyLabel("20240401")).toBe("FY 24-25");
+  });
+});
+
+describe("unclassifiedWorksheetRows (refresh from the sheet itself)", () => {
+  const capitalBlank = blankRow("JCB Purchased", 450000);
+  const capitalSeeded: WsLedgerRow = { ...seededRow("Petrol Vibrator", 1200), rowKey: "capital" };
+
+  it("returns only the blank rows of the sheet as it stands", () => {
+    const buf = buildGstWorksheet({
+      period: "FY 25-26",
+      revenueRows: [seededRow("Fuel Expenses - 18%", 12345.67), blankRow("Mystery Ledger", 700)],
+      capitalRows: [capitalSeeded, capitalBlank],
+      rules: GST44_TREATMENT_RULES,
+      priorYearUsed: false,
+    });
+    expect(unclassifiedWorksheetRows(buf)).toEqual([
+      { sheet: "capital", ledger: "JCB Purchased", amount: 450000 },
+      { sheet: "revenue", ledger: "Mystery Ledger", amount: 700 },
+    ]);
+  });
+
+  it("a fully classified sheet yields no unclassified rows", () => {
+    const buf = buildGstWorksheet({
+      period: "FY 25-26",
+      revenueRows: [seededRow("Fuel Expenses - 18%", 12345.67)],
+      capitalRows: [capitalSeeded],
+      rules: GST44_TREATMENT_RULES,
+      priorYearUsed: false,
+    });
+    expect(unclassifiedWorksheetRows(buf)).toEqual([]);
   });
 });

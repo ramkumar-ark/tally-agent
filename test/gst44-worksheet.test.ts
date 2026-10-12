@@ -27,6 +27,7 @@ const groupOf: Record<string, string> = {
   "Site Work - 0%": "Indirect Expenses",
   "Electricity Charges Paid": "Electricity Charges",
   "JCB Purchased": "Fixed Assets",
+  "Depreciation A/c": "Indirect Expenses",
   "Petrol Vibrator - Greaves": "Fixed Assets",
   "Input IGST A/c": "Input GST",
   "Nova Traders": "Sundry Creditors",
@@ -297,6 +298,35 @@ describe("gst44Worksheet net FY semantics (captain 2026-09-26h)", () => {
     const row = r.revenue.find((x) => x.ledger === "Site Materials")!;
     expect(row.amount).toBe(48750);
     expect(row.seed).toMatchObject({ h: 48750, treatment: "unregistered", kind: "party evidence" });
+  });
+
+  it("a non-depreciation credit on a capital ledger nets the capital row (asset disposal or discount)", () => {
+    // A 5,00,000 purchase later reduced by a 50,000 supplier discount credit
+    // on the same asset ledger: capital B is the net 4,50,000.
+    const r = gst44Worksheet(
+      [
+        taxedBuy("JCB Purchased", 500000),
+        v("Nova Traders", [["JCB Purchased", -50000], ["Nova Traders", 50000]]),
+      ],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      base,
+    );
+    const row = r.capital.find((x) => x.ledger === "JCB Purchased")!;
+    expect(row.amount).toBe(450000);
+  });
+
+  it("a depreciation journal's asset credit does not net the capital row", () => {
+    // The annual depreciation charge credits the asset; the addition stays whole.
+    const r = gst44Worksheet(
+      [
+        taxedBuy("JCB Purchased", 500000),
+        v(null, [["JCB Purchased", -90000], ["Depreciation A/c", 90000]]),
+      ],
+      ctxOf({ "Nova Traders": GSTIN_REG }),
+      base,
+    );
+    const row = r.capital.find((x) => x.ledger === "JCB Purchased")!;
+    expect(row.amount).toBe(500000);
   });
 
   it("a capital ledger with only depreciation credits is dropped from the capital sheet", () => {

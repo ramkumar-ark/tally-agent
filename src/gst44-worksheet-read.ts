@@ -95,3 +95,49 @@ export function readWorksheetTotals(buf: Buffer): Gst44Row[] {
     sumSheet(sheetRows(sheets, WS_REVENUE_SHEET), "revenue"),
   ];
 }
+
+/** A working-sheet ledger row whose break-up is still blank. */
+export interface UnclassifiedWorksheetRow {
+  sheet: "capital" | "revenue";
+  /** The ledger name as the sheet shows it (real, operator-side). */
+  ledger: string;
+  /** Column B, the ledger's signed net for the period. */
+  amount: number;
+}
+
+/** Break-up columns D..J (0-based 3..9): the operator's fills and the formulas. */
+const FIRST_BREAKUP_COL = 3;
+const LAST_BREAKUP_COL = 9;
+
+/**
+ * The rows of an approved working-sheet buffer that still carry no break-up:
+ * no value in any of D..J. A seeded row always has literal D/E/H/J and cached
+ * formulas in F/G/I, and a filled row has at least one value there, so this
+ * reads what the operator has actually done to the sheet as it stands — never
+ * the generation-time findings.
+ */
+export function unclassifiedWorksheetRows(buf: Buffer): UnclassifiedWorksheetRow[] {
+  const sheets = readWorkbook(buf);
+  const out: UnclassifiedWorksheetRow[] = [];
+  for (const [sheet, name] of [
+    ["capital", WS_CAPITAL_SHEET],
+    ["revenue", WS_REVENUE_SHEET],
+  ] as const) {
+    const rows = sheetRows(sheets, name);
+    const totalRow = rows.find((r) => r.cells.get(0)?.value === "TOTAL")?.row;
+    for (const r of rows) {
+      if (r.row < FIRST_DATA_ROW || (totalRow !== undefined && r.row >= totalRow)) continue;
+      const ledger = r.cells.get(0)?.value;
+      if (typeof ledger !== "string" || ledger.trim() === "") continue;
+      const amount = num(r, COL_AMOUNT);
+      if (Math.abs(amount) < 0.005) continue;
+      let filled = false;
+      for (let c = FIRST_BREAKUP_COL; c <= LAST_BREAKUP_COL && !filled; c += 1) {
+        const v = r.cells.get(c)?.value;
+        filled = v !== undefined && v !== null && v !== "";
+      }
+      if (!filled) out.push({ sheet, ledger, amount: round2(amount) });
+    }
+  }
+  return out;
+}

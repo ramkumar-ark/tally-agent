@@ -11,6 +11,35 @@ import { fakeDownstream } from "./fixtures/downstream-fake.js";
 import { registerWorkflowTools } from "../src/workflow.js";
 import { newManifest, saveManifest, type WorkflowInputEntry, type WorkflowManifest, type WorkflowPass } from "../src/workflow-state.js";
 import { NOTHING_PAYABLE_MESSAGE } from "../src/tds-payable.js";
+import { buildGstWorksheet } from "../src/gst44-worksheet-template.js";
+import { GST44_TREATMENT_RULES } from "../src/gst44-treatments.js";
+import type { WsLedgerRow } from "../src/gst44-worksheet.js";
+
+const LEDGER_ROW = (ledger: string, amount: number, seeded: boolean): WsLedgerRow => ({
+  ledger,
+  group: "Indirect Expenses",
+  rowKey: "revenue",
+  amount,
+  seed: seeded
+    ? { d: 0, e: 0, h: 0, j: 0, treatment: "others", kind: "party evidence", reason: "party GSTIN evidence: registered purchase" }
+    : null,
+});
+const sheetWithBlankRow = (): Buffer =>
+  buildGstWorksheet({
+    period: "FY 25-26",
+    revenueRows: [LEDGER_ROW("Fuel Expenses - 18%", 12345.67, true), LEDGER_ROW("Mystery Ledger", 700, false)],
+    capitalRows: [],
+    rules: GST44_TREATMENT_RULES,
+    priorYearUsed: false,
+  });
+const sheetFullyFilled = (): Buffer =>
+  buildGstWorksheet({
+    period: "FY 25-26",
+    revenueRows: [LEDGER_ROW("Fuel Expenses - 18%", 12345.67, true), LEDGER_ROW("Mystery Ledger", 700, true)],
+    capitalRows: [],
+    rules: GST44_TREATMENT_RULES,
+    priorYearUsed: false,
+  });
 
 const sha256 = (data: string | Buffer): string => createHash("sha256").update(data).digest("hex");
 
@@ -29,7 +58,7 @@ interface Harness {
   setFake(tool: string, handler: (args: any) => Promise<string>): void;
   makeWorkflow(opts: {
     selectedSteps: string[];
-    inputs?: Record<string, Partial<WorkflowInputEntry> & { file?: string; content?: string }>;
+    inputs?: Record<string, Partial<WorkflowInputEntry> & { file?: string; content?: string | Buffer }>;
     steps?: Record<string, object>;
     passes?: WorkflowPass[];
   }): Promise<string>;
@@ -64,7 +93,7 @@ function harness(): Harness {
     passes = [],
   }: {
     selectedSteps: string[];
-    inputs?: Record<string, Partial<WorkflowInputEntry> & { file?: string; content?: string }>;
+    inputs?: Record<string, Partial<WorkflowInputEntry> & { file?: string; content?: string | Buffer }>;
     steps?: Record<string, object>;
     passes?: WorkflowPass[];
   }): Promise<string> => {
@@ -260,10 +289,16 @@ describe("tb_audit_workflow_run", () => {
 
   it("packages the generated working sheet and awaits approval", async () => {
     const h = harness();
-    const findings = [{ id: "WS-1", check: "ws_rule_conflict", severity: "warning", ledger: "Ledger 1", amount: null, detail: "check the rule" }];
+    const findings = [
+      { id: "WS-1", check: "ws_rule_conflict", severity: "warning", ledger: "Ledger 1", amount: null, detail: "check the rule" },
+      { id: "WS-2", check: "gst44_ws_unclassified", severity: "review", ledger: "Stale Ledger", amount: 9, detail: "stale" },
+    ];
     await h.makeWorkflow({
       selectedSteps: ["gst_working_sheet"],
-      inputs: { dayBook: { file: "d.json", content: "{}" }, gstWorkingSheet: { file: "sheet.xlsx", content: "SHEET" } },
+      inputs: {
+        dayBook: { file: "d.json", content: "{}" },
+        gstWorkingSheet: { file: "sheet.xlsx", content: sheetWithBlankRow() },
+      },
       steps: { gst_working_sheet: { gstWorksheetFindings: JSON.stringify(findings) } },
     });
     const r = await h.run({ workflowId: "wf-test" });
@@ -271,7 +306,28 @@ describe("tb_audit_workflow_run", () => {
     expect(r.step.notes).toEqual(["awaiting approval"]);
     expect(r.step.outputs).toHaveLength(2);
     const csv = r.step.outputs.find((o: string) => o.endsWith(".csv"));
-    expect(readFileSync(csv, "utf8")).toContain("ws_rule_conflict");
+    const text = readFileSync(csv, "utf8");
+    expect(text).toContain("ws_rule_conflict");
+    expect(text).toContain("Mystery Ledger");
+    expect(text).not.toContain("Stale Ledger");
+  });
+
+  it("a sheet filled since generation lists no unclassified rows, even with a stale cache", async () => {
+    const h = harness();
+    const stale = [{ id: "WS-9", check: "gst44_ws_unclassified", severity: "review", ledger: "Mystery Ledger", amount: 700, detail: "stale" }];
+    await h.makeWorkflow({
+      selectedSteps: ["gst_working_sheet"],
+      inputs: {
+        dayBook: { file: "d.json", content: "{}" },
+        gstWorkingSheet: { file: "sheet.xlsx", content: sheetFullyFilled() },
+      },
+      steps: { gst_working_sheet: { gstWorksheetFindings: JSON.stringify(stale) } },
+    });
+    const r = await h.run({ workflowId: "wf-test" });
+    expect(r.step.status).toBe("done");
+    const csv = r.step.outputs.find((o: string) => o.endsWith(".csv"));
+    expect(readFileSync(csv, "utf8")).not.toContain("gst44_ws_unclassified");
+    expect(r.step.findings).toMatchObject({ critical: 0, warning: 0, review: 0 });
   });
 
   it("notds without a template generates it into to-fill and ends needs-input", async () => {

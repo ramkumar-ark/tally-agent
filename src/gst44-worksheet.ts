@@ -149,6 +149,15 @@ interface Acc {
 
 const emptyPots = () => ({ others: 0, exempt: 0, unregistered: 0, unknown: 0 });
 
+/**
+ * A book depreciation charge: a debit on an expense ledger named for
+ * depreciation (same signal as the depreciation review's DEP_EXPENSE_NAME and
+ * DEP_EXPENSE_ROOTS). The year-end journal credits the asset ledgers; those
+ * credits are the charge, not a reduction of what was paid for the asset.
+ */
+const DEPRECIATION_NAME = /deprecia/i;
+const EXPENSE_ROOTS = new Set(["indirect expenses", "direct expenses", "expenses (indirect)", "expenses (direct)"]);
+
 export function gst44Worksheet(
   vouchers: VoucherRow[],
   ctx: GstCtx,
@@ -207,6 +216,14 @@ export function gst44Worksheet(
         taxCharged = true;
       }
     }
+    // A depreciation journal is any voucher debiting a depreciation expense
+    // ledger; its asset credits are the annual charge (see the CAPITAL rule).
+    const depreciationVoucher = v.entries.some(
+      (e) =>
+        e.amount > 0 &&
+        DEPRECIATION_NAME.test(e.ledger) &&
+        EXPENSE_ROOTS.has(canonicalKey(ctx.rootOf(ctx.groupOf(e.ledger)) ?? "")),
+    );
     const partyGstin = party ? ctx.gstinOf(party) : null;
     const partyKnown = party ? masters.has(canonicalKey(party)) : false;
     for (const e of v.entries) {
@@ -218,10 +235,13 @@ export function gst44Worksheet(
       // (captain 2026-09-26h, superseding design §4.1-B's debit-only column
       // B): purchase returns, discounts and credit notes legitimately net down
       // expenditure, so the "As per books" total ties Tally's P&L group total.
-      // CAPITAL stays debit-only: a year-end depreciation credit is the annual
-      // charge, not a reversal of the asset's addition, so it must not reduce
+      // CAPITAL nets its credits too (captain 2026-10-13: a purchase discount
+      // or a credit against the supplier reduces the asset's cost, so
+      // "As per books" carries it), EXCEPT a depreciation credit: a credit on
+      // an asset ledger in a voucher that debits a depreciation ledger is the
+      // annual charge, not a reversal of the addition, so it must not reduce
       // capital expenditure (this also keeps the 26e zero-row fix meaningful).
-      if (rowKey === "capital" && e.amount <= 0) continue;
+      if (rowKey === "capital" && (e.amount === 0 || (e.amount < 0 && depreciationVoucher))) continue;
       acc.amount += e.amount;
       if (!party) {
         acc.noParty += e.amount;
@@ -445,9 +465,10 @@ export function gst44Worksheet(
     .filter((acc) => acc.rowKey === rowKey)
     // Year-end depreciation journals credit ~130 asset ledgers without ever
     // debiting them, which seeded a page of zero-balance capital rows (26e).
-    // Capital's `amount` is still its debit total (additions), so a row with
-    // no addition is dropped; revenue keeps every row, including a negative
-    // net (a ledger whose credits exceeded its debits), to tie Tally.
+    // Capital's `amount` is its net of non-depreciation credits, so a row
+    // whose additions are fully credited back nets to zero and is dropped;
+    // revenue keeps every row, including a negative net (a ledger whose
+    // credits exceeded its debits), to tie Tally.
     .filter((acc) => rowKey !== "capital" || Math.abs(acc.amount) > ZERO)
     .map((acc): WsLedgerRow => ({
       ledger: acc.ledger,
