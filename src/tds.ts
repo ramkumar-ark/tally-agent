@@ -1893,6 +1893,43 @@ export function analyzeTds(
     }
 
     if (section !== "194Q" && !timingOnlySection(section)) {
+      for (const row of plan) {
+        // A booking never draws from the pool a rupee its OWN credit put there:
+        // that credit already covers this booking's base, so its excess belongs
+        // to OTHER bookings. The captain's case: the 4,354 deducted on 16-Oct
+        // covers the 15-Oct bill's own 1,115.28 and leaves 3,238.72 for the
+        // 26-Dec bill — without this guard the forward pass would hand 1,115.28
+        // of that excess straight back to the bill that produced it and report
+        // 1,114.90 on a party that paid everything (inbox 015, still true in
+        // v10's order-of-operations terms).
+        if (row.ownTax >= row.base) continue;
+        let want = row.liability;
+        let fromBank = 0;
+        for (const e of pool) {
+          if (want <= ZERO) break;
+          if (e.remaining <= ZERO) continue;
+          // An ADVANCE — the credit predates the bill — is the only thing this
+          // direction is for. A credit dated after the bill settles it
+          // BACKWARD, with s.201(1A)(i) interest (the pass above); taking it
+          // here instead would discharge the bill silently.
+          if (e.date > row.b.date) continue;
+          const taken = round2(Math.min(e.remaining, want));
+          e.remaining = round2(e.remaining - taken);
+          want = round2(want - taken);
+          fromBank = round2(fromBank + taken);
+        }
+        // Only what this pass actually took from the pool reduces the
+        // liability; the backward cover (below) stays in it, so the shortfall
+        // it leaves is still reported (inbox 018).
+        row.liability = round2(row.liability - fromBank);
+      }
+      // Advances first, then credits that settle from behind: a credit that
+      // predates a bill is that bill's own cover (the forward bank), so the
+      // backward pass may spend only what is still unpaid after it. Run the
+      // other way round (2026-10-13), a month-end credit settled rupees of an
+      // earlier bill that the forward bank was about to cover, and the later
+      // bill it really belonged to was reported not deducted. The pool is one
+      // pot: a rupee spent in one direction is never spent in the other.
       // Oldest credit first: a party that overpaid in June should not have a
       // December bill settled before an October one.
       const byDate = [...pool].sort(
@@ -1911,40 +1948,6 @@ export function analyzeTds(
           unpaid = round2(unpaid - taken);
           row.backs.push({ ded: e.ded, tax: taken });
         }
-      }
-      for (const row of plan) {
-        // A booking never draws from the pool a rupee its OWN credit put there:
-        // that credit already covers this booking's base, so its excess belongs
-        // to OTHER bookings. The captain's case: the 4,354 deducted on 16-Oct
-        // covers the 15-Oct bill's own 1,115.28 and leaves 3,238.72 for the
-        // 26-Dec bill — without this guard the forward pass would hand 1,115.28
-        // of that excess straight back to the bill that produced it and report
-        // 1,114.90 on a party that paid everything (inbox 015, still true in
-        // v10's order-of-operations terms).
-        if (row.ownTax >= row.base) continue;
-        // Only what the backward pass did NOT already settle: the pool is one
-        // pot, and a rupee it gave this booking above can never be spent on it
-        // twice (the captain's 194-C fixture left 9.00 of a 2,750 payment over
-        // and the first bill was shorted by exactly that 9.00).
-        let want = round2(row.liability - row.backs.reduce((t, c) => t + c.tax, 0));
-        let fromBank = 0;
-        for (const e of pool) {
-          if (want <= ZERO) break;
-          if (e.remaining <= ZERO) continue;
-          // An ADVANCE — the credit predates the bill — is the only thing this
-          // direction is for. A credit dated after the bill settles it
-          // BACKWARD, with s.201(1A)(i) interest (the pass above); taking it
-          // here instead would discharge the bill silently.
-          if (e.date > row.b.date) continue;
-          const taken = round2(Math.min(e.remaining, want));
-          e.remaining = round2(e.remaining - taken);
-          want = round2(want - taken);
-          fromBank = round2(fromBank + taken);
-        }
-        // Only what this pass actually took from the pool reduces the
-        // liability; the backward cover stays in it, so the shortfall it leaves
-        // is still reported (inbox 018).
-        row.liability = round2(row.liability - fromBank);
       }
     }
 

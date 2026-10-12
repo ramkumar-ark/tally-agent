@@ -1025,6 +1025,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - A duty credit that joins no booking (a 31-Mar journal outside the join window, or one that lost its bill to another credit) used to be invisible: earlier bills read "not deducted" and a covering challan raised no deposit row. `analyzeTds` (`src/tds.ts`) now pools such credits (same deductee+section, non-194Q, non-timing-only, no shares) for backward settlement and sweeps post-walk for `tds_late_deposit` on any challan-covered credit no booking reported (`depositReported`). `claimShares` matches the one challan whose rows sum to the credit — a deductee can hold rows of several challans for the same deduction month.
 - A workflow pass folder is only created when the last pass has `closedAt`; the `to-fill` notds/payable files are reused by name, so regenerating means moving them aside first.
 
+## Sharp edges found on advance-vs-backward credit order (2026-10-13)
+
+- In `analyzeTds` pass 2 the **forward bank (advances) is spent before the backward
+  settlement**, and the backward pass reads `unpaid = liability - ownTax` after it. The
+  old order let a month-end credit settle rupees of an earlier crossing bill that an
+  advance (a pre-limit bill's over-deduction) was about to cover, over-covering that bill
+  and leaving the later bill it belonged to reported not deducted
+  (`test/tds-advance-before-backward.test.ts`). The pool is one pot; never spend a rupee in both directions.
+- A deductee's rate comes from the PAN's 4th character, and an operator template with no
+  PAN takes it from the Winman deductee its `Winman Deductee Name` cell names — a wrong
+  Winman mapping silently changes the rate (individual 1% vs company 2% under 194C).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
