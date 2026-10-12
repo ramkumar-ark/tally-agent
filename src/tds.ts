@@ -1480,9 +1480,21 @@ export function analyzeTds(
           a.dedDate.slice(0, 6) === d.date.slice(0, 6)
         ) rows.push(i);
       });
-      const sum = round2(rows.reduce((t, i) => t + usableAllocs[i].tax, 0));
-      if (rows.length === 0 || Math.abs(sum - tax) > TDS_TOLERANCE) return false;
-      picked.push(...rows);
+      // A deductee can hold rows of SEVERAL challans for one deduction month
+      // (a later challan for another credit of the same section), so the credit
+      // takes the rows of the one challan whose sum matches its tax.
+      const byChallan = new Map<string, number[]>();
+      for (const i of rows) {
+        const k = `${usableAllocs[i].challanId}|${usableAllocs[i].depositDate}`;
+        byChallan.set(k, [...(byChallan.get(k) ?? []), i]);
+      }
+      let hit: number[] | undefined;
+      for (const group of byChallan.values()) {
+        const sum = round2(group.reduce((t, i) => t + usableAllocs[i].tax, 0));
+        if (Math.abs(sum - tax) <= TDS_TOLERANCE) { hit = group; break; }
+      }
+      if (hit === undefined) return false;
+      picked.push(...hit);
     }
     const first = usableAllocs[picked[0]];
     if (!picked.every((i) => usableAllocs[i].depositDate === first.depositDate && usableAllocs[i].challanId === first.challanId)) return false;

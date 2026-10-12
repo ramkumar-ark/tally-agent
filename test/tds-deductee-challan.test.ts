@@ -124,4 +124,17 @@ describe("deductee-level challan match (2026-10-12)", () => {
     );
     expect(events.deductions[0]!.subsequentInterestPaid).toBe(100);
   });
+
+  it("takes the one challan whose rows sum to the credit when the deductee also has another challan that month", () => {
+    const L = ledgers();
+    const { events } = analyzeTds(
+      L.duty,
+      L.expense,
+      L.party,
+      ctxWith([alloc(1500, "C1"), alloc(2500, "C1"), alloc(2750, "C2", 0, "20260615")]),
+    );
+    const d = events.deductions[0]!;
+    expect(d.subsequentChallanId).toBe("C1");
+    expect(d.subsequentDeposit).toBe("20260430");
+  });
 });
